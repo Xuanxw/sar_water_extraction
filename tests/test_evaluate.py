@@ -7,14 +7,42 @@ from unittest.mock import patch
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import evaluate
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from evaluation import model_eval as evaluate
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_histogram_scan_matches_direct_comparison_and_includes_equal_scores(self):
+        score = torch.tensor([[-2., 0., 2., -4.], [2., 2., 0., 0.]])
+        label = torch.tensor([[0, 1, 0, 1], [1, -1, 0, -1]])
+        thresholds = [.2, .5, .8]
+        actual = evaluate.threshold_counts(score, label, thresholds)
+        for i, t in enumerate(thresholds):
+            prediction = score >= torch.logit(torch.tensor(t))
+            valid = label != -1
+            expected = torch.bincount(label[valid] * 2 + prediction[valid].long(), minlength=4)
+            torch.testing.assert_close(actual[i], expected)
+        # 全忽略批次不凭空增加 TN/FP/FN/TP。
+        self.assertEqual(evaluate.threshold_counts(score, torch.full_like(label, -1), thresholds).sum().item(), 0)
+
+    def test_precision_requirement_uses_highest_recall_and_marks_unreachable(self):
+        rows = [dict(threshold=t, precision=p, recall=r, f1=.7, fp=10, fn=20, tp=30)
+                for t, p, r in ((.3, .79, .9), (.4, .86, .8), (.5, .85, .7), (.6, .91, .6))]
+        # 没有预测像素不能作为满足精确率要求的解。
+        rows.append(dict(threshold=.99, precision=1., recall=0., f1=0., fp=0, fn=50, tp=0))
+        matches = evaluate.precision_matches(rows, [.85, .90, .95])
+        self.assertEqual(matches[0]["threshold"], .4)
+        self.assertEqual(matches[1]["threshold"], .6)
+        self.assertEqual(matches[2]["status"], "unreachable")
+
     def test_known_confusion_matrix_for_binary_and_two_class_models(self):
         class Dataset(torch.utils.data.Dataset):
             def __init__(self, image_dir, label_dir, bands):
                 self.image_paths = [Path(image_dir) / "a.tif", Path(image_dir) / "b.tif"]
+
+            def select_files(self, names):
+                paths = {p.name: p for p in self.image_paths}
+                self.image_paths = [paths[name] for name in names]
 
             def __len__(self):
                 return len(self.image_paths)
@@ -47,11 +75,13 @@ class EvaluationTests(unittest.TestCase):
                      patch.object(evaluate, "load_model", return_value=Model(channels)), \
                      patch.object(torch.cuda, "is_available", return_value=False):
                     metrics = evaluate.evaluate("unused.pth")
+                    scanned = evaluate.evaluate("unused.pth", thresholds=[.2, .5, .8])
                 self.assertEqual([metrics[k] for k in ("tn", "fp", "fn", "tp")], [1, 1, 1, 2])
                 self.assertEqual(metrics["valid_pixels"], 5)
                 self.assertEqual(metrics["ignored_pixels"], 1)
                 self.assertAlmostEqual(metrics["f1"], 2 / 3)
                 self.assertAlmostEqual(metrics["iou"], 0.5)
+                self.assertEqual([scanned[1][k] for k in ("tn", "fp", "fn", "tp")], [1, 1, 1, 2])
 
 
 if __name__ == "__main__":

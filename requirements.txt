@@ -2,3 +2,6 @@ numpy
 rasterio
 torch
 timm==1.0.30
+matplotlib
+scipy
+termcolor

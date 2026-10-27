@@ -45,5 +45,6 @@ Thumbs.db
 
 src/*/_version_.py
 
-output/
+data/
+outputs/
 codex*/

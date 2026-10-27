@@ -8,6 +8,7 @@ from unittest.mock import patch
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from models.pvt import PVTUANet
 from models.pvt import UncertaintyRank
 from models.checkpoint import load_model
@@ -81,6 +82,8 @@ class UANetTests(unittest.TestCase):
 
         with TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
             with patch.object(train, "METHOD", "uanet"), patch.object(train, "STAGE", "full"), \
+                 patch.object(train, "LOSS_NAME", "ce"), \
+                 patch.object(train, "SAMPLING", "random"), \
                  patch.object(train, "OUTPUT_DIR", Path(folder)), \
                  patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 1), \
                  patch.object(train, "WaterDataset", TinyDataset), \

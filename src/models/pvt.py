@@ -12,11 +12,13 @@ from torch.nn import functional as F
 from .common import BasicConv2d, FPN, SemanticFPNDecoder
 
 
-def build_pvt_backbone(in_channels=2, pretrained=True):
+def build_pvt_backbone(in_channels=2, pretrained=True, backbone_name="pvt_v2_b2.in1k"):
     """返回步长 4/8/16/32、通道 64/128/320/512 的特征骨干。"""
+    if backbone_name not in tuple(f"pvt_v2_b{i}.in1k" for i in (2, 3, 4, 5)):
+        raise ValueError("当前解码器支持 PVT-v2 B2/B3/B4/B5，它们具有相同的四级通道数")
     # timm 负责 ImageNet 权重与输入通道适配；标准 B2 不是 B2-Li。
     return timm.create_model(
-        "pvt_v2_b2.in1k", pretrained=pretrained, in_chans=in_channels,
+        backbone_name, pretrained=pretrained, in_chans=in_channels,
         features_only=True, out_indices=(0, 1, 2, 3), drop_path_rate=0.1,
     )
 
@@ -44,20 +46,22 @@ class PVTWaterNet(nn.Module):
 class MBDC(nn.Module):
     """三分支空洞卷积，扩大感受野，并将不同尺度统一到相同通道数。"""
 
-    def __init__(self, in_channels, channels=32):
+    def __init__(self, in_channels, channels=32, dilations=((4, 8, 16), (2, 4, 8))):
         super().__init__()
+        # 两组分别是 branch1 / branch2 内三层卷积的空洞率；默认值保持历史模型。
+        rate1, rate2 = dilations
         self.branch0 = nn.Sequential(BasicConv2d(in_channels, channels, 1))
         self.branch1 = nn.Sequential(
             BasicConv2d(in_channels, channels, 1),
-            BasicConv2d(channels, channels, 3, padding=4, dilation=4),
-            BasicConv2d(channels, channels, 3, padding=8, dilation=8),
-            BasicConv2d(channels, channels, 3, padding=16, dilation=16),
+            BasicConv2d(channels, channels, 3, dilation=rate1[0]),
+            BasicConv2d(channels, channels, 3, dilation=rate1[1]),
+            BasicConv2d(channels, channels, 3, dilation=rate1[2]),
         )
         self.branch2 = nn.Sequential(
             BasicConv2d(in_channels, channels, 1),
-            BasicConv2d(channels, channels, 3, padding=2, dilation=2),
-            BasicConv2d(channels, channels, 3, padding=4, dilation=4),
-            BasicConv2d(channels, channels, 3, padding=8, dilation=8),
+            BasicConv2d(channels, channels, 3, dilation=rate2[0]),
+            BasicConv2d(channels, channels, 3, dilation=rate2[1]),
+            BasicConv2d(channels, channels, 3, dilation=rate2[2]),
         )
         self.conv_cat = BasicConv2d(channels * 3, channels, 3, padding=1)
         self.conv_res = BasicConv2d(in_channels, channels, 1)
@@ -168,11 +172,46 @@ class UAFM(nn.Module):
         return fusion, self.seg_out(fusion)
 
 
+class HighResolutionRefinement(nn.Module):
+    """在约 1/2 尺度结合 SAR 局部纹理与最终语义预测，输出全分辨率 logit 修正量。"""
+
+    def __init__(self, in_channels=2, channels=16):
+        super().__init__()
+        # 输入已经由训练/验证入口按训练集均值和标准差标准化，这里不重复归一化。
+        # 使用普通卷积和 ReLU，避免为这一小分支引入额外的 BatchNorm 统计量。
+        self.shallow = nn.Sequential(
+            nn.Conv2d(in_channels, channels, 3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.fusion = nn.Sequential(
+            nn.Conv2d(channels + 1, channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.delta = nn.Conv2d(channels, 1, 1)
+        # 初始修正量严格为 0，使新网络从原来的四头输出开始学习。
+        # 首次反向传播先更新此层，随后梯度才能传入浅层与融合卷积。
+        nn.init.zeros_(self.delta.weight)
+        nn.init.zeros_(self.delta.bias)
+
+    def forward(self, image, final_logits):
+        """输入标准化 SAR 和 1/4 尺度最终 logits；返回与原图等大的修正 logits。"""
+        detail = self.shallow(image)
+        guidance = F.interpolate(final_logits, size=detail.shape[-2:],
+                                 mode="bilinear", align_corners=True)
+        # 拼接的是 logits，而不是概率；保留梯度，使最终头损失共同训练两条路径。
+        correction = self.delta(self.fusion(torch.cat((detail, guidance), dim=1)))
+        return F.interpolate(correction, size=image.shape[-2:],
+                             mode="bilinear", align_corners=True)
+
+
 class PVTUANet(nn.Module):
     """共享 PVT 结构：双通道为 UANet，单通道为 UAFNet；最后输出用于评价。"""
 
     def __init__(self, in_channels=2, num_classes=2, decoder_channels=32,
-                 pretrained=True, stage="full"):
+                 pretrained=True, stage="full", backbone_name="pvt_v2_b2.in1k", final_residual=False,
+                 mbdc_dilations=None, high_resolution_refinement=False):
         super().__init__()
         if stage not in ("mbdc", "fpn", "uafm", "full"):
             raise ValueError("stage 应为 mbdc、fpn、uafm 或 full")
@@ -180,14 +219,25 @@ class PVTUANet(nn.Module):
             raise ValueError("num_classes=1 为水体 BCE，2 为原双类别 CE")
         if num_classes == 1 and stage != "uafm":
             raise ValueError("水体 UAFNet 使用 stage=uafm，不添加建筑网络 PSM/CGM")
+        if final_residual and (num_classes != 1 or stage != "uafm"):
+            raise ValueError("最终头残差对照只用于单通道 UAFNet")
+        if high_resolution_refinement and (num_classes != 1 or stage != "uafm"):
+            raise ValueError("高分辨率细化分支只用于单通道 UAFNet")
+        self.high_resolution_refinement = high_resolution_refinement
+        self.final_residual = final_residual  # 默认关闭，旧检查点仍按原结构推理。
         self.stage = stage
         channels = decoder_channels
-        self.backbone = build_pvt_backbone(in_channels, pretrained)
+        self.backbone = build_pvt_backbone(in_channels, pretrained, backbone_name)
+        # None 为历史四级同率；显式表按浅到深排列，重载时由检查点恢复。
+        self.mbdc_dilations = (mbdc_dilations if mbdc_dilations is not None
+                               else (((4, 8, 16), (2, 4, 8)),) * 4)
+        if len(self.mbdc_dilations) != 4:
+            raise ValueError("MBDC 空洞率表需要按浅到深提供四级配置")
         # 对应作者 conv_2 到 conv_5；保持四个尺度，全部变为 channels 通道。
-        self.conv_2 = nn.Sequential(MBDC(64, channels))
-        self.conv_3 = nn.Sequential(MBDC(128, channels))
-        self.conv_4 = nn.Sequential(MBDC(320, channels))
-        self.conv_5 = nn.Sequential(MBDC(512, channels))
+        self.conv_2 = nn.Sequential(MBDC(64, channels, self.mbdc_dilations[0]))
+        self.conv_3 = nn.Sequential(MBDC(128, channels, self.mbdc_dilations[1]))
+        self.conv_4 = nn.Sequential(MBDC(320, channels, self.mbdc_dilations[2]))
+        self.conv_5 = nn.Sequential(MBDC(512, channels, self.mbdc_dilations[3]))
         if stage != "mbdc":
             self.neck = FPN(channels)
         self.decoder = SemanticFPNDecoder(channels, num_classes)
@@ -198,7 +248,15 @@ class PVTUANet(nn.Module):
             self.ufm_layer4 = UAFM(channels, num_classes)
             self.ufm_layer3 = UAFM(channels, num_classes)
             self.ufm_layer2 = UAFM(channels, num_classes)
+        if final_residual:
+            # 最后一个预测卷积现在输出修正量：初始为 0，因此最终预测从粗预测开始。
+            # 只清零该卷积，保留前三个预测头和其他特征层原有初始化。
+            nn.init.zeros_(self.ufm_layer2.seg_out.weight)
+            nn.init.zeros_(self.ufm_layer2.seg_out.bias)
         # 原 PVT 类还声明了不参与 forward 的 ufm_layer1；这里不注册这个闲置模块。
+        # 放在所有原有层初始化之后：相同随机种子下，原有路径的初始权重保持一致。
+        if high_resolution_refinement:
+            self.highres_refinement = HighResolutionRefinement(in_channels)
 
     def forward(self, image):
         """512 输入时：128/64/32/16 四尺度；所有预测最终恢复到输入大小。"""
@@ -220,7 +278,15 @@ class PVTUANet(nn.Module):
         fusion4, prediction4 = self.ufm_layer4(f4, f5, coarse_deep)
         fusion3, prediction3 = self.ufm_layer3(f3, fusion4, prediction4)
         _, prediction2 = self.ufm_layer2(f2, fusion3, prediction3)
-        return (coarse_full, *(
-            F.interpolate(prediction, size=size, mode="bilinear", align_corners=True)
-            for prediction in (prediction4, prediction3, prediction2)
-        ))
+        if self.final_residual:
+            # 两者都在 1/4 分辨率相加 logits，不相加概率，也不使用 16×16 引导图作基底。
+            # 保留 coarse 的梯度，让最终损失可以直接训练 FPN 和粗解码器。
+            prediction2 = coarse + prediction2
+        final_full = F.interpolate(prediction2, size=size, mode="bilinear", align_corners=True)
+        if self.high_resolution_refinement:
+            # prediction2 已包含上面的 coarse 残差；此处只加细节修正，不再重复加粗预测。
+            final_full = final_full + self.highres_refinement(image, prediction2)
+        return (coarse_full,
+                F.interpolate(prediction4, size=size, mode="bilinear", align_corners=True),
+                F.interpolate(prediction3, size=size, mode="bilinear", align_corners=True),
+                final_full)

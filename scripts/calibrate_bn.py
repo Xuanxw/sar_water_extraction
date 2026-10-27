@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
-from datasets.water_dataset import WaterDataset
+from datasets.water_dataset import WaterDataset, sample_name
 from models.checkpoint import load_model
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,7 +65,7 @@ class BNCalibrator:
         train_data = WaterDataset(self.checkpoint["image_dir"], bands=self.checkpoint["bands"])
         val_data = WaterDataset(self.checkpoint["image_dir"], self.checkpoint["label_dir"], self.checkpoint["bands"])
         file_indices = {
-            path.relative_to(train_data.image_dir).as_posix(): index
+            sample_name(path, train_data.image_dir): index
             for index, path in enumerate(train_data.image_paths)
         }
         self.calibration_files = self.checkpoint["train_files"][:CALIBRATION_SAMPLES]

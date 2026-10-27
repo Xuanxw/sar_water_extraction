@@ -8,6 +8,7 @@ from unittest.mock import patch
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from models.checkpoint import load_model
 from models.pvt import PVTWaterNet
 from models.resnet import ResNet50WaterNet
@@ -76,6 +77,8 @@ class BackboneTests(unittest.TestCase):
             # 临时目录固定在本项目 tests 内，结束时只清理该次测试生成的文件。
             with self.subTest(method=method), TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
                 with patch.object(train, "METHOD", method), patch.object(train, "OUTPUT_DIR", Path(folder)), \
+                     patch.object(train, "LOSS_NAME", "ce"), \
+                     patch.object(train, "SAMPLING", "random"), \
                      patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 1), \
                      patch.object(train, "WaterDataset", TinyDataset), \
                      patch.object(torch.cuda, "is_available", return_value=False):

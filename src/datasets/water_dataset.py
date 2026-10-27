@@ -16,6 +16,29 @@ IGNORE_INDEX = -1  # 内部忽略标记；后续损失函数使用同一个 igno
 EXTENSIONS = {".tif", ".tiff", ".png", ".img", ".vrt"}
 
 
+def sample_name(path, root):
+    """保留稳定样本名；固定划分的 train/val 是存储分区，不是样本编号的一部分。"""
+    root = Path(root)
+    relative = Path(path).relative_to(root)
+    if ((root.parent / "split_manifest.csv").is_file() and len(relative.parts) > 1
+            and relative.parts[0] in ("train", "val")):
+        relative = Path(*relative.parts[1:])
+    return relative.as_posix()
+
+
+def resolve_sample_path(root, name):
+    """兼容旧检查点的裸文件名；只查原路径和两个明确分区，不做模糊匹配。"""
+    root, name = Path(root), Path(name)
+    direct = root / name
+    if direct.is_file():
+        return direct
+    candidates = [root / split / name for split in ("train", "val")
+                  if (root / split / name).is_file()]
+    if len(candidates) != 1:
+        raise FileNotFoundError(f"样本不存在或存在多个同名候选：{root / name}")
+    return candidates[0]
+
+
 class WaterDataset(Dataset):
     """按需读取一个影像及标签，返回 image、valid_mask、name 和可选的 label。
 
@@ -33,11 +56,18 @@ class WaterDataset(Dataset):
         self.label_paths = None
         if label_dir is not None:
             label_dir = Path(label_dir)
-            self.label_paths = {
-                path.relative_to(label_dir).with_suffix("").as_posix().casefold(): path
-                for path in label_dir.rglob("*")
-                if path.is_file() and path.suffix.lower() in EXTENSIONS
-            }
+            self.label_paths = {}
+            for path in label_dir.rglob("*"):
+                if path.is_file() and path.suffix.lower() in EXTENSIONS:
+                    key = Path(sample_name(path, label_dir)).with_suffix("").as_posix().casefold()
+                    if key in self.label_paths:
+                        raise ValueError(f"存在同名标签，不能确定配对：{key}")
+                    self.label_paths[key] = path
+
+    def select_files(self, names):
+        """按检查点或固定清单选择文件；名单顺序、历史样本名保持不变。"""
+        self.image_paths = [resolve_sample_path(self.image_dir, name) for name in names]
+
 
     def __len__(self):
         """返回影像数量，供 DataLoader 确定迭代长度。"""
@@ -56,11 +86,11 @@ class WaterDataset(Dataset):
         sample = {
             "image": torch.from_numpy(image),
             "valid_mask": torch.from_numpy(valid),
-            "name": image_path.relative_to(self.image_dir).as_posix(),
+            "name": sample_name(image_path, self.image_dir),
         }
 
         if self.label_paths is not None:
-            key = image_path.relative_to(self.image_dir).with_suffix("").as_posix().casefold()
+            key = Path(sample["name"]).with_suffix("").as_posix().casefold()
             with rasterio.open(self.label_paths[key]) as src:
                 label_data = src.read(1, masked=True)
             # 标签自身无效或影像无效的位置不参与后续损失计算。

@@ -18,6 +18,8 @@ class TrainingSelectionTests(unittest.TestCase):
         )
         for method, class_name, checkpoint_name, directory in cases:
             with self.subTest(method=method), patch.object(train, "METHOD", method), \
+                 patch.object(train, "LOSS_NAME", "ce"), \
+                 patch.object(train, "SAMPLING", "random"), \
                  patch.object(train, "STAGE", "mbdc"), patch.object(train, "OUTPUT_DIR", None), \
                  patch.object(train, "WaterSegmentationTrainer") as factory:
                 self.assertIs(train.create_trainer(), factory.return_value)
@@ -30,6 +32,8 @@ class TrainingSelectionTests(unittest.TestCase):
     def test_uanet_stage_controls_its_directory(self):
         for stage in ("mbdc", "fpn", "uafm", "full"):
             with self.subTest(stage=stage), patch.object(train, "METHOD", "uanet"), \
+                 patch.object(train, "LOSS_NAME", "ce"), \
+                 patch.object(train, "SAMPLING", "random"), \
                  patch.object(train, "STAGE", stage), patch.object(train, "OUTPUT_DIR", None), \
                  patch.object(train, "WaterSegmentationTrainer") as factory:
                 train.create_trainer()
