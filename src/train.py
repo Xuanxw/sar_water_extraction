@@ -36,14 +36,16 @@ POSTPROCESS_OPTIONS = dict(
     save_masks=True, save_visuals=True, max_visualizations=None,
 )  # 仅后处理无标签数据时，可添加 image_dir，并将前两个开关设为 False。
 METHOD = "uafnet"  # 同级方法：unet、pvt、resnet50、uanet、uafnet。
-STAGE = "uafm"    # 仅 uanet 使用；uafnet 固定为 MBDC + FPN + 三级 UAFM，不含 PSM/CGM。
-UAFNET_BACKBONE = "pvt_v2_b2.in1k"  # 仅 uafnet 使用：可改 b3、b4、b5；每个成员单独训练。
+STAGE = "uafm"    # 仅 uanet 使用；uafnet 保留 MBDC + FPN，由下方开关选择细化路径，不含 PSM/CGM。
+UAFNET_BACKBONE = "pvt_v2_b2.in1k"  # 沿用 grouped PVT 控制基线，本轮只替换细化解码器。
+# METHOD 仍为 uafnet；METHOD="resnet50" 是旧的简单解码头基线，不是本次完整 UAFNet 对照。
 UAFNET_FINAL_RESIDUAL = True  # 沿用已验证的残差基线；False 恢复原最终头。
 # 当前固定主基线：四级 MBDC 都沿用原分支空洞率 (4,8,16)/(2,4,8)。
 # None 使用模型默认值；按尺度调整的历史检查点仍由各自 model_kwargs 正确重建。
 UAFNET_MBDC_DILATIONS = None
-UAFNET_HIGH_RESOLUTION_REFINEMENT = False  # 第一轮重跑新划分控制基线；第二轮设 True，只增加半分辨率细化。
-# 两轮均从相同 ImageNet 初始化开始；不把旧划分训练过的检查点拿来做新验证集的公平对照。
+UAFNET_HIGH_RESOLUTION_REFINEMENT = False  # 本轮关闭，避免叠加高分辨率改动。
+UAFNET_REFINEMENT_DECODER = "unetpp"  # unetpp：嵌套细化对照；uafm：恢复原 grouped PVT 控制组。
+# 与 grouped PVT 控制组使用相同 ImageNet 初始化流程；重新训练，不加载已训练的 best_f1.pth 续训。
 IMAGE_DIR = ROOT / "data/Track1/train/images"
 LABEL_DIR = ROOT / "data/Track1/train/labels"
 OUTPUT_DIR = None  # None 按方法自动选择原实验目录；试跑时可指定其他路径。
@@ -602,25 +604,45 @@ def create_trainer():
         model_kwargs = dict(in_channels=len(bands), num_classes=1,
                             decoder_channels=DECODER_CHANNELS, pretrained=PRETRAINED, stage="uafm",
                             backbone_name=UAFNET_BACKBONE, final_residual=UAFNET_FINAL_RESIDUAL)
+        if UAFNET_REFINEMENT_DECODER not in ("uafm", "unetpp"):
+            raise ValueError("UAFNET_REFINEMENT_DECODER 应为 uafm 或 unetpp")
+        if UAFNET_REFINEMENT_DECODER == "unetpp":
+            model_kwargs["refinement_decoder"] = "unetpp"
         if UAFNET_HIGH_RESOLUTION_REFINEMENT:
             model_kwargs["high_resolution_refinement"] = True
         if UAFNET_MBDC_DILATIONS is not None:
             # dilation 不属于 state_dict，必须保存到 model_kwargs 才能正确重建新结构。
             model_kwargs["mbdc_dilations"] = UAFNET_MBDC_DILATIONS
-        model_info = dict(model_name="pvt_uafnet", backbone=UAFNET_BACKBONE, stage="uafm",
-                          normalization="LayerNorm + BatchNorm", output_order="coarse_to_fine",
+        resnet_backbone = UAFNET_BACKBONE == "resnet50.tv_in1k"
+        model_info = dict(model_name="resnet50_uafnet" if resnet_backbone else "pvt_uafnet",
+                          backbone=UAFNET_BACKBONE, stage="uafm",
+                          normalization="BatchNorm" if resnet_backbone else "LayerNorm + BatchNorm",
+                          output_order="coarse_to_fine",
                           supervision=f"sum_{LOSS_NAME}_all_train_heads; final_head_validation",
                           implementation=f"UAFNet paper-guided SAR adaptation; single {UAFNET_BACKBONE}",
                           final_prediction="coarse_plus_zero_init_correction" if UAFNET_FINAL_RESIDUAL else "direct_refinement",
                           paper_doi="10.1109/IGARSS53475.2024.10641026")
-        variant = UAFNET_BACKBONE.split(".")[0].removeprefix("pvt_v2_")
-        experiment = "pvt_uafnet" if variant == "b2" else f"pvt_uafnet_{variant}"
+        if resnet_backbone:
+            experiment = "resnet50_uafnet"
+            model_info["implementation"] = "UAFNet decoder with ResNet50 encoder; project backbone ablation"
+        else:
+            variant = UAFNET_BACKBONE.split(".")[0].removeprefix("pvt_v2_")
+            experiment = "pvt_uafnet" if variant == "b2" else f"pvt_uafnet_{variant}"
+        if UAFNET_REFINEMENT_DECODER == "unetpp":
+            experiment = "pvt_unetpp"
+            model_info.update(model_name="pvt_unetpp_refinement",
+                              refinement_decoder="NestedUNetDecoder",
+                              implementation="PVT/MBDC/FPN coarse + UNet++-style nested refinement; project ablation",
+                              decoder_reference="https://arxiv.org/abs/1807.10165")
+        else:
+            model_info["refinement_decoder"] = "UAFM"
 
     else:
         raise ValueError("METHOD 应为 unet、pvt、resnet50、uanet 或 uafnet")
 
     if METHOD != "unet":
-        model_info.update(decoder="SemanticFPNDecoder", decoder_channels=DECODER_CHANNELS,
+        model_info.update(decoder=("SemanticFPNDecoder + NestedUNetDecoder" if model_info.get("model_name") == "pvt_unetpp_refinement"
+                                   else "SemanticFPNDecoder"), decoder_channels=DECODER_CHANNELS,
                           timm_version=timm.__version__, pretrained=PRETRAINED)
 
     baseline_loss = "bce" if METHOD == "uafnet" else "ce"

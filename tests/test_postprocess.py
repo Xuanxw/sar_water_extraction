@@ -74,6 +74,18 @@ class PostprocessTests(unittest.TestCase):
         self.assertAlmostEqual(average.item(), expected.item())
         self.assertNotEqual(members[0].item(), members[1].item())
 
+    def test_small_negative_logits_are_not_rounded_into_water(self):
+        # 来自DeepLab闭环测试：-6.437767e-8 的float32 sigmoid曾舍入为0.5。
+        ensemble = postprocess.WaterEnsemble.__new__(postprocess.WaterEnsemble)
+        ensemble.device, ensemble.use_amp, ensemble.bands = torch.device("cpu"), False, (1,)
+        ensemble.members = [dict(model=torch.nn.Identity(), bands=(1,),
+                                 mean=torch.zeros(1,1,1,1), std=torch.ones(1,1,1,1))]
+        logits = torch.tensor([[[[-2e-7, -6.437767e-8, -1e-8, 0., 1e-8, 2e-7]]]])
+        members, average = ensemble.predict(logits, torch.ones(1,1,6,dtype=torch.bool))
+        expected = logits[:,0] >= 0
+        self.assertTrue(torch.equal(members[0] >= .5, expected))
+        self.assertTrue(torch.equal(average >= .5, expected))
+
     def test_real_raster_pipeline_and_saved_masks(self):
         class Ensemble:
             def __init__(self, paths, use_amp):
@@ -134,7 +146,7 @@ class PostprocessTests(unittest.TestCase):
 
     def test_uafnet_backbone_selection_keeps_default_and_separate_directories(self):
         for variant in ("b2", "b3", "b4", "b5"):
-            with patch.object(train, "METHOD", "uafnet"), patch.object(train, "UAFNET_MBDC_DILATIONS", None), \
+            with patch.object(train, "METHOD", "uafnet"), patch.object(train, "UAFNET_REFINEMENT_DECODER", "uafm"), patch.object(train, "UAFNET_HIGH_RESOLUTION_REFINEMENT", False), patch.object(train, "UAFNET_MBDC_DILATIONS", None), \
                  patch.object(train, "LOSS_NAME", "bce"), \
                  patch.object(train, "SAMPLING", "random"), \
                  patch.object(train, "HEAD_LOSS_WEIGHTS", (1., 1., 1., 1.)), \

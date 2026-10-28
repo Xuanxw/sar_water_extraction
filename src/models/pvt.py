@@ -9,7 +9,8 @@ import timm
 from torch import nn
 from torch.nn import functional as F
 
-from .common import BasicConv2d, FPN, SemanticFPNDecoder
+from .common import BasicConv2d, DoubleConv, FPN, SemanticFPNDecoder
+from .resnet import build_resnet50_backbone
 
 
 def build_pvt_backbone(in_channels=2, pretrained=True, backbone_name="pvt_v2_b2.in1k"):
@@ -206,12 +207,53 @@ class HighResolutionRefinement(nn.Module):
                              mode="bilinear", align_corners=True)
 
 
+class NestedUNetDecoder(nn.Module):
+    """U-Net++ 风格嵌套细化；保留原实验的三级输出尺度，不复制论文的监督配置。
+
+    xij 中 i 是尺度层级（0 最浅），j 是嵌套列数；同层历史节点与下一层节点拼接。
+    输入为 MBDC 的四级特征，输出依次为 1/16、1/8、1/4 尺度 logits。
+    """
+
+    def __init__(self, channels=32):
+        super().__init__()
+        self.x01 = DoubleConv(channels * 2, channels)
+        self.x11 = DoubleConv(channels * 2, channels)
+        self.x21 = DoubleConv(channels * 2, channels)
+        self.x02 = DoubleConv(channels * 3, channels)
+        self.x12 = DoubleConv(channels * 3, channels)
+        self.x03 = DoubleConv(channels * 4, channels)
+        # 与 UAFM 一样用 3×3 单通道头；没有第五个监督头。
+        self.head4 = nn.Conv2d(channels, 1, 3, padding=1)
+        self.head3 = nn.Conv2d(channels, 1, 3, padding=1)
+        self.head2 = nn.Conv2d(channels, 1, 3, padding=1)
+
+    def forward(self, features):
+        """显式写出六个节点，便于逐层对照；按实际尺寸插值，兼容非整倍数输入。"""
+        x00, x10, x20, x30 = features
+        x01 = self.x01(torch.cat((x00, F.interpolate(
+            x10, size=x00.shape[-2:], mode="bilinear", align_corners=True)), dim=1))
+        x11 = self.x11(torch.cat((x10, F.interpolate(
+            x20, size=x10.shape[-2:], mode="bilinear", align_corners=True)), dim=1))
+        x21 = self.x21(torch.cat((x20, F.interpolate(
+            x30, size=x20.shape[-2:], mode="bilinear", align_corners=True)), dim=1))
+        x02 = self.x02(torch.cat((x00, x01, F.interpolate(
+            x11, size=x00.shape[-2:], mode="bilinear", align_corners=True)), dim=1))
+        x12 = self.x12(torch.cat((x10, x11, F.interpolate(
+            x21, size=x10.shape[-2:], mode="bilinear", align_corners=True)), dim=1))
+        x03 = self.x03(torch.cat((x00, x01, x02, F.interpolate(
+            x12, size=x00.shape[-2:], mode="bilinear", align_corners=True)), dim=1))
+        return self.head4(x21), self.head3(x12), self.head2(x03)
+
+
 class PVTUANet(nn.Module):
-    """共享 PVT 结构：双通道为 UANet，单通道为 UAFNet；最后输出用于评价。"""
+    """共享 UANet/UAFNet 及嵌套细化对照；水体原路径可用 PVT 或 ResNet50 编码器。
+
+    保留 PVTUANet 历史类名与模块名，旧检查点可严格重载，不额外复制一套解码器。
+    """
 
     def __init__(self, in_channels=2, num_classes=2, decoder_channels=32,
                  pretrained=True, stage="full", backbone_name="pvt_v2_b2.in1k", final_residual=False,
-                 mbdc_dilations=None, high_resolution_refinement=False):
+                 mbdc_dilations=None, high_resolution_refinement=False, refinement_decoder="uafm"):
         super().__init__()
         if stage not in ("mbdc", "fpn", "uafm", "full"):
             raise ValueError("stage 应为 mbdc、fpn、uafm 或 full")
@@ -223,36 +265,55 @@ class PVTUANet(nn.Module):
             raise ValueError("最终头残差对照只用于单通道 UAFNet")
         if high_resolution_refinement and (num_classes != 1 or stage != "uafm"):
             raise ValueError("高分辨率细化分支只用于单通道 UAFNet")
+        if refinement_decoder not in ("uafm", "unetpp"):
+            raise ValueError("refinement_decoder 应为 uafm 或 unetpp")
+        if refinement_decoder == "unetpp" and (
+            num_classes != 1 or stage != "uafm" or high_resolution_refinement
+            or backbone_name != "pvt_v2_b2.in1k"
+        ):
+            raise ValueError("本轮嵌套细化对照使用 PVT-B2 单通道水体头，并关闭高分辨率分支")
+        self.refinement_decoder = refinement_decoder  # 旧检查点缺省仍走 UAFM。
         self.high_resolution_refinement = high_resolution_refinement
         self.final_residual = final_residual  # 默认关闭，旧检查点仍按原结构推理。
         self.stage = stage
         channels = decoder_channels
-        self.backbone = build_pvt_backbone(in_channels, pretrained, backbone_name)
+        if backbone_name == "resnet50.tv_in1k":
+            if num_classes != 1 or stage != "uafm":
+                raise ValueError("ResNet50 骨干对照仅用于单通道 UAFNet")
+            self.backbone = build_resnet50_backbone(in_channels, pretrained)
+        else:
+            self.backbone = build_pvt_backbone(in_channels, pretrained, backbone_name)
+        # 只适配 MBDC 的输入通道，四级输出仍为 decoder_channels；后续解码完全复用。
+        c2, c3, c4, c5 = self.backbone.feature_info.channels()
         # None 为历史四级同率；显式表按浅到深排列，重载时由检查点恢复。
         self.mbdc_dilations = (mbdc_dilations if mbdc_dilations is not None
                                else (((4, 8, 16), (2, 4, 8)),) * 4)
         if len(self.mbdc_dilations) != 4:
             raise ValueError("MBDC 空洞率表需要按浅到深提供四级配置")
         # 对应作者 conv_2 到 conv_5；保持四个尺度，全部变为 channels 通道。
-        self.conv_2 = nn.Sequential(MBDC(64, channels, self.mbdc_dilations[0]))
-        self.conv_3 = nn.Sequential(MBDC(128, channels, self.mbdc_dilations[1]))
-        self.conv_4 = nn.Sequential(MBDC(320, channels, self.mbdc_dilations[2]))
-        self.conv_5 = nn.Sequential(MBDC(512, channels, self.mbdc_dilations[3]))
+        self.conv_2 = nn.Sequential(MBDC(c2, channels, self.mbdc_dilations[0]))
+        self.conv_3 = nn.Sequential(MBDC(c3, channels, self.mbdc_dilations[1]))
+        self.conv_4 = nn.Sequential(MBDC(c4, channels, self.mbdc_dilations[2]))
+        self.conv_5 = nn.Sequential(MBDC(c5, channels, self.mbdc_dilations[3]))
         if stage != "mbdc":
             self.neck = FPN(channels)
         self.decoder = SemanticFPNDecoder(channels, num_classes)
         if stage == "full":
             self.psm = PSM()
             self.cgm = CGM()
-        if stage in ("uafm", "full"):
+        if refinement_decoder == "unetpp":
+            # 放在共有层之后创建，同种子下 PVT、MBDC、FPN、粗解码头的初值不变。
+            self.nested_decoder = NestedUNetDecoder(channels)
+        elif stage in ("uafm", "full"):
             self.ufm_layer4 = UAFM(channels, num_classes)
             self.ufm_layer3 = UAFM(channels, num_classes)
             self.ufm_layer2 = UAFM(channels, num_classes)
         if final_residual:
-            # 最后一个预测卷积现在输出修正量：初始为 0，因此最终预测从粗预测开始。
-            # 只清零该卷积，保留前三个预测头和其他特征层原有初始化。
-            nn.init.zeros_(self.ufm_layer2.seg_out.weight)
-            nn.init.zeros_(self.ufm_layer2.seg_out.bias)
+            # 两种细化方式都输出 logit 修正量，初始最终预测等于同一个粗预测。
+            final_head = (self.nested_decoder.head2 if refinement_decoder == "unetpp"
+                          else self.ufm_layer2.seg_out)
+            nn.init.zeros_(final_head.weight)
+            nn.init.zeros_(final_head.bias)
         # 原 PVT 类还声明了不参与 forward 的 ufm_layer1；这里不注册这个闲置模块。
         # 放在所有原有层初始化之后：相同随机种子下，原有路径的初始权重保持一致。
         if high_resolution_refinement:
@@ -272,12 +333,16 @@ class PVTUANet(nn.Module):
         if self.stage in ("mbdc", "fpn"):
             return coarse_full
 
-        coarse_deep = F.interpolate(coarse, size=f5.shape[-2:], mode="bilinear", align_corners=True)
-        if self.stage == "full":
-            f5 = self.cgm(self.psm(f5, coarse_deep), coarse_deep)
-        fusion4, prediction4 = self.ufm_layer4(f4, f5, coarse_deep)
-        fusion3, prediction3 = self.ufm_layer3(f3, fusion4, prediction4)
-        _, prediction2 = self.ufm_layer2(f2, fusion3, prediction3)
+        if self.refinement_decoder == "unetpp":
+            # 用嵌套特征融合替换三级不确定性引导；粗预测继续经下面的残差参与最终输出。
+            prediction4, prediction3, prediction2 = self.nested_decoder(features)
+        else:
+            coarse_deep = F.interpolate(coarse, size=f5.shape[-2:], mode="bilinear", align_corners=True)
+            if self.stage == "full":
+                f5 = self.cgm(self.psm(f5, coarse_deep), coarse_deep)
+            fusion4, prediction4 = self.ufm_layer4(f4, f5, coarse_deep)
+            fusion3, prediction3 = self.ufm_layer3(f3, fusion4, prediction4)
+            _, prediction2 = self.ufm_layer2(f2, fusion3, prediction3)
         if self.final_residual:
             # 两者都在 1/4 分辨率相加 logits，不相加概率，也不使用 16×16 引导图作基底。
             # 保留 coarse 的梯度，让最终损失可以直接训练 FPN 和粗解码器。

@@ -122,7 +122,7 @@ class HeadSupervisionTests(unittest.TestCase):
     def test_factory_changes_only_head_supervision_and_output_directory(self):
         options = []
         for weights in ((1., 1., 1., 1.), WEIGHTS):
-            with patch.object(train, "METHOD", "uafnet"), patch.object(train, "UAFNET_MBDC_DILATIONS", None), patch.object(train, "LOSS_NAME", "bce"), \
+            with patch.object(train, "METHOD", "uafnet"), patch.object(train, "UAFNET_BACKBONE", "pvt_v2_b2.in1k"), patch.object(train, "UAFNET_REFINEMENT_DECODER", "uafm"), patch.object(train, "UAFNET_HIGH_RESOLUTION_REFINEMENT", False), patch.object(train, "UAFNET_MBDC_DILATIONS", None), patch.object(train, "LOSS_NAME", "bce"), \
                  patch.object(train, "SAMPLING", "hard"), patch.object(train, "OUTPUT_DIR", None), \
                  patch.object(train, "UAFNET_FINAL_RESIDUAL", True), \
                  patch.object(train, "HEAD_LOSS_WEIGHTS", weights), \

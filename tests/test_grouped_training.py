@@ -148,7 +148,7 @@ class GroupedTrainingTests(unittest.TestCase):
         choices = []
         for enabled in (False, True):
             with patch.object(train, "METHOD", "uafnet"), \
-                 patch.object(train, "UAFNET_HIGH_RESOLUTION_REFINEMENT", enabled), \
+                 patch.object(train, "UAFNET_REFINEMENT_DECODER", "uafm"), patch.object(train, "UAFNET_HIGH_RESOLUTION_REFINEMENT", enabled), \
                  patch.object(train, "UAFNET_MBDC_DILATIONS", None), \
                  patch.object(train, "UAFNET_FINAL_RESIDUAL", True), \
                  patch.object(train, "LOSS_NAME", "bce"), patch.object(train, "SAMPLING", "hard"), \

@@ -1,26 +1,74 @@
 # SAR water extraction
 
-## 当前实验：固定分组划分，先重跑控制基线再测试高分辨率细化
+## 独立实验：PVT + DeepLabv3+ 风格解码器
 
-数据已按清单放入 `data/Track1/train/images/{train,val}` 和 `labels/{train,val}`；`data/Track1/train/split_manifest.csv` 记录场景、组号、固定归属和 `active`。重复副本及标签冲突文件保留在物理目录，只有 `active=1` 的记录进入训练和验证，不再随机拆分。
+运行 `python src/experimental_model_deeplabv3.py`。配置、ASPP、模型和执行入口集中在这一个文件中，复用公共训练器与 quality 流程；正式 `train.py` 的当前实验开关不变。
 
-| 集合 | 物理文件对数 | active 样本数 |
-|---|---:|---:|
-| train | 1314 | 1144 |
-| val | 317 | 287 |
+本轮保留 `pvt_v2_b2.in1k` 编码器，用 **ASPP + 浅层特征融合** 替换整套 MBDC/FPN/UAFM。512×512 的 VV/VH 经 PVT 得到最深层 `[B,512,16,16]`，ASPP 输出 `[B,256,16,16]`，再上采样到128×128，与浅层64通道投影到48通道的特征拼接；两个普通3×3卷积融合后产生单通道 logits，恢复到512×512。
 
-`IMAGE_DIR`、`LABEL_DIR` 仍填写 images/labels 父目录，训练器读取固定清单；归一化只统计 1144 个有效训练样本。检查点保存逻辑文件名，实验目录保存清单快照及 SHA256，旧检查点的裸文件名仍可解析。
+这是 **输出步长32的 DeepLabv3+ 风格适配**，不是原论文输出步长16/8或空洞可分离卷积的完整复现。ASPP空洞率固定为 `(3,6,9)`，对应步长16的 `(6,12,18)` 在输入网格上的相近采样间隔；ASPP投影后Dropout=0.1。保留空间卷积的BatchNorm，但全局池化的1×1支路省略BN，避免单样本批次无法估计方差。PVT保持原输出步长，不丢弃最后一级特征，也不改成更大的Transformer。结构参考：[DeepLabv3+](https://arxiv.org/abs/1802.02611)。
 
-当前保留固定 MBDC、全局困难采样、最终头残差、四头等权 BCE，按以下顺序运行 `python src/train.py`：
+固定读取当前 `data/Track1/train/split_manifest.csv`（active train1144/val287）；仅用训练集计算均值/标准差。保持 batch=2、20轮、seed=42、AdamW、lr=1e-4、weight_decay=0.01、余弦退火、90度旋转/水平翻转，以及困难采样的2轮预热、0.5困难抽样比例、0.25困难池比例。新实验使用单头BCE，原UAFNet使用四头BCE求和，因此训练loss不直接比较，且两者困难池可能随损失变化。不同解码宽度、结构和监督方式属于整套解码方案的差异，不作为单独UAFM因果消融。
 
-| 轮次 | `UAFNET_HIGH_RESOLUTION_REFINEMENT` | 输出父目录 |
+结果保存到 `outputs/pvt_deeplabv3plus_hard_sampling_grouped/时间戳/`。训练完成后重载本次 `best_f1.pth`，在同一val上生成 `quality/` 的原始/修正掩膜、PNG、整体精度及边界指标；不输出中间层特征图。`RUN_POSTPROCESS=False` 可只训练；`BANDS=(1,)` 可选单VV，单极化结果会进入独立目录。
+
+新检查点可由 `src/validation.py`、`src/evaluation/model_eval.py` 和 quality 入口重建，不需要再次下载预训练权重。优先比较原始F1/IoU/P/R、共同Precision要求下的Recall和内外边界误差；同一开发val上的收益不等于跨区域或跨传感器泛化。
+
+## 解码器瓶颈与泛化诊断（独立于正式训练）
+
+`python src/evaluation/diagnose_decoder.py`：冻结现有三组模型，在同一 active val 上比较四头预测、粗到细的错误修复/破坏、场景统计和输入压力。输入数值缩放、极化比例变化、分辨率退化只属于合成敏感性测试，不代表真实跨传感器泛化；门控反事实也不能替代重训练。结果在 `codex_analysis/decoder_diagnosis/`。
+
+`python src/evaluation/probe_refinement.py`：分别冻结原 UAFM 与嵌套模型的 PVT/MBDC/FPN/粗预测，对同一缓存特征重新训练原门控、同卷积无门控、嵌套融合三种细化器。使用三个配对种子、统一随机遍历和固定10轮，按最后一轮比较；不更新前端BN，不使用自适应困难池或图像增强。探针 batch=8，与正式训练分开解释。临时特征缓存用完清理，只保留小型细化器权重和统计，位于 `codex_analysis/refinement_probe/`。
+
+这两个脚本不修改 `train.py`、原实验模型或数据。它们检验当前模型的敏感性及给定特征下的细化能力；独立地区/事件、其他SAR数据上的效果仍需外部有标签数据检验。
+
+2026-10-28 已完成三模型诊断及18组固定前端重训。去门控的F1效应随前端改变，尚不支持UAFM是主要瓶颈；嵌套细化在高Precision要求下有Recall收益，但真实跨数据泛化未验证。完整口径、表格及下一阶段建议见 [诊断结论](codex_analysis/decoder_bottleneck_20261028/conclusion.txt) 与 [实验图](codex_analysis/decoder_bottleneck_20261028/refinement_probe_summary.png)。
+
+## 当前实验：grouped PVT + U-Net++ 风格嵌套细化
+
+控制组使用 `outputs/pvt_uafnet_hard_sampling_residual_grouped/20261027_212638_633640/best_f1.pth`：第17轮原始验证 F1=79.8582%、IoU=66.4699%、Precision=81.2639%、Recall=78.5002%。高分辨率分支在0.5阈值下 F1=79.6000%；共同阈值扫描的最高 F1 分别为79.9584%和80.0244%，差异很小，因此继续采用更简单的原 grouped PVT 作为控制组，不把高分辨率分支叠加到下一轮。
+
+运行 `python src/train.py`。顶部默认配置已改为：
+
+```python
+METHOD = "uafnet"
+UAFNET_BACKBONE = "pvt_v2_b2.in1k"
+UAFNET_REFINEMENT_DECODER = "unetpp"  # 改为 "uafm" 可恢复控制组
+UAFNET_FINAL_RESIDUAL = True
+UAFNET_MBDC_DILATIONS = None
+UAFNET_HIGH_RESOLUTION_REFINEMENT = False
+```
+
+本轮保留 **PVT → 固定 MBDC → FPN 粗预测**，将三级 UAFM 替换成 `NestedUNetDecoder`。MBDC 四级特征通过六个嵌套节点融合；三个细化预测仍在1/16、1/8、1/4尺度生成。最终 logits = 原粗预测 + 嵌套分支修正量。最终修正卷积零初始化，共有层在同种子下初始权重不变，但两个辅助头属于新结构，不与旧辅助输出强求相等。
+
+这是 **U-Net++ 风格细化路径对照**，不是整套 U-Net++ 论文的复现，也不是移除 FPN 后换成完整 U-Net++。保留原四头等权 BCE、AdamW、余弦退火、VV/VH、seed=42、batch size=2、20轮、lr=1e-4、weight decay=0.01、原增强和全局困难采样规则。两组从相同 ImageNet 骨干初始化流程重新训练，不从已有 best_f1.pth 续训；困难池内容仍可能随各自损失不同而变化。
+
+数据继续读取 `data/Track1/train/split_manifest.csv`：1144个 active train、287个 active val，物理目录为 `images/{train,val}`、`labels/{train,val}`，训练归一化只使用 active train。新结果独立写入 `outputs/pvt_unetpp_hard_sampling_residual_grouped/时间戳/`，不覆盖历史模型。检查点记录 `model_name=pvt_unetpp_refinement` 及 `model_kwargs.refinement_decoder=unetpp`，已有验证、阈值扫描与 quality 入口可自动重建。
+
+训练后仍自动重载 best_f1.pth 生成 quality 的掩膜、可视化、整体及边界指标，不输出中间层特征图。优先比较同一287张 val 上的原始 F1/IoU/P/R、同 Precision 下的 Recall、内侧边界 Recall、外侧 FPR及少水体场景。参数量、计算量与 BN 层数随新解码器变化，所以结果只能说明这套细化方式在当前协议下是否更有效，不能单次证明 UAFM 是唯一瓶颈。实现与节点尺寸见 [结构说明第29节](docs/pvt_uanet_functions_and_derivations.md#29-pvt--u-net-风格嵌套细化对照)。
+
+训练后可将 `src/validation.py` 的 CHECKPOINTS 指向新 best_f1.pth，保留 USE_SAVED_VAL=True。传统法对照仍由 `src/evaluation/compare_threshold.py` 在同一 active val 上完成。当前分组不等于已经证实地理/事件独立，重复使用 val 的模型选择结论也不能冒充独立测试成绩，详见 [验证说明](docs/validation_baseline.md)。
+
+## 独立实验：ai4g-flood 的 U-Net + MobileNetV2 结构适配
+
+运行 `python src/experimental_model_unet_mobilenet.py`。配置集中在该文件顶部，复用 `WaterSegmentationTrainer` 的数据读取、固定清单、训练集归一化、训练日志及保存流程；不修改 `train.py` 当前的 PVT 嵌套细化实验设置。两个实验请依次运行，避免争抢 GPU。
+
+参考本地 `E:/Code_projects/ai4g-flood`，提交 `b3c274e91911e3dcfd6c9f063b73d13b56d00bde`。原仓库 [model.py](https://github.com/microsoft/ai4g-flood/blob/b3c274e91911e3dcfd6c9f063b73d13b56d00bde/src/utils/model.py) 使用 SMP U-Net + MobileNetV2；其 [flood_dataset.py](https://github.com/microsoft/ai4g-flood/blob/b3c274e91911e3dcfd6c9f063b73d13b56d00bde/src/utils/flood_dataset.py) 实际将灾前/灾后 VV、VH 转成两幅二值变化图。仓库公开推理入口，没有完整的损失与优化器训练实现。本实验复用其网络结构思路，**不声称完整复现原洪水检测流程或训练配方**。
+
+| 项目 | 原公开推理流程 | 本项目 DFC 实验 |
 |---|---|---|
-| 新划分控制组（当前默认） | `False` | `outputs/pvt_uafnet_hard_sampling_residual_grouped/` |
-| 轻量高分辨率细化对照 | `True` | `outputs/pvt_uafnet_hard_sampling_residual_highres_grouped/` |
+| 输入 | 灾前/灾后生成的 VV、VH 二值变化图 | 单时相 VV/VH 存储值，按训练集 mean/std 标准化 |
+| 网络 | SMP U-Net + MobileNetV2 | 相同网络家族；固定 SMP 0.5.0 默认深度与解码配置 |
+| 输出 | 2类别 softmax | 1通道 logits，单头 BCE；评价时 sigmoid |
+| 初始化 | 加载 ai4g_sar_model.ckpt | MobileNetV2 ImageNet 权重，解码器重新初始化 |
+| 图块 | 默认128×128推理块 | 保持当前512×512整幅训练与验证 |
+| 训练协议 | 未在该仓库完整公开 | 本项目 AdamW、余弦退火、困难采样与原增强 |
 
-两轮均设 `UAFNET_MBDC_DILATIONS=None`，从相同 ImageNet 骨干初始化开始，其余训练参数不变。先完成控制组，再只切换上述开关；不能用旧划分模型的分数直接替代新控制组。新分支在半分辨率融合 SAR 细节与现有最终 logits，输出零初始化修正量；四个监督头不增加。实现与尺寸流见 [结构说明第28节](docs/pvt_uanet_functions_and_derivations.md#28-轻量高分辨率细化分支)。目前只有接口与合成测试通过，尚无新划分下的精度改善结论。
+有效样本仍为1144训练/287验证，batch size=2、20轮、lr=1e-4、weight decay=0.01、seed=42。困难采样预热2轮、困难抽样比例0.5、困难池比例0.25。它没有 MBDC/FPN/UAFM，也没有高分辨率修正分支；这是完整分割网络的对照，不能把结果差异仅归因于编码器。单头 BCE 与 UAFNet 四头 BCE 求和的训练 loss 不直接比较，验证均使用最终预测、相同有效标签及0.5阈值。
 
-训练后将 `src/validation.py` 的 `CHECKPOINTS` 指向对应新实验 `best_f1.pth`，保留 `USE_SAVED_VAL=True`，比较共同 287 张验证图上的原始整体及边界指标。传统法对比通过 `src/evaluation/compare_threshold.py`：先填写新 grouped 实验的 `CHECKPOINT`；入口核对当前清单 SHA256、训练名单和验证名单，再从物理 `images/val`、`labels/val` 读取同一批287张有效图。旧划分模型会被拒绝。独立 `src/thres_seg/main.py` 同样默认只处理清单内 active val，不加载模型。旧检查点仍可按原名单复核历史结果，但其训练样本可能进入新 val，不能当作新划分的独立验证成绩。当前场景分类及去重分组仍不等于已证实地理/事件独立，不能据此直接开启区域 Bootstrap。详见 [验证说明](docs/validation_baseline.md)。
+输出独立保存到 `outputs/ai4g_mobilenetv2_unet_dfc_hard_sampling_grouped/时间戳/`。默认训练后自动重载 `best_f1.pth` 并生成 `quality/` 的 raw/postprocessed 掩膜、可视化和边界指标；`RUN_POSTPROCESS=False` 可只训练。优先比较 raw 整体 F1/IoU/P/R、内侧边界 Recall、外侧 FPR，并与 grouped PVT 控制组79.8582%的原始 F1 对照，而非旧划分83.05%。
+
+`models/checkpoint.py` 已支持 `ai4g_mobilenetv2_unet_dfc`，后续 `validation.py` 和传统法对照可以直接加载该实验的检查点。依赖增加 `segmentation-models-pytorch==0.5.0`；原仓库没有固定 SMP 版本，本实验在检查点中记录实际版本。无需安装 Planetary Computer 或原仓库整套在线数据依赖。新增结构、梯度、严格重载与合成数据训练/quality 链路已验证，正式精度待训练后评估。
 
 ## 已完成实验：按特征尺度配置 MBDC 空洞率
 

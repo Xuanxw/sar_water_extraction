@@ -79,3 +79,38 @@ from models.checkpoint import load_model
 本轮已用固定初始化和输入，对比 U-Net、PVT、ResNet 与 UANet 四种阶段共 7 种配置：整理前后的状态字典名称、数值和前向输出完全一致；full 对照将 PSM/CGM 的 γ 设为非零以覆盖增强路径。现有 7 项模型测试全部通过，包含梯度、严格重载和合成数据训练/校准接口检查。本轮没有启动正式数据训练。
 
 网络计算见 [U-Net 函数说明](unet_functions_and_derivations.md) 与 [PVT-UANet 函数说明](pvt_uanet_functions_and_derivations.md)。
+
+"""
+| 模块 | 属于 Transformer 吗？ | 主要计算 |
+|---|---|---|
+| **PVT 骨干** | **是** | 多头空间缩减注意力、MLP、LayerNorm、残差 |
+| **MBDC** | 否 | 多分支空洞卷积、拼接、残差 |
+| **FPN** | 否 | 卷积、上采样、逐层相加 |
+| **语义解码头** | 否 | 卷积、上采样、多尺度相加 |
+| **PSM / CGM** | 不属于完整 Transformer Block | 空间注意力／通道调制 |
+| **UAFM** | 否 | 不确定性加权、卷积与特征融合 |
+| **普通 U-Net / ResNet** | 否 | 主要使用卷积结构 |
+"""
+
+## 5. 完整 UAFNet 的 ResNet50 编码器对照
+
+`train.py:create_trainer()` 保持 `METHOD="uafnet"`，通过 `UAFNET_BACKBONE` 选择 PVT-v2-B2 或 `resnet50.tv_in1k`。为了严格兼容旧检查点，完整模型暂沿用 `models/pvt.py:PVTUANet` 类名；ResNet50 的构建集中在 `models/resnet.py:build_resnet50_backbone()`，与旧的简单 ResNet50 基线共用，不复制解码器，也不增加训练器子类。
+
+512×512 SAR 输入时：
+
+| 编码器 | 四级特征通道 | 四级空间尺寸 |
+|---|---|---|
+| PVT-v2-B2 | 64、128、320、512 | 128²、64²、32²、16² |
+| ResNet50 | 256、512、1024、2048 | 128²、64²、32²、16² |
+| 各自 MBDC 输出 | 均为32 | 128²、64²、32²、16² |
+
+两组都经过 MBDC → FPN → 语义解码头产生粗预测。各级 MBDC 特征同时进入三级 UAFM，粗预测引导逐级细化；最后在1/4分辨率相加粗 logits 与修正 logits，再恢复512×512。训练返回四个全分辨率输出，最终头用于验证。本次高分辨率细化关闭，固定空洞率、等权 BCE 和全局困难采样保持一致。
+
+新检查点记录 `model_name="resnet50_uafnet"` 及实际 `model_kwargs.backbone_name`，`models/checkpoint.py:load_model()` 离线严格重建。旧 PVT 与简单 ResNet50 模型名称仍可加载。ResNet50 替换是本项目的骨干消融，不等同于原论文配置；输入通道适配使 MBDC 参数量也发生必要变化。
+
+
+## 2026-10-28：PVT 嵌套细化对照
+
+当前 `train.py` 默认设置 `UAFNET_REFINEMENT_DECODER="unetpp"`，关闭高分辨率分支。保留 PVT/MBDC/FPN/粗预测，仅替换三级 UAFM 为 `models/pvt.py:NestedUNetDecoder` 的六节点密集跳跃融合；`DoubleConv` 复用 common.py。四头等权 BCE 和最终粗预测残差保持不变。
+
+新模型在检查点中命名为 `pvt_unetpp_refinement`，由 `models/checkpoint.py` 重建；输出进入 `pvt_unetpp_hard_sampling_residual_grouped`。将开关恢复为 `uafm` 即恢复原 grouped PVT 控制路径。节点尺寸、公式和非原版复现的边界见 [结构推导第29节](pvt_uanet_functions_and_derivations.md#29-pvt--u-net-风格嵌套细化对照)。

@@ -7,12 +7,25 @@ def load_model(checkpoint):
     name = checkpoint.get("model_name", "unet")
     if name == "unet":
         model = UNet(checkpoint["in_channels"], base_channels=checkpoint["base_channels"])
-    elif name in ("pvt_uanet", "pvt_uafnet"):
+    elif name in ("pvt_uanet", "pvt_uafnet", "resnet50_uafnet", "pvt_unetpp_refinement"):
         from .pvt import PVTUANet
 
         options = dict(checkpoint["model_kwargs"])
         options["pretrained"] = False
         model = PVTUANet(**options)
+    elif name == "pvt_deeplabv3plus":
+        from experimental_model_deeplabv3 import PVTDeepLabV3Plus
+
+        options = dict(checkpoint["model_kwargs"])
+        options["pretrained"] = False
+        model = PVTDeepLabV3Plus(**options)
+    elif name == "ai4g_mobilenetv2_unet_dfc":
+        # 独立实验入口中的模型类；仅重建结构，避免再次下载 ImageNet 权重。
+        from experimental_model_unet_mobilenet import AI4GWaterUNet
+
+        options = dict(checkpoint["model_kwargs"])
+        options["pretrained"] = False
+        model = AI4GWaterUNet(**options)
     elif name in ("pvt", "resnet50"):
         # 延迟导入，让只使用 U-Net 的用户不必加载 timm。
         from .pvt import PVTWaterNet

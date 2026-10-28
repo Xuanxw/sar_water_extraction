@@ -60,8 +60,9 @@ class WaterEnsemble:
             with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
                 outputs = member["model"](inputs)
                 logits = outputs[-1] if isinstance(outputs, (tuple, list)) else outputs
-            # 转 float32 后再计算概率，降低混合精度舍入对概率融合的影响。
-            probability = (logits[:, 0].float().sigmoid() if logits.shape[1] == 1
+            # 单通道用float64算概率并保留精度：微小负logit的float32 sigmoid
+            # 可能舍入成0.5，导致quality比训练的logit>=0多判水体。网络本身仍沿用AMP。
+            probability = (logits[:, 0].double().sigmoid() if logits.shape[1] == 1
                            else logits.float().softmax(dim=1)[:, 1])
             probabilities.append(probability)
         return probabilities, torch.stack(probabilities).mean(dim=0)

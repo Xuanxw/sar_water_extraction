@@ -82,7 +82,7 @@ class UAFNetTrainingTests(unittest.TestCase):
     def check_training_and_reload(self, loss_name, sampling="random", residual=False,
                                   head_weights=(1., 1., 1., 1.), mbdc_dilations=None):
         with TemporaryDirectory() as folder:
-            with patch.object(train, "METHOD", "uafnet"), \
+            with patch.object(train, "METHOD", "uafnet"), patch.object(train, "UAFNET_BACKBONE", "pvt_v2_b2.in1k"), patch.object(train, "UAFNET_REFINEMENT_DECODER", "uafm"), patch.object(train, "UAFNET_HIGH_RESOLUTION_REFINEMENT", False), \
                  patch.object(train, "UAFNET_MBDC_DILATIONS", mbdc_dilations), \
                  patch.object(train, "LOSS_NAME", loss_name), \
                  patch.object(train, "HEAD_LOSS_WEIGHTS", head_weights), \

@@ -57,7 +57,7 @@ class LossTests(unittest.TestCase):
     def test_experiment_selection_changes_only_loss_and_output_group(self):
         choices = {}
         for name in ("bce", "bce_dice"):
-            with patch.object(train, "METHOD", "uafnet"), patch.object(train, "UAFNET_MBDC_DILATIONS", None), patch.object(train, "LOSS_NAME", name), \
+            with patch.object(train, "METHOD", "uafnet"), patch.object(train, "UAFNET_BACKBONE", "pvt_v2_b2.in1k"), patch.object(train, "UAFNET_REFINEMENT_DECODER", "uafm"), patch.object(train, "UAFNET_HIGH_RESOLUTION_REFINEMENT", False), patch.object(train, "UAFNET_MBDC_DILATIONS", None), patch.object(train, "LOSS_NAME", name), \
                  patch.object(train, "SAMPLING", "random"), \
                  patch.object(train, "HEAD_LOSS_WEIGHTS", (1., 1., 1., 1.)), \
                  patch.object(train, "UAFNET_FINAL_RESIDUAL", False), \
