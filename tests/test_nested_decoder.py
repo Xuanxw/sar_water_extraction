@@ -11,11 +11,12 @@ import rasterio
 from rasterio.transform import from_origin
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import train
-from models.pvt import PVTUANet
-from models.checkpoint import load_model
-from models.losses import WaterSegmentationLoss
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import train
+from supervised.models.pvt import PVTUANet
+from supervised.models.checkpoint import load_model
+from supervised.models.losses import WaterSegmentationLoss
 
 
 class NestedDecoderTests(unittest.TestCase):
@@ -53,7 +54,7 @@ class NestedDecoderTests(unittest.TestCase):
         checkpoint = dict(model_name="pvt_unetpp_refinement", model_state_dict=nested.state_dict(),
                           model_kwargs={**options, "pretrained": True, "refinement_decoder": "unetpp"})
         # pretrained=True 的训练元数据重载时必须被覆盖，确保不下载骨干权重。
-        import models.pvt as pvt
+        import supervised.models.pvt as pvt
         with patch.object(pvt, "build_pvt_backbone", wraps=pvt.build_pvt_backbone) as factory:
             restored = load_model(checkpoint).eval()
             self.assertFalse(factory.call_args.args[1])
@@ -92,7 +93,8 @@ class NestedDecoderTests(unittest.TestCase):
     def test_factory_changes_only_refinement_configuration(self):
         choices = []
         for decoder in ("uafm", "unetpp"):
-            with patch.object(train, "UAFNET_REFINEMENT_DECODER", decoder), \
+            with patch.object(train, "METHOD", "uafnet"), \
+                 patch.object(train, "UAFNET_REFINEMENT_DECODER", decoder), \
                  patch.object(train, "WaterSegmentationTrainer") as factory:
                 train.create_trainer()
                 choices.append(factory.call_args.kwargs)
@@ -131,7 +133,7 @@ class NestedDecoderTests(unittest.TestCase):
                 writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
                 writer.writeheader()
                 writer.writerows(rows)
-            with patch.multiple(train, IMAGE_DIR=root / "data/images", LABEL_DIR=root / "data/labels",
+            with patch.multiple(train, METHOD="uafnet", UAFNET_REFINEMENT_DECODER="unetpp", IMAGE_DIR=root / "data/images", LABEL_DIR=root / "data/labels",
                                 OUTPUT_DIR=root / "runs", EPOCHS=3, PRETRAINED=False,
                                 RUN_MODE="train_postprocess", POSTPROCESS_OPTIONS=dict(
                                     threshold=.5, use_landcover=False, save_masks=True, save_visuals=False)), \

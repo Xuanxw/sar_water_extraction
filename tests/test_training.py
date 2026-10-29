@@ -4,10 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import train
-
-
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import train
 class TrainingSelectionTests(unittest.TestCase):
     def test_methods_are_peers_and_keep_checkpoint_contract(self):
         cases = (

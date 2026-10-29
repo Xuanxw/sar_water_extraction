@@ -25,7 +25,7 @@ src/
 
 ```powershell
 conda activate sar-water
-python src/train.py
+python src/supervised/train.py
 ```
 
 | STAGE | 激活模块 | 输出数量 | 实验目录 |

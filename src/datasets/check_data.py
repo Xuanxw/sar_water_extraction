@@ -10,9 +10,10 @@ from rasterio.errors import NotGeoreferencedWarning
 # 输入只定义目录，不预设文件数量、波段数、数值单位或标签含义。
 DATA_ROOT = Path("E:/Code_projects/sar_water_extraction/data")
 DATASETS = [
-    ("train", DATA_ROOT / "Track1/train/images", DATA_ROOT / "Track1/train/labels"),
-    ("val", DATA_ROOT / "Track1/val/images", None),
-    ("test", DATA_ROOT / "images", None),
+    ("train", Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images/train"), Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels/train")),
+    ("val", Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images/val"), Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels/val")),
+    ("official_val_unlabeled", Path("E:/Code_projects/sar_water_extraction/data/Track1/val/images"), None),
+    ("test", Path("E:/Code_projects/sar_water_extraction/data/images"), None),
 ]
 EXTENSIONS = {".tif", ".tiff", ".png", ".img", ".vrt"}
 

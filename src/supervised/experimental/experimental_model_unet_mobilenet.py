@@ -1,4 +1,4 @@
-"""ai4g-flood 网络结构的 DFC 水体对照：运行 python src/experimental_model_unet_mobilenet.py。
+"""ai4g-flood 网络结构的 DFC 水体对照：运行 python src/supervised/experimental/experimental_model_unet_mobilenet.py。
 
 参考 Microsoft ai4g-flood/src/utils/model.py（MIT）：U-Net + MobileNetV2。
 原仓库将灾前/灾后 SAR 转为双通道二值变化图，并公开推理流程。
@@ -6,6 +6,7 @@
 这是结构适配实验，不是原洪水流程或原训练配方的完整复现。
 """
 from pathlib import Path
+import sys
 import gc
 
 import torch
@@ -13,14 +14,17 @@ from torch import nn
 import segmentation_models_pytorch as smp
 from termcolor import cprint
 
-from train import WaterSegmentationTrainer
+# 支持按文件路径直接运行，也支持包导入。
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from supervised.train import WaterSegmentationTrainer
 
 
-ROOT = Path(__file__).resolve().parents[1]
-IMAGE_DIR = ROOT / "data/Track1/train/images"
-LABEL_DIR = ROOT / "data/Track1/train/labels"
+ROOT = Path("E:/Code_projects/sar_water_extraction")
+IMAGE_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images")
+LABEL_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels")
 # 训练器读取同一 split_manifest.csv，自动追加 _grouped 和运行时间戳。
-OUTPUT_DIR = ROOT / "outputs/ai4g_mobilenetv2_unet_dfc_hard_sampling"
+OUTPUT_DIR = Path("E:/Code_projects/sar_water_extraction/outputs/ai4g_mobilenetv2_unet_dfc_hard_sampling")
 BANDS = (1, 2)  # 当前 DFC 文件中的 VV、VH；保持512×512整幅输入，不缩放成128×128。
 PRETRAINED = True  # 仅加载 MobileNetV2 的 ImageNet 权重，不加载 ai4g_sar_model.ckpt。
 BATCH_SIZE = 2
@@ -102,7 +106,7 @@ def main():
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        from evaluation.postprocess import run_postprocess
+        from supervised.evaluation.postprocess import run_postprocess
         run_postprocess([run_dir / "best_f1.pth"], **options)
     return run_dir
 

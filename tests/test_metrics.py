@@ -3,8 +3,9 @@ import math
 import sys
 import unittest
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from evaluation.metrics import metrics_from_counts
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised.evaluation.metrics import metrics_from_counts
 
 
 class PixelMetricTests(unittest.TestCase):

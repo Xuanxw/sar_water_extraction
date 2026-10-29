@@ -14,8 +14,9 @@ from rasterio.transform import from_origin
 import torch
 from torch import nn
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import train
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import train
 from datasets.water_dataset import WaterDataset, resolve_sample_path
 
 

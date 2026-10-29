@@ -6,10 +6,10 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-from evaluation.boundary_eval import BoundaryEvaluator, confusion_counts, save_boundary_figure
-from evaluation.metrics import metrics_from_counts
-from evaluation.landcover import read_landcover, merge_landcover
-from thres_seg.threshold import ThresholdSegmenter
+from supervised.evaluation.boundary_eval import BoundaryEvaluator, confusion_counts, save_boundary_figure
+from supervised.evaluation.metrics import metrics_from_counts
+from supervised.evaluation.landcover import read_landcover, merge_landcover
+from thres_segmentation.threshold import ThresholdSegmenter
 
 EXTENSIONS = {".tif", ".tiff", ".img", ".vrt", ".png"}
 

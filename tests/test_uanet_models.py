@@ -7,11 +7,11 @@ from unittest.mock import patch
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from models.pvt import PVTUANet
-from models.pvt import UncertaintyRank
-from models.checkpoint import load_model
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised.models.pvt import PVTUANet
+from supervised.models.pvt import UncertaintyRank
+from supervised.models.checkpoint import load_model
 
 
 class UANetTests(unittest.TestCase):
@@ -64,7 +64,7 @@ class UANetTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(parameter.grad).all(), name)
 
     def test_training_and_calibration_use_final_prediction(self):
-        import train
+        from supervised import train
         from calibrate_bn import BNCalibrator
 
         class TinyDataset(torch.utils.data.Dataset):
@@ -84,6 +84,8 @@ class UANetTests(unittest.TestCase):
             with patch.object(train, "METHOD", "uanet"), patch.object(train, "STAGE", "full"), \
                  patch.object(train, "LOSS_NAME", "ce"), \
                  patch.object(train, "SAMPLING", "random"), \
+                 patch.object(train, "IMAGE_DIR", Path(folder) / "images"), \
+                 patch.object(train, "LABEL_DIR", Path(folder) / "labels"), \
                  patch.object(train, "OUTPUT_DIR", Path(folder)), \
                  patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 1), \
                  patch.object(train, "WaterDataset", TinyDataset), \

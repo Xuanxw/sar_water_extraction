@@ -7,9 +7,10 @@ from tempfile import TemporaryDirectory
 import torch
 from torch.nn import functional as F
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from models.pvt import HighResolutionRefinement, PVTUANet
-from models.checkpoint import load_model
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised.models.pvt import HighResolutionRefinement, PVTUANet
+from supervised.models.checkpoint import load_model
 
 
 class HighResolutionRefinementTests(unittest.TestCase):

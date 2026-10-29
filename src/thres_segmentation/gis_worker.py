@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from PySide6.QtCore import QThread, Signal
 gdal.SetConfigOption("GDAL_MEM_ENABLE_OPEN", "YES")
-from thres_seg.threshold import percentile_mask
+from thres_segmentation.threshold import percentile_mask
 
 class SARWorker(QThread):
     log_signal = Signal(str)

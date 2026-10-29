@@ -8,11 +8,12 @@ from unittest.mock import patch
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import train
-from models.losses import WaterSegmentationLoss
-from models.pvt import PVTUANet, UncertaintyRank
-from models.checkpoint import load_model
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import train
+from supervised.models.losses import WaterSegmentationLoss
+from supervised.models.pvt import PVTUANet, UncertaintyRank
+from supervised.models.checkpoint import load_model
 
 
 class TinyWaterDataset(torch.utils.data.Dataset):
@@ -88,7 +89,9 @@ class UAFNetTrainingTests(unittest.TestCase):
                  patch.object(train, "HEAD_LOSS_WEIGHTS", head_weights), \
                  patch.object(train, "UAFNET_FINAL_RESIDUAL", residual), \
                  patch.object(train, "SAMPLING", sampling), patch.object(train, "HARD_WARMUP_EPOCHS", 1), \
-                 patch.object(train, "OUTPUT_DIR", Path(folder)), \
+                 patch.object(train, "IMAGE_DIR", Path(folder) / "images"), \
+                     patch.object(train, "LABEL_DIR", Path(folder) / "labels"), \
+                     patch.object(train, "OUTPUT_DIR", Path(folder)), \
                  patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 2), \
                  patch.object(train, "LEARNING_RATE", 1e-4), \
                  patch.object(train, "WaterDataset", TinyWaterDataset), \

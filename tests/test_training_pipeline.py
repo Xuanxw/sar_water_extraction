@@ -5,9 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import train
-from evaluation import postprocess
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import train
+from supervised.evaluation import postprocess
 
 
 class TrainingPipelineTests(unittest.TestCase):

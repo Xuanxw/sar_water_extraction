@@ -6,11 +6,12 @@ from unittest.mock import patch
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import train
-from models.pvt import PVTUANet
-from models.checkpoint import load_model
-from models.losses import WaterSegmentationLoss
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import train
+from supervised.models.pvt import PVTUANet
+from supervised.models.checkpoint import load_model
+from supervised.models.losses import WaterSegmentationLoss
 
 
 class ResNetUAFNetTests(unittest.TestCase):
@@ -69,7 +70,7 @@ class ResNetUAFNetTests(unittest.TestCase):
         for backbone in ("pvt_v2_b2.in1k", "resnet50.tv_in1k"):
             with patch.object(train, "UAFNET_BACKBONE", backbone), patch.object(train, "UAFNET_REFINEMENT_DECODER", "uafm"), patch.object(train, "UAFNET_HIGH_RESOLUTION_REFINEMENT", False), \
                  patch.object(train, "WaterSegmentationTrainer") as factory:
-                train.create_trainer()
+                train.create_trainer("uafnet")
                 configs.append(factory.call_args.kwargs)
         before, after = configs
         for key in before:

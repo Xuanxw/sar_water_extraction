@@ -10,11 +10,10 @@ import numpy as np
 import rasterio
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from evaluation import postprocess
-import train
-
-
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised.evaluation import postprocess
+from supervised import train
 class PostprocessTests(unittest.TestCase):
     def test_terrain_gradient_uses_confirmed_scales_and_preserves_missing_data(self):
         # 每列增加 10 个高程值；10 米像元、1 米/值时为 45 度平面坡。

@@ -6,3 +6,5 @@ matplotlib
 scipy
 termcolor
 segmentation-models-pytorch==0.5.0
+fiona>=1.9,<2
+shapely>=2,<3

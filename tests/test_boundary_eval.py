@@ -7,8 +7,9 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from evaluation.boundary_eval import BoundaryEvaluator, boundary_regions, confusion_counts, sample_region
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised.evaluation.boundary_eval import BoundaryEvaluator, boundary_regions, confusion_counts, sample_region
 
 
 class BoundaryTests(unittest.TestCase):

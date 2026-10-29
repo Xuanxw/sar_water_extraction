@@ -6,10 +6,11 @@ from unittest.mock import patch
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import train
-from models.pvt import MBDC, PVTUANet
-from models.checkpoint import load_model
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import train
+from supervised.models.pvt import MBDC, PVTUANet
+from supervised.models.checkpoint import load_model
 
 RATES = (((4, 8, 16), (2, 4, 8)), ((2, 4, 8), (1, 2, 4)),
          ((1, 2, 4), (1, 1, 2)), ((1, 1, 2), (1, 1, 1)))

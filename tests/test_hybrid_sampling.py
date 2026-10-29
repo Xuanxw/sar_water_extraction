@@ -1,9 +1,13 @@
 """混合池保留全局难例、补充少水体样本，并保持预算与旧模式可比。"""
+from pathlib import Path
+import sys
 import unittest
 
 import torch
 
-from train import build_hard_sample_plan
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised.train import build_hard_sample_plan
 
 
 class HybridSamplingTests(unittest.TestCase):

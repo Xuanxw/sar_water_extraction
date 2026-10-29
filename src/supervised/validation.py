@@ -1,7 +1,8 @@
-"""固定模型后的质量验证入口：python src/validation.py；不训练、不扫描阈值。"""
+"""固定模型后的质量验证入口：python src/supervised/validation.py；不训练、不扫描阈值。"""
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+import sys
 import csv
 import gc
 import hashlib
@@ -11,25 +12,26 @@ import rasterio
 import torch
 from termcolor import cprint
 
-from datasets.water_dataset import WaterDataset, resolve_sample_path, sample_name
-from evaluation.metrics import metrics_from_counts
-from evaluation.postprocess import run_postprocess
+# 支持按文件路径直接运行，也支持包导入。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-ROOT = Path(__file__).resolve().parents[1]
-# 当前收束基线：固定 MBDC + 全局困难采样 + 最终头残差 + 四头等权 BCE。
-CHECKPOINTS = {
-    "Residual": ROOT / "outputs/pvt_uafnet_hard_sampling_residual/20261022_160255_467390/best_f1.pth",
-}
-IMAGE_DIR = None  # None 沿用检查点目录；新数据必须保持相同极化、数值单位和预处理。
-LABEL_DIR = None  # 精度验证必须有独立参考标签，不能使用 WorldCover 或预测代替。
-USE_SAVED_VAL = True  # 当前为历史内部验证；外部有标签集合设 False，并填写以上两个目录。
+from supervised.datasets.water_dataset import WaterDataset, resolve_sample_path, sample_name
+from supervised.evaluation.metrics import metrics_from_counts
+from supervised.evaluation.postprocess import run_postprocess
+
+ROOT = Path("E:/Code_projects/sar_water_extraction")
+# 固定检查点与验证数据；换模型时直接填写对应 best_f1.pth 的绝对路径。
+CHECKPOINTS = {"DeepLab": Path("E:/Code_projects/sar_water_extraction/outputs/pvt_deeplabv3plus_hard_sampling_grouped/20261028_164752_622039/best_f1.pth")}
+IMAGE_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images")
+LABEL_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels")
+USE_SAVED_VAL = True  # 仅评价保存的val；外部有标签集合设False，并更改目录。
 THRESHOLD = 0.5       # 固定工作点；不根据本次测试结果自动选取最佳阈值。
 BATCH_SIZE = 2
 USE_AMP = True
 SAVE_MASKS = True
 MAX_VISUALIZATIONS = 10  # None 输出全部质量图；不输出中间特征。
 OUTPUT_DIR = None  # 默认 outputs/validation/quality/时间戳，各模型分目录。
-SCENE_CSV = ROOT / "docs/s1_samples/scene_catalog_20261026_163548/sample_scenes.csv"
+SCENE_CSV = Path("E:/Code_projects/sar_water_extraction/docs/s1_samples/scene_catalog_20261026_163548/sample_scenes.csv")
 REGION_CSV = None  # 可选 CSV：name,region_id；name 为相对影像目录的文件名，须覆盖全部待评估图。
 REGIONS_ARE_INDEPENDENT = False  # 只有核实区域互相独立、且未参与训练/调参后才设 True。
 BOOTSTRAP_REPEATS = 2000
@@ -197,7 +199,7 @@ def save_reports(output_dir, rows, manifest, region_csv=None, independent_region
     return summary
 
 
-def run_validation(checkpoints=CHECKPOINTS, image_dir=IMAGE_DIR, label_dir=LABEL_DIR,
+def run_validation(checkpoints=CHECKPOINTS, image_dir=None, label_dir=None,
                    use_saved_val=USE_SAVED_VAL, output_dir=OUTPUT_DIR, scene_csv=SCENE_CSV,
                    region_csv=REGION_CSV, independent_regions=REGIONS_ARE_INDEPENDENT,
                    threshold=THRESHOLD, batch_size=BATCH_SIZE, use_amp=USE_AMP,
@@ -211,7 +213,7 @@ def run_validation(checkpoints=CHECKPOINTS, image_dir=IMAGE_DIR, label_dir=LABEL
         raise ValueError("反复用于选模的内部验证集不能标记为独立测试")
     if independent_regions and region_csv is None:
         raise ValueError("独立区域测试需要 REGION_CSV，不能用切片编号替代")
-    destination = (ROOT / "outputs/validation/quality" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    destination = (Path("E:/Code_projects/sar_water_extraction/outputs/validation/quality") / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                    if output_dir is None else Path(output_dir))
     destination.mkdir(parents=True, exist_ok=False)
     comparison, reference, manifest = [], None, None
@@ -261,4 +263,4 @@ def run_validation(checkpoints=CHECKPOINTS, image_dir=IMAGE_DIR, label_dir=LABEL
 
 
 if __name__ == "__main__":
-    run_validation()
+    run_validation(image_dir=IMAGE_DIR, label_dir=LABEL_DIR)

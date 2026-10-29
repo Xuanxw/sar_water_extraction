@@ -109,13 +109,13 @@ flowchart TD
 在项目根目录、`sar-water` 环境中：
 
 ```powershell
-python src/train.py
+python src/supervised/train.py
 ```
 
 PVT 结果写入 `outputs/pvt_baseline/时间戳/`。ResNet-50 在同一入口改为 `METHOD="resnet50"` 后运行：
 
 ```powershell
-python src/train.py
+python src/supervised/train.py
 ```
 
 它写入 `outputs/resnet50_baseline/时间戳/`。两个入口不会互相覆盖，也不会写入 U-Net 目录。

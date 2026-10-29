@@ -2,16 +2,20 @@
 import csv
 from datetime import datetime
 from pathlib import Path
+import sys
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
-from datasets.water_dataset import WaterDataset, sample_name
-from models.checkpoint import load_model
+# 支持按文件路径直接运行，也支持包导入。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-ROOT = Path(__file__).resolve().parents[1]
-EXPERIMENT_DIR = ROOT / "outputs/unet_baseline"  # 其他模型/阶段改为其对应的实验目录。
+from datasets.water_dataset import WaterDataset, sample_name
+from supervised.models.checkpoint import load_model
+
+ROOT = Path("E:/Code_projects/sar_water_extraction")
+EXPERIMENT_DIR = Path("E:/Code_projects/sar_water_extraction/outputs/unet_baseline")  # 其他模型/阶段改为其对应的实验目录。
 RUN_DIR = None  # None 从 EXPERIMENT_DIR 选择最新实验；也可直接指定某次实验目录。
 CHECKPOINT_NAME = "last.pth"  # 默认恢复最后一轮；改为 best.pth 可单独校准最佳轮。
 CALIBRATION_SAMPLES = 128  # 固定取训练划分列表的前 128 幅，与此前成功恢复的方案一致。

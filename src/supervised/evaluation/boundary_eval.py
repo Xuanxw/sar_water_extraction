@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 
-from evaluation.metrics import metrics_from_counts
+from supervised.evaluation.metrics import metrics_from_counts
 
 
 def boundary_regions(label, valid, radii=(1, 3, 5)):

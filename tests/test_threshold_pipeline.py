@@ -8,9 +8,10 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import rasterio
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from thres_seg.threshold import ThresholdSegmenter, percentile_mask
-from thres_seg.pipeline import run_segmentation
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from thres_segmentation.threshold import ThresholdSegmenter, percentile_mask
+from thres_segmentation.pipeline import run_segmentation
 
 
 class ThresholdTests(unittest.TestCase):

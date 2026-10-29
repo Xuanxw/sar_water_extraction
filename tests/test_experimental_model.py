@@ -11,10 +11,11 @@ import rasterio
 from rasterio.transform import from_origin
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import experimental_model_unet_mobilenet as experiment
-from models.checkpoint import load_model
-from models.losses import WaterSegmentationLoss
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised.experimental import experimental_model_unet_mobilenet as experiment
+from supervised.models.checkpoint import load_model
+from supervised.models.losses import WaterSegmentationLoss
 
 
 class ExperimentalModelTests(unittest.TestCase):

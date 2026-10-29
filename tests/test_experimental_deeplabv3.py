@@ -11,11 +11,12 @@ import rasterio
 from rasterio.transform import from_origin
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import experimental_model_deeplabv3 as experiment
-import train
-from models.checkpoint import load_model
-from models.losses import WaterSegmentationLoss
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import train
+from supervised.models import pvt
+from supervised.models.checkpoint import load_model
+from supervised.models.losses import WaterSegmentationLoss
 
 
 class DeepLabExperimentTests(unittest.TestCase):
@@ -26,7 +27,7 @@ class DeepLabExperimentTests(unittest.TestCase):
     def test_shapes_gradients_and_offline_reload(self):
         options = dict(in_channels=2, num_classes=1, pretrained=False,
                        decoder_channels=32, low_level_channels=16, atrous_rates=(2, 3, 4), dropout=.1)
-        model = experiment.PVTDeepLabV3Plus(**options).train()
+        model = pvt.PVTDeepLabV3Plus(**options).train()
         image = torch.randn(2, 2, 64, 64)
         label = torch.randint(0, 2, (2, 64, 64))
         label[:, :4] = -1
@@ -43,7 +44,7 @@ class DeepLabExperimentTests(unittest.TestCase):
         model(image[:1]).mean().backward()
         checkpoint = dict(model_name="pvt_deeplabv3plus", model_kwargs={**options, "pretrained": True},
                           model_state_dict=model.state_dict())
-        with patch.object(experiment, "build_pvt_backbone", wraps=experiment.build_pvt_backbone) as factory:
+        with patch.object(pvt, "build_pvt_backbone", wraps=pvt.build_pvt_backbone) as factory:
             restored = load_model(checkpoint).eval()
             self.assertFalse(factory.call_args.args[1])
         self.assertEqual([m.conv.dilation for m in restored.aspp.branches[1:]], [(2,2),(3,3),(4,4)])
@@ -51,16 +52,16 @@ class DeepLabExperimentTests(unittest.TestCase):
         with torch.no_grad():
             torch.testing.assert_close(restored(image), model(image), rtol=0, atol=0)
             self.assertEqual(tuple(restored(torch.randn(1, 2, 65, 97)).shape), (1, 1, 65, 97))
-            single = experiment.PVTDeepLabV3Plus(in_channels=1, pretrained=False,
+            single = pvt.PVTDeepLabV3Plus(in_channels=1, pretrained=False,
                                                decoder_channels=32, low_level_channels=16).eval()
             self.assertEqual(tuple(single(torch.randn(1, 1, 64, 64)).shape), (1, 1, 64, 64))
 
     def test_training_protocol_matches_control(self):
         with patch.object(train, "WaterSegmentationTrainer") as base:
-            train.create_trainer()
+            train.create_trainer("uafnet")
             reference = base.call_args.kwargs
-        with patch.object(experiment, "WaterSegmentationTrainer") as candidate:
-            experiment.create_trainer()
+        with patch.object(train, "WaterSegmentationTrainer") as candidate:
+            train.create_trainer("deeplabv3")
             options = candidate.call_args.kwargs
         for key in ("image_dir", "label_dir", "bands", "batch_size", "epochs", "learning_rate",
                     "seed", "val_ratio", "max_samples", "loss_name", "optimizer_name", "weight_decay",
@@ -72,6 +73,7 @@ class DeepLabExperimentTests(unittest.TestCase):
         self.assertEqual(options["model_kwargs"]["atrous_rates"], (3,6,9))
         self.assertEqual(options["model_kwargs"]["decoder_channels"], 256)
         self.assertEqual(options["model_kwargs"]["low_level_channels"], 48)
+        self.assertEqual(options["output_dir"].parent, reference["output_dir"].parent)
         self.assertNotEqual(options["output_dir"], reference["output_dir"])
 
     def test_training_saved_split_and_quality(self):
@@ -101,18 +103,19 @@ class DeepLabExperimentTests(unittest.TestCase):
                 writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
                 writer.writeheader()
                 writer.writerows(rows)
-            with patch.object(experiment, "IMAGE_DIR", root / "data/images"), \
-                 patch.object(experiment, "LABEL_DIR", root / "data/labels"), \
-                 patch.object(experiment, "OUTPUT_DIR", root / "runs"), \
-                 patch.object(experiment, "PRETRAINED", False), \
-                 patch.object(experiment, "DECODER_CHANNELS", 32), \
-                 patch.object(experiment, "LOW_LEVEL_CHANNELS", 16), \
-                 patch.object(experiment, "EPOCHS", 3), \
-                 patch.object(experiment, "RUN_POSTPROCESS", True), \
-                 patch.object(experiment, "POSTPROCESS_OPTIONS", dict(threshold=.5, use_landcover=False,
+            with patch.object(train, "IMAGE_DIR", root / "data/images"), \
+                 patch.object(train, "LABEL_DIR", root / "data/labels"), \
+                 patch.object(train, "OUTPUT_DIR", root / "runs"), \
+                 patch.object(train, "PRETRAINED", False), \
+                 patch.object(train, "DEEPLAB_DECODER_CHANNELS", 32), \
+                 patch.object(train, "DEEPLAB_LOW_LEVEL_CHANNELS", 16), \
+                 patch.object(train, "EPOCHS", 3), \
+                 patch.object(train, "RUN_MODE", "train_postprocess"), \
+                 patch.object(train, "POSTPROCESS_OPTIONS", dict(threshold=.5, use_landcover=False,
                               save_masks=True, save_visuals=False)), \
                  patch.object(torch.cuda, "is_available", return_value=False):
-                run = experiment.main()
+                train.main("deeplabv3")
+                run = next((root / "runs_grouped").iterdir())
             self.assertEqual(run.parent.name, "runs_grouped")
             checkpoint = torch.load(run / "best_f1.pth", weights_only=True)
             self.assertEqual(checkpoint["train_files"], ["a.tif", "b.tif"])
@@ -138,7 +141,7 @@ class DeepLabExperimentTests(unittest.TestCase):
                 self.assertEqual({r["name"] for r in csv.DictReader(stream)}, {"c.tif", "d.tif"})
             self.assertFalse((run / "features").exists())
             # 同一个检查点经过独立评价入口，混淆矩阵也应与训练val完全一致。
-            from evaluation.model_eval import evaluate
+            from supervised.evaluation.model_eval import evaluate
             with patch.object(torch.cuda, "is_available", return_value=False):
                 evaluated = evaluate(run / "best_f1.pth", use_saved_val=True, batch_size=2, use_amp=False)
             for key in ("tn", "fp", "fn", "tp"):

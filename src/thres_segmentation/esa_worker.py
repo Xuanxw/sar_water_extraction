@@ -9,7 +9,7 @@ from rasterio import features
 import geopandas as gpd
 from shapely.geometry import shape
 from PySide6.QtCore import QThread, Signal
-from thres_seg.gis_worker import SARWorker
+from thres_segmentation.gis_worker import SARWorker
 
 class ESAWaterWorker(QThread):
     log_signal = Signal(str)

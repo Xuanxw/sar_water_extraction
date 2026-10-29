@@ -7,11 +7,10 @@ from unittest.mock import patch
 import torch
 from torch.nn import functional as F
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from models.losses import WaterSegmentationLoss
-import train
-
-
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised.models.losses import WaterSegmentationLoss
+from supervised import train
 class LossTests(unittest.TestCase):
     def test_bce_matches_original_and_ignored_pixels_have_no_gradient(self):
         score = torch.tensor([[[[0., 2., -3.]]]], requires_grad=True)

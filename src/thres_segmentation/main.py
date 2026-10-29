@@ -1,13 +1,13 @@
-"""独立阈值分割入口：python src/thres_seg/main.py；直接修改下面的变量。"""
+"""独立阈值分割入口：python src/thres_segmentation/main.py；直接修改下面的变量。"""
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path("E:/Code_projects/sar_water_extraction")
 MODE = "dataset"  # dataset：按目录处理影像；gui：原地理编码 SAR 图形界面。
-IMAGE_DIR = ROOT / "data/Track1/train/images/val"
-LABEL_DIR = ROOT / "data/Track1/train/labels/val"  # 无标签影像设为 None，例如处理 data/images。
-SPLIT_MANIFEST = ROOT / "data/Track1/train/split_manifest.csv"  # 只处理 active=1 的 val；外部数据设 None。
+IMAGE_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images/val")
+LABEL_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels/val")  # 无标签影像设为 None，例如处理 data/images。
+SPLIT_MANIFEST = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/split_manifest.csv")  # 只处理 active=1 的 val；外部数据设 None。
 BANDS = {"VV": 1, "VH": 2}  # 每个波段独立分割；单波段数据可设为 {"VV": 1}。
 OUTPUT_DIR = None  # None 输出到 outputs/thres_seg/quality/时间戳，不依附训练实验。
 THRESHOLD_OPTIONS = dict(water_percent=10, mode="bottom", lee_window=5,
@@ -22,11 +22,11 @@ MAX_VISUALIZATIONS = 10  # None 绘制全部；所有输入影像仍参与处理
 
 def main():
     if MODE == "gui":
-        from thres_seg.gui import run_gui
+        from thres_segmentation.gui import run_gui
         return run_gui()
     if MODE != "dataset":
         raise ValueError("MODE 使用 dataset 或 gui")
-    from thres_seg.pipeline import run_segmentation
+    from thres_segmentation.pipeline import run_segmentation
     return run_segmentation(
         image_dir=IMAGE_DIR, label_dir=LABEL_DIR, bands=BANDS, output_dir=OUTPUT_DIR,
         threshold_options=THRESHOLD_OPTIONS, use_landcover=USE_LANDCOVER,

@@ -4,7 +4,7 @@
 
 这份说明从当前双极化 SAR 水体分割任务出发，解释损失函数在优化什么，以及为什么“换一个损失”不等于“提高识别能力”。阅读时可以先看每节的直观解释，再看公式。
 
-本文对应 [损失实现](../src/models/losses.py)、[统一训练入口](../src/train.py) 和 [PVT/UAFNet 模型](../src/models/pvt.py)。本项目目前已实现的单头损失只有 `ce`、`bce`、`bce_dice`；其他方法是科普和后续候选，不代表已经接入训练。
+本文对应 [损失实现](../src/supervised/models/losses.py)、[统一训练入口](../src/supervised/train.py) 和 [PVT/UAFNet 模型](../src/supervised/models/pvt.py)。本项目目前已实现的单头损失只有 `ce`、`bce`、`bce_dice`；其他方法是科普和后续候选，不代表已经接入训练。
 
 ## 1. 损失函数在训练过程中做什么
 
@@ -320,7 +320,7 @@ outputs/pvt_uafnet_hard_sampling_residual_head_weights/<时间戳>/
 
 ```powershell
 conda activate sar-water
-python src/train.py
+python src/supervised/train.py
 ```
 
 该实验已完成：固定验证集的最终头 F1 为83.1578%，相对等权基线83.0543%增加0.1035个百分点，但 Recall 从80.4098%降至79.2793%，少水体组也未改善。2026-10-27按用户要求优先开展尺度 MBDC 结构实验，恢复等权 BCE；详见 README 开头。

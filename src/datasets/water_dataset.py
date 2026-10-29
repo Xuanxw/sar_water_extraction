@@ -6,10 +6,10 @@ import rasterio
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-# 直接修改这里的变量，然后运行 python src/datasets/water_dataset.py。
-DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
-IMAGE_DIR = DATA_ROOT / "Track1/train/images"
-LABEL_DIR = DATA_ROOT / "Track1/train/labels"  # 无标签数据填写 None。
+# 直接修改这里的变量，然后运行 python src/supervised/datasets/water_dataset.py。
+DATA_ROOT = Path("E:/Code_projects/sar_water_extraction/data")
+IMAGE_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images")
+LABEL_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels")  # 无标签数据填写 None。
 BANDS = None       # None 读取全部波段；例如 (1, 2) 读取第 1、2 波段，编号从 1 开始。
 BATCH_SIZE = 2
 IGNORE_INDEX = -1  # 内部忽略标记；后续损失函数使用同一个 ignore_index。

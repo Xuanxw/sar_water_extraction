@@ -7,12 +7,12 @@ from unittest.mock import patch
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from models.checkpoint import load_model
-from models.pvt import PVTWaterNet
-from models.resnet import ResNet50WaterNet
-from models.common import SemanticFPNDecoder
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised.models.checkpoint import load_model
+from supervised.models.pvt import PVTWaterNet
+from supervised.models.resnet import ResNet50WaterNet
+from supervised.models.common import SemanticFPNDecoder
 
 
 class BackboneTests(unittest.TestCase):
@@ -59,7 +59,7 @@ class BackboneTests(unittest.TestCase):
                     self.assertGreater(sum(g.abs().sum().item() for g in gradients), 0)
 
     def test_training_entries_and_bn_calibration(self):
-        import train
+        from supervised import train
         from calibrate_bn import BNCalibrator
 
         class TinyDataset(torch.utils.data.Dataset):
@@ -76,7 +76,9 @@ class BackboneTests(unittest.TestCase):
         for method in ("pvt", "resnet50"):
             # 临时目录固定在本项目 tests 内，结束时只清理该次测试生成的文件。
             with self.subTest(method=method), TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
-                with patch.object(train, "METHOD", method), patch.object(train, "OUTPUT_DIR", Path(folder)), \
+                with patch.object(train, "METHOD", method), patch.object(train, "IMAGE_DIR", Path(folder) / "images"), \
+                     patch.object(train, "LABEL_DIR", Path(folder) / "labels"), \
+                     patch.object(train, "OUTPUT_DIR", Path(folder)), \
                      patch.object(train, "LOSS_NAME", "ce"), \
                      patch.object(train, "SAMPLING", "random"), \
                      patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 1), \

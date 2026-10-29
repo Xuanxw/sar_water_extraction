@@ -13,10 +13,10 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT / "data/Track1/train"
-SCENE_CSV = ROOT / "docs/s1_samples/scene_catalog_20261026_163548/sample_scenes.csv"
-PLAN_DIR = ROOT / "docs/s1_samples/grouped_split_20261027"
+ROOT = Path("E:/Code_projects/sar_water_extraction")
+DATA_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train")
+SCENE_CSV = Path("E:/Code_projects/sar_water_extraction/docs/s1_samples/scene_catalog_20261026_163548/sample_scenes.csv")
+PLAN_DIR = Path("E:/Code_projects/sar_water_extraction/docs/s1_samples/grouped_split_20261027")
 MANIFEST = PLAN_DIR / "split_manifest.csv"
 MODE = "prepare"  # prepare 仅生成计划；move 搬迁；restore 按原清单恢复平铺目录。
 VAL_RATIO = 0.2

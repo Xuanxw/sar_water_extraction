@@ -1,8 +1,8 @@
 # U-Net 函数含义与计算推导
 
-本文对应 [src/models/unet.py](../src/models/unet.py)，整理网络中各个函数的作用、数据尺寸变化，以及卷积、转置卷积和跳跃连接的计算过程。
+本文对应 [src/supervised/models/unet.py](../src/supervised/models/unet.py)，整理网络中各个函数的作用、数据尺寸变化，以及卷积、转置卷积和跳跃连接的计算过程。
 
-公共 `BasicConv2d`、`DoubleConv` 位于 [基础卷积模块](../src/models/common.py)，完整网络仅负责组合它们。各模型的函数定位见 [模型结构与函数索引](model_structure.md)。
+公共 `BasicConv2d`、`DoubleConv` 位于 [基础卷积模块](../src/supervised/models/common.py)，完整网络仅负责组合它们。各模型的函数定位见 [模型结构与函数索引](model_structure.md)。
 
 默认参数为 `in_channels=2`、`num_classes=2`、`base_channels=32`。以下主要使用输入 `[B, 2, 512, 512]`，其中 `B` 为批次数量。输入的两个通道按文件选择，本文不根据网络结构推断其极化或物理单位。
 
@@ -35,7 +35,7 @@ PyTorch 二维卷积通常使用 `[B, C, H, W]`：
 
 ### 1.1 当前 U-Net 的实际网络流程
 
-下图对应 `src/models/unet.py`，采用默认参数。蓝色为编码特征，橙色为瓶颈，绿色为解码特征，紫色为输出。实线表示主计算流程，虚线表示从编码器送往解码器的跳跃连接。
+下图对应 `src/supervised/models/unet.py`，采用默认参数。蓝色为编码特征，橙色为瓶颈，绿色为解码特征，紫色为输出。实线表示主计算流程，虚线表示从编码器送往解码器的跳跃连接。
 
 ```mermaid
 flowchart TB
@@ -590,7 +590,7 @@ $$
 
 ### 13.1 `if __name__ == "__main__"`
 
-在 `src` 目录执行 `python -m models.unet` 时运行下面的尺寸检查；被训练脚本导入时不执行。
+在 `src` 目录执行 `python -m supervised.models.unet` 时运行下面的尺寸检查；被训练脚本导入时不执行。
 
 ### 13.2 `torch.randn(1, 2, 512, 512)`
 

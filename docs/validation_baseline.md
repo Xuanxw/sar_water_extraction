@@ -7,7 +7,7 @@
 固定清单是 `data/Track1/train/split_manifest.csv`；文件保存在 `images/train`、`images/val` 及对应 `labels/train`、`labels/val`。物理 train/val 分别为 **1314/317 对**，真正参加训练/验证的 `active=1` 样本为 **1144/287 对**。停用的重复副本和标签冲突记录保留在目录中，因此不能把扫描目录得到的全部数量当成有效训练/验证数量。
 
 1. PVT 控制组使用 `METHOD="uafnet"`、`UAFNET_BACKBONE="pvt_v2_b2.in1k"`、`UAFNET_HIGH_RESOLUTION_REFINEMENT=False`、`UAFNET_MBDC_DILATIONS=None`，写入 `outputs/pvt_uafnet_hard_sampling_residual_grouped/时间戳/`。
-2. 当前下一轮回到 `UAFNET_BACKBONE="pvt_v2_b2.in1k"`，只启用 `UAFNET_HIGH_RESOLUTION_REFINEMENT=True`，执行 `python src/train.py`，写入 `outputs/pvt_uafnet_hard_sampling_residual_highres_grouped/时间戳/`。两组均采用同一 ImageNet 初始化流程重新训练，固定 MBDC、四头等权 BCE、采样和其他训练参数不变；不从控制组 best_f1.pth 续训。ResNet50 骨干对照已完成，最佳 F1=75.6857%，暂不作为下一轮主基线。
+2. 当前下一轮回到 `UAFNET_BACKBONE="pvt_v2_b2.in1k"`，只启用 `UAFNET_HIGH_RESOLUTION_REFINEMENT=True`，执行 `python src/supervised/train.py`，写入 `outputs/pvt_uafnet_hard_sampling_residual_highres_grouped/时间戳/`。两组均采用同一 ImageNet 初始化流程重新训练，固定 MBDC、四头等权 BCE、采样和其他训练参数不变；不从控制组 best_f1.pth 续训。ResNet50 骨干对照已完成，最佳 F1=75.6857%，暂不作为下一轮主基线。
 3. 将本页验证入口的 `CHECKPOINTS` 改为上述两次实验的 `best_f1.pth`，保留 `USE_SAVED_VAL=True`。脚本从各自检查点读取相同287张名单与训练归一化参数；先比较原始 F1/IoU/P/R，再看内侧边界 Recall、外侧 FPR 和双侧带 F1。传统阈值对比脚本也改为对应新检查点；若复用预测掩膜，必须使用该模型、该阈值的新 raw 输出。
 
 验证新模型时保持 `USE_SAVED_VAL=True`、`IMAGE_DIR=None`、`LABEL_DIR=None`，从检查点恢复287个 active 验证名单。不要改成 `USE_SAVED_VAL=False` 直接扫描物理 `images/val`：该目录有317张，其中30张是停用副本/冲突记录，不能一起计入新基线指标。
@@ -23,7 +23,7 @@
 在项目根目录、sar-water 环境中运行：
 
 ```powershell
-python src/validation.py
+python src/supervised/validation.py
 ```
 
 先结束正在运行的训练，再执行完整 GPU 验证。配置集中在文件顶部，无 argparse。`train.py` 负责训练及训练后的 quality；`validation.py` 负责固定检查点的质量核验；`evaluation/model_eval.py` 保留开发阶段的阈值扫描。`thres_seg/main.py` 仍是独立传统阈值流程。模型与传统法的共同评价放在 `evaluation/compare_threshold.py`，不向 thres_seg 注入检查点依赖；当前传统法是原有 Lee 去斑加固定百分位，并未新增 Otsu。
@@ -98,7 +98,7 @@ name 必须与输入目录相对文件名完全一致，并覆盖全部待评估
 
 ## 模型与传统阈值：统一评价协议
 
-运行 `python src/evaluation/compare_threshold.py`。默认对比固定 Residual 模型与 VV、VH 各自的 Lee + 第10百分位暗水体分割，不应用土地覆盖补水，不用标签挑水体百分比，也不从两个波段结果中自动挑最好者。
+运行 `python scripts/compare_threshold.py`。默认对比固定 Residual 模型与 VV、VH 各自的 Lee + 第10百分位暗水体分割，不应用土地覆盖补水，不用标签挑水体百分比，也不从两个波段结果中自动挑最好者。
 
 对比使用检查点内的 `val_files`，其影像物理位置仍为 `data/Track1/train/images`，标签位于同名 labels 目录。这些图是从有标签池留出的内部验证子集，不是梯度训练使用的 `train_files`。官方 `data/Track1/val/images` 缺少参考标签，不能因文件夹名为 val 就在本地计算 F1/IoU。比赛官网明确 validation/test 不随影像提供参考标签，并以 F1 进行服务器评估：[DFC2024 官方说明](https://www.grss-ieee.org/community/technical-committees/2024-ieee-grss-data-fusion-contest/)。
 
@@ -128,4 +128,4 @@ $$
 当前脚本的区域 Bootstrap 是固定模型的区域抽样不确定性，不包含重新训练的随机性。CI不能修复训练重复、标签误差或反复调参偏差；近邻patch与像素也不能直接当独立样本以获得看似很窄的区间。场景类别“农田/城市”是分组分析标签，不是独立地理区域编号。
 
 
-阈值对照入口现已固定当前分组清单：运行 `src/evaluation/compare_threshold.py` 前填写新 grouped 检查点，程序核对清单与名单后只评价物理 val 中的287张 active 图。`src/thres_seg/main.py` 也已按相同清单过滤，可先独立运行传统分割。
+阈值对照入口现已固定当前分组清单：运行 `scripts/compare_threshold.py` 前填写新 grouped 检查点，程序核对清单与名单后只评价物理 val 中的287张 active 图。`src/thres_segmentation/main.py` 也已按相同清单过滤，可先独立运行传统分割。

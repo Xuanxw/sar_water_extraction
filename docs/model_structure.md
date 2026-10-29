@@ -5,7 +5,7 @@
 ## 1. 当前目录
 
 ```text
-src/models/
+src/supervised/models/
 ├─ unet.py        # UNet
 ├─ pvt.py         # PVT 基线、PVT-UANet 及其特有模块
 ├─ resnet.py      # ResNet50WaterNet
@@ -20,8 +20,8 @@ src/models/
 
 | 文件 | 类 / 函数 | 作用与主要方法 |
 |---|---|---|
-| [unet.py](../src/models/unet.py) | `UNet` | `__init__` 创建网络；`forward` 编解码；`load_state_dict` 兼容历史层名 |
-| [pvt.py](../src/models/pvt.py) | `build_pvt_backbone` | 创建基线与 UANet 共用的 timm PVT 骨干 |
+| [unet.py](../src/supervised/models/unet.py) | `UNet` | `__init__` 创建网络；`forward` 编解码；`load_state_dict` 兼容历史层名 |
+| [pvt.py](../src/supervised/models/pvt.py) | `build_pvt_backbone` | 创建基线与 UANet 共用的 timm PVT 骨干 |
 | 同上 | `PVTWaterNet` | 本类的 `__init__`、`forward` 包含骨干、投影、解码与上采样 |
 | 同上 | `MBDC` | `__init__` 定义三分支与残差；`forward` 拼接、压缩并相加 |
 | 同上 | `PSM` | `__init__` 定义 γ 和 softmax；`forward` 计算空间注意力 |
@@ -29,12 +29,12 @@ src/models/
 | 同上 | `UncertaintyRank` | `forward` 生成前景/背景等级，无需自定义初始化 |
 | 同上 | `UAFM` | `__init__` 定义加权、融合和分类层；`forward` 返回特征与预测 |
 | 同上 | `PVTUANet` | `__init__` 按 stage 创建模块；`forward` 组织粗预测和三级细化 |
-| [resnet.py](../src/models/resnet.py) | `ResNet50WaterNet` | 本类的 `__init__`、`forward` 包含 ResNet 骨干、投影、解码与上采样 |
-| [common.py](../src/models/common.py) | `BasicConv2d` | `__init__` 定义卷积/BN/ReLU；`forward` 顺序执行 |
+| [resnet.py](../src/supervised/models/resnet.py) | `ResNet50WaterNet` | 本类的 `__init__`、`forward` 包含 ResNet 骨干、投影、解码与上采样 |
+| [common.py](../src/supervised/models/common.py) | `BasicConv2d` | `__init__` 定义卷积/BN/ReLU；`forward` 顺序执行 |
 | 同上 | `DoubleConv` | `__init__` 创建两个基础块；`forward` 连续执行 |
 | 同上 | `FPN` | `__init__` 定义侧向/输出卷积；`forward` 自顶向下融合 |
 | 同上 | `SemanticFPNDecoder` | `__init__` 定义四条支路；`forward` 对齐、相加并分类 |
-| [checkpoint.py](../src/models/checkpoint.py) | `load_model` | 根据模型名、参数重建网络，关闭预训练下载并严格加载权重 |
+| [checkpoint.py](../src/supervised/models/checkpoint.py) | `load_model` | 根据模型名、参数重建网络，关闭预训练下载并严格加载权重 |
 
 ## 3. 阅读顺序与继承关系
 
@@ -54,7 +54,7 @@ train.py：main() → create_trainer()，选择 METHOD="uanet"
 
 解码头中带 bias 的卷积保留原始 Sequential 结构，不强行替换为 `bias=False` 的 `BasicConv2d`，以保持参数语义与历史权重名称一致。
 
-训练入口也已合并：不再定义 UNetTrainer/PVTTrainer 等子类，四个同级方法由 `METHOD` 选择，然后直接创建同一个 `WaterSegmentationTrainer`。公共训练器位于 `src/train.py`；没有迁移 Lightning 或添加配置、argparse 框架。
+训练入口也已合并：不再定义 UNetTrainer/PVTTrainer 等子类，四个同级方法由 `METHOD` 选择，然后直接创建同一个 `WaterSegmentationTrainer`。公共训练器位于 `src/supervised/train.py`；没有迁移 Lightning 或添加配置、argparse 框架。
 
 统一入口的调用为 `main() → create_trainer() → WaterSegmentationTrainer(...) → train()`。`OUTPUT_DIR=None` 时根据 METHOD 选择原实验目录；uanet 还根据 STAGE 分目录。METHOD 的四个值为 unet、pvt、resnet50、uanet，只有 uanet 使用 STAGE。
 
@@ -70,7 +70,7 @@ from models.common import BasicConv2d, DoubleConv, FPN, SemanticFPNDecoder
 from models.checkpoint import load_model
 ```
 
-四种方法统一运行 `python src/train.py`；顶部 `METHOD` 选择 unet/pvt/resnet50/uanet，`STAGE` 仅对 uanet 生效。在 `src` 目录可执行 `python -m models.unet` 查看 U-Net 尺寸示例。
+四种方法统一运行 `python src/supervised/train.py`；顶部 `METHOD` 选择 unet/pvt/resnet50/uanet，`STAGE` 仅对 uanet 生效。在 `src` 目录可执行 `python -m supervised.models.unet` 查看 U-Net 尺寸示例。
 
 原来的多层拆分导入路径已收拢，项目内入口、测试和文档同步更新；外部临时脚本应按上述路径修改导入。
 

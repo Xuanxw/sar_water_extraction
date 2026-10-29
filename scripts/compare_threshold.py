@@ -1,4 +1,4 @@
-"""固定模型与传统阈值的同范围对比：python src/evaluation/compare_threshold.py。"""
+"""固定模型与传统阈值的同范围对比：python scripts/compare_threshold.py。"""
 from datetime import datetime
 from pathlib import Path
 import gc
@@ -10,35 +10,53 @@ import rasterio
 import torch
 from torch.utils.data import DataLoader
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path("E:/Code_projects/sar_water_extraction")
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
-from datasets.water_dataset import WaterDataset, resolve_sample_path
-from evaluation.boundary_eval import BoundaryEvaluator, confusion_counts, save_boundary_figure
-from evaluation.metrics import metrics_from_counts
-from evaluation.postprocess import WaterEnsemble
-from thres_seg.threshold import ThresholdSegmenter
-from validation import build_manifest, save_reports, summarize, write_csv, read_csv
+from supervised.datasets.water_dataset import WaterDataset, resolve_sample_path
+from supervised.evaluation.boundary_eval import BoundaryEvaluator, confusion_counts, save_boundary_figure
+from supervised.evaluation.metrics import metrics_from_counts
+from supervised.evaluation.postprocess import WaterEnsemble
+from thres_segmentation.threshold import ThresholdSegmenter
+from supervised.validation import build_manifest, save_reports, summarize, write_csv, read_csv
 
+# ---------- 对比范围：固定验证集 ----------
 # 模型和阈值都只评价同一组有标签验证图；不使用整个 train 目录，也不重选最佳模型。
-CHECKPOINT = None  # 新 grouped 控制组训练完成后，填写该次 best_f1.pth；不默认使用旧划分模型。
-SPLIT_MANIFEST = ROOT / "data/Track1/train/split_manifest.csv"  # 直接执行时强制使用当前有效 val。
-IMAGE_DIR = None
-LABEL_DIR = None
+CHECKPOINT = Path("E:/Code_projects/sar_water_extraction/outputs/pvt_deeplabv3plus_hard_sampling_grouped/20261028_164752_622039/best_f1.pth")  # 核对模型与当前 val 的划分一致。
+SPLIT_MANIFEST = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/split_manifest.csv")  # 直接执行时强制使用当前有效 val。
+IMAGE_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images/val")
+LABEL_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels/val")
 USE_SAVED_VAL = True  # False 用于明确指定的外部有标签集合；不得用内部验证结果代称独立测试。
+
+# ---------- 网络结果：推理或复用 ----------
 MODEL_THRESHOLD = 0.5
 MODEL_MASK_DIR = None  # 可填同一检查点、同一概率阈值已生成的 raw 掩膜目录，完全跳过模型推理。
+
+# ---------- 传统结果：计算或复用 ----------
+# 留空时重新计算传统阈值；填写后直接读取该波段的已有二值 TIFF，不再分割。
+# 例如 {"VV": Path(r"E:\Code_projects\sar_water_extraction\outputs\thres_seg\quality\某次运行\masks\threshold_VV")}
+THRESHOLD_MASK_DIRS = {}
 THRESHOLD_BANDS = {"VV": 1, "VH": 2}
-THRESHOLD_OPTIONS = dict(water_percent=10, mode="bottom", lee_window=5,
-                         noise_ratio=.12, stretch=(1, 99), power_to_db=False)
+THRESHOLD_OPTIONS = dict(
+    water_percent=10,   # 逐图取暗值侧10%分位阈值；不是网络概率，也不读取真值比例。
+    mode="bottom",     # bottom 提取暗值，top 提取亮值。
+    lee_window=5,       # Lee滤波窗口边长，1表示关闭。
+    noise_ratio=.12,    # 用全图方差的此比例估计噪声方差。
+    stretch=(1, 99),    # 计算阈值前按分位数截断极端值。
+    power_to_db=False,  # 仅确认输入为线性功率时才选择10*log10转换。
+)
 # 上面是沿用的 Lee + 百分位阈值，不是 Otsu；q=10 固定，不从验证标签估计水体比例。
+
+# ---------- 执行和输出 ----------
 BATCH_SIZE = 2
 USE_AMP = True
 SAVE_MASKS = True
 MAX_VISUALIZATIONS = 10  # 0 关闭；None 保存全部最终对照图，不输出中间特征。
 OUTPUT_DIR = None  # outputs/threshold_comparison/quality/时间戳
-SCENE_CSV = ROOT / "docs/s1_samples/scene_catalog_20261026_163548/sample_scenes.csv"
+
+# ---------- 场景分组和局部边界指标 ----------
+SCENE_CSV = Path("E:/Code_projects/sar_water_extraction/docs/s1_samples/scene_catalog_20261026_163548/sample_scenes.csv")
 REGION_CSV = None
 REGIONS_ARE_INDEPENDENT = False
 BOUNDARY_RADII = (1, 3, 5)  # 单位像素；当前切片不推断米制缓冲区。
@@ -86,16 +104,33 @@ def save_comparison_figure(image, bands, image_valid, label, valid, predictions,
     figure.savefig(output_path, dpi=120)
 
 
-def run_comparison(checkpoint_path=CHECKPOINT, image_dir=IMAGE_DIR, label_dir=LABEL_DIR,
+def read_prediction_mask(directory, name, images, image_valid):
+    """读取已有0/1掩膜；网格和有效域应与原影像一致，防止不同方法计量范围不同。"""
+    path = Path(directory) / Path(name).with_suffix(".tif")
+    with rasterio.open(path) as source, rasterio.open(resolve_sample_path(images, name)) as original:
+        if (source.count != 1 or source.shape != original.shape or
+                source.crs != original.crs or source.transform != original.transform):
+            raise ValueError(f"缓存掩膜与输入影像网格不一致：{path}")
+        mask = source.read(1, masked=True)
+    available = ~np.ma.getmaskarray(mask) & np.isin(mask.data, (0, 1))
+    if np.any(image_valid & ~available):
+        raise ValueError(f"缓存掩膜未覆盖共同影像有效域：{path}")
+    return (mask.data == 1) & image_valid
+
+
+def run_comparison(checkpoint_path=CHECKPOINT, image_dir=None, label_dir=None,
                    use_saved_val=USE_SAVED_VAL, output_dir=OUTPUT_DIR,
                    threshold_bands=THRESHOLD_BANDS, threshold_options=THRESHOLD_OPTIONS,
                    model_threshold=MODEL_THRESHOLD, batch_size=BATCH_SIZE, use_amp=USE_AMP,
-                   model_mask_dir=MODEL_MASK_DIR,
+                   model_mask_dir=MODEL_MASK_DIR, threshold_mask_dirs=None,
                    scene_csv=SCENE_CSV, region_csv=REGION_CSV,
                    independent_regions=REGIONS_ARE_INDEPENDENT,
                    save_masks=SAVE_MASKS, max_visualizations=MAX_VISUALIZATIONS,
                    boundary_radii=BOUNDARY_RADII, boundary_points=BOUNDARY_POINTS, split_manifest=None):
-    """一次模型推理生成全部对照结果；各方法共享名单、有效域、缓冲带与固定采样点。"""
+    """有掩膜路径就复用，无路径才计算；各方法共享名单、有效域、缓冲带和采样点。"""
+    threshold_mask_dirs = dict(threshold_mask_dirs or {})
+    if set(threshold_mask_dirs) - set(threshold_bands):
+        raise ValueError("THRESHOLD_MASK_DIRS 的键应与 THRESHOLD_BANDS 中的波段名对应")
     if not threshold_bands or not 0 < model_threshold < 1:
         raise ValueError("需要阈值波段，且模型概率阈值须在 0 与 1 之间")
     if not use_saved_val and (image_dir is None or label_dir is None):
@@ -122,15 +157,16 @@ def run_comparison(checkpoint_path=CHECKPOINT, image_dir=IMAGE_DIR, label_dir=LA
                 or len(checkpoint["val_files"]) != len(expected_val)
                 or expected_train & expected_val):
             raise ValueError("检查点与当前分组清单不一致；必须使用本划分训练的模型及完整 active val 名单")
-        images = split_manifest.parent / "images/val"
-        labels = split_manifest.parent / "labels/val"
+        # 直接运行使用顶部绝对路径；函数调用也可传入包含train/val的父目录。
+        images = images / "val" if (images / "val").is_dir() else images
+        labels = labels / "val" if (labels / "val").is_dir() else labels
     manifest = build_manifest(checkpoint, images, labels, use_saved_val,
                               scene_csv if use_saved_val else None)
     epoch = checkpoint["epoch"]
     model_bands = tuple(checkpoint["bands"])
     del checkpoint
     gc.collect()
-    destination = (ROOT / "outputs/threshold_comparison/quality" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    destination = (Path("E:/Code_projects/sar_water_extraction/outputs/threshold_comparison/quality") / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                    if output_dir is None else Path(output_dir))
     destination.mkdir(parents=True, exist_ok=False)
     write_csv(destination / "samples.csv", manifest)
@@ -143,7 +179,8 @@ def run_comparison(checkpoint_path=CHECKPOINT, image_dir=IMAGE_DIR, label_dir=LA
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     # predict 接收排序后的成员波段并集，再按 checkpoint 顺序重排一次，不能预先重复重排。
     model_channels = [bands.index(band) for band in network.bands] if network is not None else None
-    segmenter = ThresholdSegmenter(**threshold_options)
+    computed_bands = [name for name in threshold_bands if name not in threshold_mask_dirs]
+    segmenter = ThresholdSegmenter(**threshold_options) if computed_bands else None
     methods = ["model", *[f"threshold_{name}" for name in threshold_bands]]
     rows_by_method = {method: [] for method in methods}
     boundary = BoundaryEvaluator(destination / "boundary", boundary_radii, boundary_points, SEED)
@@ -161,28 +198,23 @@ def run_comparison(checkpoint_path=CHECKPOINT, image_dir=IMAGE_DIR, label_dir=LA
                 label = batch["label"][index].numpy()
                 valid = image_valid & np.isin(label, (0, 1))
                 if probabilities is None:
-                    mask_path = Path(model_mask_dir) / Path(name).with_suffix(".tif")
-                    with rasterio.open(mask_path) as source, rasterio.open(resolve_sample_path(images, name)) as original:
-                        if (source.count != 1 or source.shape != original.shape or
-                                source.crs != original.crs or source.transform != original.transform):
-                            raise ValueError(f"缓存模型掩膜与输入影像网格不一致：{mask_path}")
-                        mask = source.read(1, masked=True)
-                    available = ~np.ma.getmaskarray(mask) & np.isin(mask.data, (0, 1))
-                    # 缓存若在影像有效域缺像素，立即报错；不能仅对某方法缩小计量范围。
-                    if np.any(image_valid & ~available):
-                        raise ValueError(f"缓存模型掩膜未覆盖共同影像有效域：{mask_path}")
-                    predictions = {"model": (mask.data == 1) & image_valid}
+                    predictions = {"model": read_prediction_mask(model_mask_dir, name, images, image_valid)}
                 else:
                     predictions = {"model": (probabilities[index] >= model_threshold) & image_valid}
                 used_thresholds = {"model": model_threshold}
                 for caption, band in threshold_bands.items():
                     method = f"threshold_{caption}"
-                    # 分割只接收影像有效域；标签仅在后续计量中使用。
-                    prediction, _, level = segmenter.predict(image[bands.index(band)], image_valid)
+                    if caption in threshold_mask_dirs:
+                        prediction = read_prediction_mask(threshold_mask_dirs[caption], name, images, image_valid)
+                        level, percent, source = "", "", "cached_masks"
+                    else:
+                        # 分割只接收影像有效域；标签仅用于之后的计量。
+                        prediction, _, level = segmenter.predict(image[bands.index(band)], image_valid)
+                        percent, source = segmenter.water_percent, "computed"
                     predictions[method] = prediction
                     used_thresholds[method] = level
-                    thresholds.append(dict(name=name, method=method, water_percent=segmenter.water_percent,
-                                           intensity_threshold=level))
+                    thresholds.append(dict(name=name, method=method, prediction_source=source,
+                                           water_percent=percent, intensity_threshold=level))
                 current = {}
                 for method, prediction in predictions.items():
                     row = dict(name=name, **metrics_from_counts(confusion_counts(label, prediction, valid)))
@@ -253,7 +285,11 @@ def run_comparison(checkpoint_path=CHECKPOINT, image_dir=IMAGE_DIR, label_dir=LA
         model_probability_available=network is not None,
         cached_mask_provenance="caller must verify same checkpoint and declared threshold" if model_mask_dir else "",
         valid_rule="all selected SAR bands valid and finite; evaluation additionally requires label 0/1",
-        threshold_method="Lee + fixed per-image percentile (not Otsu)", threshold_options=str(threshold_options),
+        threshold_method="cached masks / Lee + fixed per-image percentile (not Otsu)",
+        threshold_mask_dirs=str({k: str(Path(v).resolve()) for k, v in threshold_mask_dirs.items()}),
+        computed_threshold_bands=str(computed_bands),
+        threshold_options=str(threshold_options) if computed_bands else "not applied: cached masks",
+        threshold_cache_provenance="caller must verify original processing and no landcover correction" if threshold_mask_dirs else "",
         threshold_bands=str(threshold_bands), threshold_tuning=False, landcover_correction=False,
         boundary_radii_px=str(tuple(boundary_radii)), boundary_points_per_region=boundary_points,
         boundary_seed=SEED, boundary_metric="strict band pixel counts; not tolerance Boundary F1",
@@ -268,4 +304,6 @@ def run_comparison(checkpoint_path=CHECKPOINT, image_dir=IMAGE_DIR, label_dir=LA
 
 
 if __name__ == "__main__":
-    run_comparison(split_manifest=SPLIT_MANIFEST)
+    run_comparison(checkpoint_path=CHECKPOINT, image_dir=IMAGE_DIR, label_dir=LABEL_DIR,
+                   model_mask_dir=MODEL_MASK_DIR, threshold_mask_dirs=THRESHOLD_MASK_DIRS,
+                   split_manifest=SPLIT_MANIFEST)

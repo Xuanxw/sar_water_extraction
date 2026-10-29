@@ -10,10 +10,9 @@ import numpy as np
 import rasterio
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import validation as v
-
-
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import validation as v
 class ValidationTests(unittest.TestCase):
     def test_saved_validation_subdirectory_checks_training_sibling(self):
         # 物理 val 目录不包含 train_files，训练去重核查必须回到共同 images 根。
@@ -70,7 +69,7 @@ class ValidationTests(unittest.TestCase):
                             mean=torch.tensor([1., 0.]), std=torch.tensor([2., 1.]),
                             image_dir=str(images), label_dir=str(labels), train_files=["train.tif"],
                             val_files=["a.tif", "b.tif", "c.tif"]), ckpt)
-            with patch("evaluation.postprocess.load_model", return_value=Model()), \
+            with patch("supervised.evaluation.postprocess.load_model", return_value=Model()), \
                  patch.object(torch.cuda, "is_available", return_value=False):
                 out = v.run_validation({"test": ckpt}, output_dir=root / "out", scene_csv=None,
                                        use_amp=False, save_masks=True, max_visualizations=1)

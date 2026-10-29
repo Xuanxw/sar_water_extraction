@@ -11,9 +11,10 @@ import numpy as np
 import rasterio
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from thres_seg.pipeline import run_segmentation
-from evaluation.compare_threshold import run_comparison
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from thres_segmentation.pipeline import run_segmentation
+from compare_threshold import run_comparison
 
 
 class DarkWater(torch.nn.Module):
@@ -67,7 +68,7 @@ class ValThresholdSplitTests(unittest.TestCase):
                                       max_visualizations=0, save_masks=False,
                                       boundary_radii=(1,), boundary_points=8,
                                       threshold_options=dict(lee_window=1, water_percent=25))
-            with patch('evaluation.postprocess.load_model', return_value=DarkWater()), \
+            with patch('supervised.evaluation.postprocess.load_model', return_value=DarkWater()), \
                  patch.object(torch.cuda, 'is_available', return_value=False):
                 results = run_comparison(output_dir=root / 'comparison', **comparison_options)
             whole = [r for r in results if r['subset'] == 'all']
@@ -82,9 +83,9 @@ class ValThresholdSplitTests(unittest.TestCase):
                     run_comparison(output_dir=root / 'rejected', **comparison_options)
                 self.assertFalse((root / 'rejected').exists())
 
-    def test_no_default_historical_checkpoint(self):
+    def test_missing_checkpoint_requires_explicit_model(self):
         with self.assertRaisesRegex(ValueError, '新 grouped'):
-            run_comparison()
+            run_comparison(checkpoint_path=None)
 
 
 if __name__ == '__main__':

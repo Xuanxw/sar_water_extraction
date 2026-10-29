@@ -10,9 +10,10 @@ import numpy as np
 import rasterio
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from evaluation import compare_threshold
-from evaluation.boundary_eval import boundary_regions, confusion_counts
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+import compare_threshold
+from supervised.evaluation.boundary_eval import boundary_regions, confusion_counts
 
 
 class DarkWaterModel(torch.nn.Module):
@@ -59,7 +60,7 @@ class ThresholdComparisonTests(unittest.TestCase):
                            batch_size=2, threshold_options=dict(lee_window=1, water_percent=25),
                            boundary_radii=(1, 3), boundary_points=8, save_masks=True)
             # 实际 WaterEnsemble 负责训练统计标准化，只替换无关的重型模型构造。
-            with patch("evaluation.postprocess.load_model", return_value=DarkWaterModel()), \
+            with patch("supervised.evaluation.postprocess.load_model", return_value=DarkWaterModel()), \
                  patch.object(torch.cuda, "is_available", return_value=False):
                 first = compare_threshold.run_comparison(output_dir=root / "first",
                                                           max_visualizations=1, **options)
@@ -115,6 +116,20 @@ class ThresholdComparisonTests(unittest.TestCase):
             cached_points = read_rows(root / "cached/boundary/points.csv")
             self.assertTrue(all(r["model_probability"] == "" for r in cached_points))
             self.assertEqual(read_rows(root / "cached/protocol.csv")[0]["prediction_source"], "cached_masks")
+            # 两侧均填缓存时既不构造网络，也不再计算Lee/百分位阈值。
+            with patch.object(compare_threshold, "WaterEnsemble", side_effect=AssertionError("不得推理")), \
+                 patch.object(compare_threshold, "ThresholdSegmenter", side_effect=AssertionError("不得重新分割")):
+                reused = compare_threshold.run_comparison(
+                    output_dir=root / "reused", model_mask_dir=root / "first/masks/model",
+                    threshold_mask_dirs={band: root / f"first/masks/threshold_{band}" for band in ("VV", "VH")},
+                    max_visualizations=0, **options)
+            self.assertEqual(read_rows(root / "cached/metrics.csv"),
+                             read_rows(root / "reused/metrics.csv"))
+            self.assertEqual(read_rows(root / "first/boundary/metrics.csv"),
+                             read_rows(root / "reused/boundary/metrics.csv"))
+            threshold_rows = read_rows(root / "reused/thresholds.csv")
+            self.assertTrue(all(r["prediction_source"] == "cached_masks" and r["intensity_threshold"] == ""
+                                for r in threshold_rows))
             # 缓存缺少有效预测或发生网格偏移，必须拒绝，不能悄悄删掉这些评价像素。
             mask_path = root / "first/masks/model/a.tif"
             with rasterio.open(mask_path, "r+") as target:
@@ -141,7 +156,7 @@ class ThresholdComparisonTests(unittest.TestCase):
                 changed[9, 9] = -1
                 with rasterio.open(labels / name, "r+") as target:
                     target.write(changed, 1)
-            with patch("evaluation.postprocess.load_model", return_value=DarkWaterModel()), \
+            with patch("supervised.evaluation.postprocess.load_model", return_value=DarkWaterModel()), \
                  patch.object(torch.cuda, "is_available", return_value=False):
                 second = compare_threshold.run_comparison(output_dir=root / "second",
                                                            max_visualizations=0, **options)
@@ -175,7 +190,7 @@ class ThresholdComparisonTests(unittest.TestCase):
                               train_files=[], val_files=["a.tif"], ignore_index=-1)
             path = root / "reversed.pth"
             torch.save(checkpoint, path)
-            with patch("evaluation.postprocess.load_model", return_value=DarkWaterModel()), \
+            with patch("supervised.evaluation.postprocess.load_model", return_value=DarkWaterModel()), \
                  patch.object(torch.cuda, "is_available", return_value=False):
                 standalone = compare_threshold.WaterEnsemble([path], use_amp=False)
                 _, expected = standalone.predict(torch.from_numpy(data[None]),

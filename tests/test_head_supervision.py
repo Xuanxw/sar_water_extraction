@@ -8,9 +8,10 @@ from unittest.mock import patch
 import torch
 from torch.nn import functional as F
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import train
-from models.checkpoint import load_model
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import train
+from supervised.models.checkpoint import load_model
 
 
 WEIGHTS = (1.0, 0.5, 0.5, 2.0)
@@ -105,7 +106,7 @@ class HeadSupervisionTests(unittest.TestCase):
             self.assertEqual(checkpoint["sampling_config"]["mode"], "hard")
             image = torch.zeros(2, 2, 2, 2)
             # load_model 的模型工厂换成微型网络；实际执行严格 state_dict 加载。
-            with patch("models.pvt.PVTUANet", FourIndependentHeads):
+            with patch("supervised.models.pvt.PVTUANet", FourIndependentHeads):
                 restored = load_model(checkpoint)
                 legacy = dict(checkpoint)
                 legacy.pop("head_loss_weights")

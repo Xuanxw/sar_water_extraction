@@ -14,14 +14,14 @@ def load_model(checkpoint):
         options["pretrained"] = False
         model = PVTUANet(**options)
     elif name == "pvt_deeplabv3plus":
-        from experimental_model_deeplabv3 import PVTDeepLabV3Plus
+        from .pvt import PVTDeepLabV3Plus
 
         options = dict(checkpoint["model_kwargs"])
         options["pretrained"] = False
         model = PVTDeepLabV3Plus(**options)
     elif name == "ai4g_mobilenetv2_unet_dfc":
         # 独立实验入口中的模型类；仅重建结构，避免再次下载 ImageNet 权重。
-        from experimental_model_unet_mobilenet import AI4GWaterUNet
+        from supervised.experimental.experimental_model_unet_mobilenet import AI4GWaterUNet
 
         options = dict(checkpoint["model_kwargs"])
         options["pretrained"] = False

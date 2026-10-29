@@ -6,8 +6,8 @@ import xml.etree.ElementTree as ET
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QTabWidget, QGroupBox, QFormLayout, QDoubleSpinBox, QSpinBox, QCheckBox, QTextEdit, QProgressBar, QMessageBox, QComboBox, QRadioButton, QButtonGroup
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QIcon
-from thres_seg.gis_worker import SARWorker
-from thres_seg.esa_worker import ESAWaterWorker
+from thres_segmentation.gis_worker import SARWorker
+from thres_segmentation.esa_worker import ESAWaterWorker
 
 class SARWaterExtractApp(QMainWindow):
     def __init__(self):

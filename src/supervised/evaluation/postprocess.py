@@ -1,9 +1,9 @@
-"""模型概率集成与土地覆盖后处理；由 src/train.py 的统一入口调用。"""
-from models.checkpoint import load_model
-from evaluation.metrics import metrics_from_counts
-from evaluation.landcover import read_landcover, merge_landcover
-from evaluation.boundary_eval import BoundaryEvaluator, save_boundary_figure
-from datasets.water_dataset import WaterDataset, resolve_sample_path
+"""模型概率集成与土地覆盖后处理；由 src/supervised/train.py 的统一入口调用。"""
+from supervised.models.checkpoint import load_model
+from supervised.evaluation.metrics import metrics_from_counts
+from supervised.evaluation.landcover import read_landcover, merge_landcover
+from supervised.evaluation.boundary_eval import BoundaryEvaluator, save_boundary_figure
+from supervised.datasets.water_dataset import WaterDataset, resolve_sample_path
 from torch.utils.data import DataLoader
 import torch
 import rasterio

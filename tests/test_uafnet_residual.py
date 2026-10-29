@@ -7,10 +7,11 @@ from unittest.mock import patch
 import torch
 from torch.nn import functional as F
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import train
-from models.pvt import PVTUANet
-from models.checkpoint import load_model
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import train
+from supervised.models.pvt import PVTUANet
+from supervised.models.checkpoint import load_model
 
 
 class ResidualTests(unittest.TestCase):

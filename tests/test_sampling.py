@@ -6,10 +6,9 @@ from unittest.mock import patch
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import train
-
-
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from supervised import train
 class SamplingTests(unittest.TestCase):
     def test_plan_is_reproducible_and_oversamples_only_the_hard_pool(self):
         losses = torch.tensor([.1, .2, .3, .4, .5, .6, .7, .8])

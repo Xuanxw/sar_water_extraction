@@ -2,7 +2,7 @@
 
 本文沿用 [U-Net 函数含义与计算推导](unet_functions_and_derivations.md) 的写法，结合当前源码解释实现路径、类与函数、张量尺寸和关键计算。
 
-主要对应 [网络模块](../src/models/pvt.py)、[共享语义解码头](../src/models/common.py)、[训练入口](../src/train.py)、[公共训练器](../src/train.py) 和 [检查点加载器](../src/models/checkpoint.py)。阶段实验概览见 [UANet 分阶段说明](stages/uanet_stages.md)。
+主要对应 [网络模块](../src/supervised/models/pvt.py)、[共享语义解码头](../src/supervised/models/common.py)、[训练入口](../src/supervised/train.py)、[公共训练器](../src/supervised/train.py) 和 [检查点加载器](../src/supervised/models/checkpoint.py)。阶段实验概览见 [UANet 分阶段说明](stages/uanet_stages.md)。
 
 网络已按骨干收拢：PVT 及其特有模块集中在 `models/pvt.py`，共用卷积、FPN 和语义解码头集中在 `models/common.py`。查找具体类与方法时可先看 [模型结构与函数索引](model_structure.md)。
 
@@ -30,22 +30,22 @@ PVT-UANet 没有调用原 `UNet`，也不是把 Transformer 串接到原 U-Net �
 
 | 文件 | 主要对象 | 职责 |
 |---|---|---|
-| `src/train.py` | `main`、`create_trainer` | METHOD 同级选择方法，顶部设置阶段与训练参数 |
-| `src/train.py` | `WaterSegmentationTrainer` | 数据划分、标准化、训练、验证、保存 |
-| `src/models/pvt.py` | `PVTUANet` | 组合网络层并执行完整前向计算 |
-| `src/models/pvt.py` | `MBDC`、`PSM`、`CGM`、`UncertaintyRank`、`UAFM` | 同文件内的特征处理类 |
-| `src/models/common.py` | `BasicConv2d`、`DoubleConv` | 公共卷积与双卷积 |
-| `src/models/pvt.py` | `build_pvt_backbone` | 创建四尺度 PVT 骨干 |
-| `src/models/common.py` | `FPN` | 自顶向下特征融合 |
-| `src/models/common.py` | `SemanticFPNDecoder` | 四尺度粗预测解码头 |
-| `src/models/checkpoint.py` | `load_model` | 按模型名和阶段重建已训练模型 |
+| `src/supervised/train.py` | `main`、`create_trainer` | METHOD 同级选择方法，顶部设置阶段与训练参数 |
+| `src/supervised/train.py` | `WaterSegmentationTrainer` | 数据划分、标准化、训练、验证、保存 |
+| `src/supervised/models/pvt.py` | `PVTUANet` | 组合网络层并执行完整前向计算 |
+| `src/supervised/models/pvt.py` | `MBDC`、`PSM`、`CGM`、`UncertaintyRank`、`UAFM` | 同文件内的特征处理类 |
+| `src/supervised/models/common.py` | `BasicConv2d`、`DoubleConv` | 公共卷积与双卷积 |
+| `src/supervised/models/pvt.py` | `build_pvt_backbone` | 创建四尺度 PVT 骨干 |
+| `src/supervised/models/common.py` | `FPN` | 自顶向下特征融合 |
+| `src/supervised/models/common.py` | `SemanticFPNDecoder` | 四尺度粗预测解码头 |
+| `src/supervised/models/checkpoint.py` | `load_model` | 按模型名和阶段重建已训练模型 |
 | `src/calibrate_bn.py` | `BNCalibrator` | 可选的训练后 BN 统计量校准 |
 
 从项目根目录执行：
 
 ```powershell
 conda activate sar-water
-python src/train.py
+python src/supervised/train.py
 ```
 
 当前统一入口设置 `METHOD="uanet"`、`STAGE="mbdc"`。四种方法是同级选择，具体模块按 stage 启用。
@@ -70,7 +70,7 @@ def main():
 
 ### 2.2 `create_trainer()`：四种同级方法的选择
 
-源码：[统一训练入口](../src/train.py)。顶部参数：
+源码：[统一训练入口](../src/supervised/train.py)。顶部参数：
 
 ```python
 METHOD = "uanet"  # unet、pvt、resnet50、uanet
@@ -97,7 +97,7 @@ STAGE = "mbdc"    # 只对 uanet 生效
 
 ### 2.3 `WaterSegmentationTrainer.__init__()`：一次性准备训练对象
 
-源码：[公共训练器](../src/train.py)。
+源码：[公共训练器](../src/supervised/train.py)。
 
 ```text
 main() → create_trainer()
@@ -118,7 +118,7 @@ main() → create_trainer()
 
 ### 2.4 `WaterDataset` → `DataLoader`：文件怎样变成批次
 
-源码：[数据读取模块](../src/datasets/water_dataset.py)。
+源码：[数据读取模块](../src/supervised/datasets/water_dataset.py)。
 
 `WaterDataset.__init__()` 建立路径列表，没有一次性加载全部影像。访问某个样本时，`__getitem__(index)` 才读取文件：
 
@@ -186,7 +186,7 @@ CPU 上的原始存储值张量
 
 ### 2.6 `PVTUANet.__init__()`：功能模块怎样组成网络
 
-源码：[完整网络](../src/models/pvt.py)。
+源码：[完整网络](../src/supervised/models/pvt.py)。
 
 ```text
 PVTUANet
@@ -309,7 +309,7 @@ outputs/pvt_uanet_阶段/本次时间戳/
 
 检查点同时保存模型构造参数、网络参数与缓冲区、标准化统计量、训练/验证文件列表等；没有保存完整优化器状态，不能等同于完整断点续训。
 
-[checkpoint.py](../src/models/checkpoint.py) 的 `load_model()` 不参与当前入口从头初始化网络的路径。后续评价、推理或 BN 校准时，才按下面的顺序重载：
+[checkpoint.py](../src/supervised/models/checkpoint.py) 的 `load_model()` 不参与当前入口从头初始化网络的路径。后续评价、推理或 BN 校准时，才按下面的顺序重载：
 
 ```text
 读取检查点
@@ -1338,19 +1338,19 @@ UAFM2： [1,32,128,128] + [1,2,128,128]
 ## 24. 相关源码与文档
 
 - [模型结构与函数索引](model_structure.md)
-- [基础卷积与双卷积](../src/models/common.py)
-- [MBDC 上下文增强](../src/models/pvt.py)
-- [PSM/CGM 注意力](../src/models/pvt.py)
-- [不确定性等级](../src/models/pvt.py)
-- [UAFM 融合](../src/models/pvt.py)
-- [FPN neck](../src/models/common.py)
-- [PVT 骨干构造](../src/models/pvt.py)
-- [当前 PVT-UANet 网络模块](../src/models/pvt.py)
-- [共享语义解码头](../src/models/common.py)
-- [PVT-UANet 训练入口](../src/train.py)
-- [公共训练器](../src/train.py)
-- [数据集读取](../src/datasets/water_dataset.py)
-- [模型重建与权重加载](../src/models/checkpoint.py)
+- [基础卷积与双卷积](../src/supervised/models/common.py)
+- [MBDC 上下文增强](../src/supervised/models/pvt.py)
+- [PSM/CGM 注意力](../src/supervised/models/pvt.py)
+- [不确定性等级](../src/supervised/models/pvt.py)
+- [UAFM 融合](../src/supervised/models/pvt.py)
+- [FPN neck](../src/supervised/models/common.py)
+- [PVT 骨干构造](../src/supervised/models/pvt.py)
+- [当前 PVT-UANet 网络模块](../src/supervised/models/pvt.py)
+- [共享语义解码头](../src/supervised/models/common.py)
+- [PVT-UANet 训练入口](../src/supervised/train.py)
+- [公共训练器](../src/supervised/train.py)
+- [数据集读取](../src/supervised/datasets/water_dataset.py)
+- [模型重建与权重加载](../src/supervised/models/checkpoint.py)
 - [BN 校准脚本](../scripts/calibrate_bn.py)
 - [U-Net 函数含义与计算推导](unet_functions_and_derivations.md)
 - [PVT 第一阶段说明](stages/pvt_stage1.md)
@@ -1413,7 +1413,7 @@ MBDC只增加一个空洞率参数，卷积仍逐层直写，不增加父类或�
 
 dilation不属于 `state_dict` 的权重张量，因此必须保存到检查点的 `model_kwargs`。评价和后处理通过 `models/checkpoint.py.load_model` 读取完整配置；旧检查点没有新字段时，`PVTUANet`默认恢复旧固定空洞率。仅手工加载权重、不恢复结构参数会得到另一种计算，不能作为正确重载。
 
-在仓库根目录运行 `python src/train.py`，新结果写入：
+在仓库根目录运行 `python src/supervised/train.py`，新结果写入：
 
 ```text
 outputs/pvt_uafnet_hard_sampling_residual_scale_mbdc/<时间戳>/
@@ -1437,16 +1437,16 @@ outputs/pvt_uafnet_hard_sampling_residual_scale_mbdc/<时间戳>/
 
 ## 27. 目录调整后的训练与后处理衔接
 
-当前目录为 `src/train.py`、`src/evaluation/postprocess.py`、`src/evaluation/visual.py` 和 `src/evaluation/model_eval.py`。特征可视化导入改为 `from evaluation.visual import FeatureVisualizer`；独立评价脚本根据自身位置计算项目根目录并将 `src` 加入模块搜索路径，从仓库外用绝对路径启动也能找到模型和数据集模块。
+当前目录为 `src/supervised/train.py`、`src/supervised/evaluation/postprocess.py`、`src/supervised/evaluation/visual.py` 和 `src/supervised/evaluation/model_eval.py`。特征可视化导入改为 `from evaluation.visual import FeatureVisualizer`；独立评价脚本根据自身位置计算项目根目录并将 `src` 加入模块搜索路径，从仓库外用绝对路径启动也能找到模型和数据集模块。
 
 统一入口 `main()` 按 `RUN_MODE` 选择：`train_postprocess`（默认）先训练再后处理，`train`只训练，`postprocess`只读取既有检查点。训练后自动使用本次实验的最佳权重：单通道用 `best_f1.pth`，双类别用 `best.pth`。释放训练器和优化器后才创建推理模型；后处理恢复最佳权重自带的MBDC配置、波段、标准化参数及验证名单，不使用最后一轮内存权重，也不去其他目录自动寻找“最新模型”。
 
-后处理控制项统一放在 `train.py.POSTPROCESS_OPTIONS` 中，输出仍保存于模型所在实验目录的 `quality/时间戳/`。仅后处理时通过 `POSTPROCESS_CHECKPOINTS` 指定一个或多个成员。原始模型指标与土地覆盖修正后的指标分别报告；训练选模仍依据未后处理的验证指标，后处理不参与反向传播。独立评价/阈值扫描运行 `python src/evaluation/model_eval.py`，不属于自动训练衔接的重复步骤。
+后处理控制项统一放在 `train.py.POSTPROCESS_OPTIONS` 中，输出仍保存于模型所在实验目录的 `quality/时间戳/`。仅后处理时通过 `POSTPROCESS_CHECKPOINTS` 指定一个或多个成员。原始模型指标与土地覆盖修正后的指标分别报告；训练选模仍依据未后处理的验证指标，后处理不参与反向传播。独立评价/阈值扫描运行 `python src/supervised/evaluation/model_eval.py`，不属于自动训练衔接的重复步骤。
 
 
 ## 28. 轻量高分辨率细化分支
 
-这一项只用于 `METHOD="uafnet"`、`num_classes=1`、`stage="uafm"`，实现为 `src/models/pvt.py` 中的 `HighResolutionRefinement`，由 `PVTUANet` 的可选参数 `high_resolution_refinement=False` 控制。`train.py` 对应变量为 `UAFNET_HIGH_RESOLUTION_REFINEMENT`，当前默认 **False**，先完成新固定分组划分的控制训练；随后只将它改为 True 做结构对照。固定 MBDC、FPN、三级 UAFM、既有最终残差和四头等权 BCE 均保留。
+这一项只用于 `METHOD="uafnet"`、`num_classes=1`、`stage="uafm"`，实现为 `src/supervised/models/pvt.py` 中的 `HighResolutionRefinement`，由 `PVTUANet` 的可选参数 `high_resolution_refinement=False` 控制。`train.py` 对应变量为 `UAFNET_HIGH_RESOLUTION_REFINEMENT`，当前默认 **False**，先完成新固定分组划分的控制训练；随后只将它改为 True 做结构对照。固定 MBDC、FPN、三级 UAFM、既有最终残差和四头等权 BCE 均保留。
 
 ### 28.1 512×512 输入的尺寸流
 
@@ -1517,7 +1517,7 @@ z_{\mathrm{new}}=\operatorname{Up}(z_{\mathrm{current},1/4})
 
 ### 29.2 调用与尺寸
 
-`train.py:create_trainer()` → `PVTUANet(refinement_decoder="unetpp")` → `NestedUNetDecoder`。模型类仍集中在 `src/models/pvt.py`；双卷积直接复用 `common.py:DoubleConv`，不另复制训练器。
+`train.py:create_trainer()` → `PVTUANet(refinement_decoder="unetpp")` → `NestedUNetDecoder`。模型类仍集中在 `src/supervised/models/pvt.py`；双卷积直接复用 `common.py:DoubleConv`，不另复制训练器。
 
 ```mermaid
 flowchart TD
@@ -1571,7 +1571,7 @@ x03 = Conv2(Cat(x00, x01, x02, Up(x12)))
 
 ### 29.4 执行与判断
 
-运行 `python src/train.py`，新实验保存到 `outputs/pvt_unetpp_hard_sampling_residual_grouped/时间戳/`，训练后自动重载最佳 F1 模型并执行 quality。设置 `UAFNET_REFINEMENT_DECODER="uafm"`、高分辨率分支保持 False 即恢复控制结构。两组均从相同预训练骨干流程重新训练，不从控制模型续训。
+运行 `python src/supervised/train.py`，新实验保存到 `outputs/pvt_unetpp_hard_sampling_residual_grouped/时间戳/`，训练后自动重载最佳 F1 模型并执行 quality。设置 `UAFNET_REFINEMENT_DECODER="uafm"`、高分辨率分支保持 False 即恢复控制结构。两组均从相同预训练骨干流程重新训练，不从控制模型续训。
 
 先比较0.5阈值的原始整体 F1、IoU、Precision、Recall，再做同范围阈值扫描比较相同 Precision 下的 Recall；同时比较边界内侧 Recall、外侧 FPR、局部边界 F1及少水体图块。后处理结果单独列出，不能用新模型的后处理成绩对比控制组的原始成绩。
 

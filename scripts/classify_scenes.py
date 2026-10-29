@@ -11,18 +11,18 @@ import numpy as np
 import rasterio
 from scipy.ndimage import distance_transform_edt
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path("E:/Code_projects/sar_water_extraction")
 sys.path.insert(0, str(ROOT / "src"))
 from datasets.water_dataset import sample_name, resolve_sample_path
 
-IMAGE_DIR = ROOT / "data/Track1/train/images"
-LABEL_DIR = ROOT / "data/Track1/train/labels"
+IMAGE_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images")
+LABEL_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels")
 # 此脚本汇总历史实验，split 列仍是 REFERENCE_RUN 的名单，不代表新的物理分区。
 # 不重新 random_split，也不需要加载模型权重。
-REFERENCE_RUN = ROOT / "outputs/pvt_uafnet_hard_sampling_residual/20261022_160255_467390"
+REFERENCE_RUN = Path("E:/Code_projects/sar_water_extraction/outputs/pvt_uafnet_hard_sampling_residual/20261022_160255_467390")
 TRAIN_RECORD = REFERENCE_RUN / "sampling.csv"
 VAL_RECORD = REFERENCE_RUN / "postprocess/20261022_170519_875509/per_image.csv"
-OUTPUT_ROOT = ROOT / "docs/s1_samples"
+OUTPUT_ROOT = Path("E:/Code_projects/sar_water_extraction/docs/s1_samples")
 LANDCOVER_BAND = 5
 BUFFER_PIXELS = 5  # 到标签水体的欧氏距离；文件空间参考不足，不解释为米。
 DOMINANT_RATIO = 0.5  # 占区域已知覆盖像素至少50%，才称为主场景。

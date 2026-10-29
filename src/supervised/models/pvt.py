@@ -1,6 +1,6 @@
 """PVT 系列水体分割：骨干构造、基础网络和 UANet 各模块。
 
-按类阅读即可：PVTWaterNet 为简单基线，PVTUANet 为分阶段完整网络；
+按类阅读即可：PVTWaterNet 为简单基线，PVTUANet 为分阶段完整网络，PVTDeepLabV3Plus 为 ASPP 解码基线；
 MBDC、PSM、CGM、UncertaintyRank、UAFM 的初始化和前向都在各自类中。
 作者实现来源与 SAR 适配差异见 docs/stages/uanet_stages.md。
 """
@@ -355,3 +355,63 @@ class PVTUANet(nn.Module):
                 F.interpolate(prediction4, size=size, mode="bilinear", align_corners=True),
                 F.interpolate(prediction3, size=size, mode="bilinear", align_corners=True),
                 final_full)
+
+
+class ASPP(nn.Module):
+    """空洞空间金字塔：1×1、三个空洞3×3、全局池化，共五条上下文分支。"""
+
+    def __init__(self, in_channels, channels=256, rates=(3, 6, 9), dropout=0.1):
+        super().__init__()
+        self.branches = nn.ModuleList([
+            BasicConv2d(in_channels, channels, 1),
+            *[BasicConv2d(in_channels, channels, 3, dilation=rate) for rate in rates],
+        ])
+        # 池化后仅剩1×1；此支路不使用BN，允许最后一批只有一张图。
+        # 其余空间卷积仍用公共 BasicConv2d 的 BatchNorm，不整体切换归一化方式。
+        self.global_pool = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, channels, 1),
+            nn.ReLU(inplace=True),
+        )
+        self.project = nn.Sequential(
+            BasicConv2d((len(rates) + 2) * channels, channels, 1),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, feature):
+        """[B,512,H/32,W/32] → [B,256,H/32,W/32]，各分支空间尺寸不变。"""
+        branches = [branch(feature) for branch in self.branches]
+        context = F.interpolate(self.global_pool(feature), size=feature.shape[-2:],
+                                mode="bilinear", align_corners=False)
+        return self.project(torch.cat([*branches, context], dim=1))
+
+
+class PVTDeepLabV3Plus(nn.Module):
+    """PVT编码器 + ASPP + 浅层跳连；直接预测水体，不使用粗预测残差或UAFM。"""
+
+    def __init__(self, in_channels=2, num_classes=1, pretrained=True,
+                 backbone_name="pvt_v2_b2.in1k", decoder_channels=256,
+                 low_level_channels=48, atrous_rates=(3, 6, 9), dropout=0.1):
+        super().__init__()
+        self.backbone = build_pvt_backbone(in_channels, pretrained, backbone_name)
+        feature_channels = self.backbone.feature_info.channels()
+        self.aspp = ASPP(feature_channels[-1], decoder_channels, atrous_rates, dropout)
+        self.low_projection = BasicConv2d(feature_channels[0], low_level_channels, 1)
+        # 两次普通3×3卷积融合上下文与定位信息；不是空洞可分离卷积版本。
+        self.fusion = nn.Sequential(
+            BasicConv2d(decoder_channels + low_level_channels, decoder_channels),
+            BasicConv2d(decoder_channels, decoder_channels),
+        )
+        self.segmentation_head = nn.Conv2d(decoder_channels, num_classes, 1)
+
+    def forward(self, image):
+        """512输入：深层16×16 → ASPP → 与128×128浅层融合 → 单通道512×512 logits。"""
+        features = self.backbone(image)
+        high = self.aspp(features[-1])
+        low = self.low_projection(features[0])
+        # 按实际大小对齐，兼容不能被32整除的输入；不改动PVT的输出步长。
+        high = F.interpolate(high, size=low.shape[-2:], mode="bilinear", align_corners=False)
+        fused = self.fusion(torch.cat((high, low), dim=1))
+        logits = self.segmentation_head(fused)
+        # 输出未激活logits，sigmoid由BCE/评价入口处理，避免重复激活。
+        return F.interpolate(logits, size=image.shape[-2:], mode="bilinear", align_corners=False)

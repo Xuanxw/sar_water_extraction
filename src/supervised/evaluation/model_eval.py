@@ -1,34 +1,33 @@
-"""独立评价已训练模型；修改顶部变量后运行 python src/evaluation/model_eval.py。"""
+"""独立评价已训练模型；修改顶部变量后运行 python src/supervised/evaluation/model_eval.py。"""
 from math import log
 from pathlib import Path
 from datetime import datetime
 import csv
 import sys
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path("E:/Code_projects/sar_water_extraction")
 sys.path.insert(0, str(ROOT / "src"))  # 从 evaluation 直接运行时找到项目数据集与模型模块。
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from datasets.water_dataset import WaterDataset
-from models.checkpoint import load_model
-from evaluation.metrics import metrics_from_counts
+from supervised.datasets.water_dataset import WaterDataset
+from supervised.models.checkpoint import load_model
+from supervised.evaluation.metrics import metrics_from_counts
 
-CHECKPOINT_PATH = ROOT / "outputs/pvt_uafnet_hard_sampling_residual/20261022_160255_467390/best_f1.pth"
-IMAGE_DIR = None  # None 使用检查点中的影像目录；数据迁移后可直接填写新路径。
-LABEL_DIR = None  # None 使用检查点中的标签目录；计算 F1 必须有真实标签。
-USE_SAVED_VAL = True  # True 只评价原内部验证集；独立有标签数据集设为 False。
-BATCH_SIZE = None     # None 沿用训练 batch size，便于复核日志。
-USE_AMP = None        # None 沿用检查点设置；CPU 始终使用 float32。
-THRESHOLD = 0.5       # 单通道水体概率阈值；双类别模型仍用 argmax。
-# ---------- 可选评估模式：批量进行阈值扫描，或单次评价指定阈值。 ----------
-MODE = "scan"        # scan 比较保留的三组主线；single 评价上面的单个检查点。
+CHECKPOINT_PATH = Path("E:/Code_projects/sar_water_extraction/outputs/pvt_deeplabv3plus_hard_sampling_grouped/20261028_164752_622039/best_f1.pth")
+IMAGE_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images")
+LABEL_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels")
+USE_SAVED_VAL = True  # True只评价保存的val；False评价指定的外部有标签集合。
+BATCH_SIZE = None     # None沿用检查点的batch size。
+USE_AMP = None        # None沿用检查点的AMP设置，CPU使用float32。
+THRESHOLD = 0.5       # 单次评价的水体概率阈值。
+MODE = "single"      # single固定阈值；scan对以下检查点做概率阈值扫描。
 SCAN_CHECKPOINTS = {
-    "Residual": ROOT / "outputs/pvt_uafnet_hard_sampling_residual/20261022_160255_467390/best_f1.pth",
-    "HeadWeights": ROOT / "outputs/pvt_uafnet_hard_sampling_residual_head_weights/20261026_214355_751734/best_f1.pth",
-    "ScaleMBDC": ROOT / "outputs/pvt_uafnet_hard_sampling_residual_scale_mbdc/20261027_153406_423363/best_f1.pth",
+    "UAFNet": Path("E:/Code_projects/sar_water_extraction/outputs/pvt_uafnet_hard_sampling_residual_grouped/20261027_212638_633640/best_f1.pth"),
+    "Nested": Path("E:/Code_projects/sar_water_extraction/outputs/pvt_unetpp_hard_sampling_residual_grouped/20261028_105832_612811/best_f1.pth"),
+    "DeepLab": CHECKPOINT_PATH,
 }
 SCAN_THRESHOLDS = [i / 1000 for i in range(10, 991)]  # 0.01～0.99，步长 0.001；各模型相同。
 PRECISION_TARGETS = (0.80, 0.85, 0.90)
@@ -60,7 +59,7 @@ def precision_matches(rows, targets):
     return matches
 
 
-def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=IMAGE_DIR, label_dir=LABEL_DIR,
+def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
              use_saved_val=USE_SAVED_VAL, batch_size=BATCH_SIZE, use_amp=USE_AMP,
              threshold=THRESHOLD, thresholds=None):
     """恢复模型和输入处理，累计整套数据的混淆矩阵，在终端打印并返回指标。"""
@@ -145,7 +144,7 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=IMAGE_DIR, label_dir=LAB
 
 
 def run_threshold_scan(checkpoints=SCAN_CHECKPOINTS, thresholds=SCAN_THRESHOLDS,
-                       targets=PRECISION_TARGETS, output_dir=None):
+                       targets=PRECISION_TARGETS, output_dir=None, image_dir=None, label_dir=None):
     """同一验证集各推理一次，保存阈值表、共同精确率要求对照表和 PR 曲线。"""
     import matplotlib
     matplotlib.use("Agg")
@@ -172,7 +171,7 @@ def run_threshold_scan(checkpoints=SCAN_CHECKPOINTS, thresholds=SCAN_THRESHOLDS,
     fig, axis = plt.subplots(figsize=(8, 6))
     for name, path in checkpoints.items():
         print(f"开始扫描：{name}；{len(thresholds)} 个阈值；不使用土地覆盖后处理", flush=True)
-        rows = evaluate(path, use_saved_val=True, threshold=.5, thresholds=thresholds)
+        rows = evaluate(path, image_dir=image_dir, label_dir=label_dir, use_saved_val=True, threshold=.5, thresholds=thresholds)
         all_rows.extend(dict(model=name, checkpoint=str(path), epoch=epochs[name], **r) for r in rows)
         matched = precision_matches(rows, targets)
         comparisons.extend(dict(model=name, **r) for r in matched)
@@ -205,9 +204,9 @@ def run_threshold_scan(checkpoints=SCAN_CHECKPOINTS, thresholds=SCAN_THRESHOLDS,
 def main():
     """独立评价入口；既不训练，也不重复执行质量图和 ESA 修正。"""
     if MODE == "scan":
-        return run_threshold_scan()
+        return run_threshold_scan(image_dir=IMAGE_DIR, label_dir=LABEL_DIR)
     if MODE == "single":
-        return evaluate()
+        return evaluate(image_dir=IMAGE_DIR, label_dir=LABEL_DIR)
     raise ValueError("MODE 应为 scan 或 single")
 
 

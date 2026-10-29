@@ -3,13 +3,16 @@ import contextlib
 import io
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 
-from check_data import check_data
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
+from datasets.check_data import check_data
 
 
 class CheckDataTests(unittest.TestCase):

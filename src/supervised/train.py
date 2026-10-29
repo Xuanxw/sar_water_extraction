@@ -1,4 +1,4 @@
-"""统一训练入口：修改顶部 METHOD 后运行 python src/train.py。"""
+"""统一训练入口：修改顶部 METHOD 后运行 python src/supervised/train.py。"""
 import csv
 import gc
 import hashlib
@@ -6,6 +6,7 @@ import shutil
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
+import sys
 from time import perf_counter
 
 import numpy as np
@@ -19,66 +20,87 @@ from termcolor import cprint
 # 终端配色：青=配置，蓝=准备进度，黄=训练，绿=验证，紫=保存，红=异常提示。
 # 保留 flush=True；重定向到日志文件时由 termcolor 自动关闭颜色转义序列。
 
+# 支持按文件路径直接运行，也支持包导入。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from datasets.water_dataset import IGNORE_INDEX, WaterDataset, sample_name
-from models.losses import WaterSegmentationLoss
-from evaluation.metrics import metrics_from_counts
-from models.unet import UNet
-from models.pvt import PVTWaterNet, PVTUANet
-from models.resnet import ResNet50WaterNet
+from supervised.models.losses import WaterSegmentationLoss
+from supervised.evaluation.metrics import metrics_from_counts
+from supervised.models.unet import UNet
+from supervised.models.pvt import PVTWaterNet, PVTUANet, PVTDeepLabV3Plus
+from supervised.models.resnet import ResNet50WaterNet
 
 
-ROOT = Path(__file__).resolve().parents[1]
-RUN_MODE = "train_postprocess"  # train_postprocess：训练后自动后处理；train：仅训练；postprocess：仅后处理。
-POSTPROCESS_CHECKPOINTS = []  # 仅后处理时填写已有 .pth 路径；训练后自动使用本次最佳模型。
-POSTPROCESS_OPTIONS = dict(
-    use_saved_val=True, with_labels=True,  # 默认只处理检查点中保存的内部验证集。
-    threshold=0.5, use_landcover=True, landcover_band=5, water_class=80,
-    save_masks=True, save_visuals=True, max_visualizations=None,
-)  # 仅后处理无标签数据时，可添加 image_dir，并将前两个开关设为 False。
-METHOD = "uafnet"  # 同级方法：unet、pvt、resnet50、uanet、uafnet。
-STAGE = "uafm"    # 仅 uanet 使用；uafnet 保留 MBDC + FPN，由下方开关选择细化路径，不含 PSM/CGM。
-UAFNET_BACKBONE = "pvt_v2_b2.in1k"  # 沿用 grouped PVT 控制基线，本轮只替换细化解码器。
-# METHOD 仍为 uafnet；METHOD="resnet50" 是旧的简单解码头基线，不是本次完整 UAFNet 对照。
-UAFNET_FINAL_RESIDUAL = True  # 沿用已验证的残差基线；False 恢复原最终头。
-# 当前固定主基线：四级 MBDC 都沿用原分支空洞率 (4,8,16)/(2,4,8)。
-# None 使用模型默认值；按尺度调整的历史检查点仍由各自 model_kwargs 正确重建。
-UAFNET_MBDC_DILATIONS = None
-UAFNET_HIGH_RESOLUTION_REFINEMENT = False  # 本轮关闭，避免叠加高分辨率改动。
-UAFNET_REFINEMENT_DECODER = "unetpp"  # unetpp：嵌套细化对照；uafm：恢复原 grouped PVT 控制组。
-# 与 grouped PVT 控制组使用相同 ImageNet 初始化流程；重新训练，不加载已训练的 best_f1.pth 续训。
-IMAGE_DIR = ROOT / "data/Track1/train/images"
-LABEL_DIR = ROOT / "data/Track1/train/labels"
-OUTPUT_DIR = None  # None 按方法自动选择原实验目录；试跑时可指定其他路径。
-POLARIZATIONS = ("VV", "VH")  # 单极化用 ("VV",)；双极化用 ("VV", "VH")，顺序就是网络输入顺序。
-POLARIZATION_BANDS = {"VV": 1, "VH": 2}  # 当前 DFC 文件的通道对应；本地单波段 VV 文件改为 {"VV": 1}。
-# 其他极化组合需按实际文件修改映射；这里只选择已有波段，不生成缺失极化或做辐射转换。
-BASE_CHANNELS = 32       # U-Net 起始通道数。
-DECODER_CHANNELS = 32    # PVT、ResNet、UANet 和 UAFNet 的解码通道数。
-PRETRAINED = True        # 上述骨干加载 ImageNet 权重；解码部分随机初始化。
+# ---------- 执行入口 ----------
+ROOT = Path(r"E:\Code_projects\sar_water_extraction")
+METHOD = "deeplabv3"  # deeplabv3、uafnet、uanet、unet、pvt、resnet50。
+RUN_MODE = "train_postprocess"  # train：仅训练；postprocess：仅输出质量结果。
+
+# ---------- 数据与输出：修改成实际绝对路径 ----------
+IMAGE_DIR = Path(r"E:\Code_projects\sar_water_extraction\data\Track1\train\images")
+LABEL_DIR = Path(r"E:\Code_projects\sar_water_extraction\data\Track1\train\labels")
+OUTPUT_ROOT = Path(r"E:\Code_projects\sar_water_extraction\outputs")
+OUTPUT_DIR = None  # None：在 OUTPUT_ROOT 下按模型命名；指定时填写绝对路径。
+# 有 split_manifest.csv 时使用固定 active train/val，VAL_RATIO 不重新拆分数据。
+POLARIZATIONS = ("VV", "VH")  # 单极化改为 ("VV",)，不会自动生成缺失极化。
+POLARIZATION_BANDS = {"VV": 1, "VH": 2}
+VAL_RATIO = 0.2  # 仅无固定清单的旧数据/合成测试使用。
+MAX_SAMPLES = None  # None 使用全部有效样本；小整数用于试跑。
+
+# ---------- 通用训练参数 ----------
+PRETRAINED = True  # ImageNet 编码器初始化；不是接着水体检查点续训。
 BATCH_SIZE = 2
 EPOCHS = 20
-LEARNING_RATE = 1e-4 if METHOD == "uafnet" else 1e-3
-# UAFNet 论文未给出权重衰减、总轮数和全部增强角度；以下是本项目的明确选择。
-WEIGHT_DECAY = 0.01
-TRAIN_AUGMENTATION = True  # 仅 uafnet 使用：随机 90° 旋转和水平翻转，非论文精确的 12 倍扩增。
-VAL_RATIO = 0.2
+LEARNING_RATE = 1e-4
 SEED = 42
-MAX_SAMPLES = None
-ABNORMAL_F1_THRESHOLD = 0.001
-LOSS_NAME = "bce" if METHOD == "uafnet" else "ce"  # 固定主基线使用 BCE，不叠加其他损失。
-BCE_WEIGHT = 1.0   # 仅 bce_dice 使用；保留 BCE 项原有系数。
-DICE_WEIGHT = 1.0  # 仅 bce_dice 使用，本轮不启用 Dice。
-# 仅 uafnet 使用，顺序：粗预测、第一/第二级细化、最终预测。全设 1 即恢复旧等权监督。
-HEAD_LOSS_WEIGHTS = (1.0, 1.0, 1.0, 1.0)  # 恢复等权控制组，不叠加上一轮权重改动。
-SAMPLING = "hard" if METHOD == "uafnet" else "random"  # 回到全局困难采样基线，保持其规则不变。
-HARD_WARMUP_EPOCHS = 2  # 前两轮完整随机遍历，为所有训练样本建立难度记录。
-HARD_SAMPLE_RATIO = 0.5  # 后续每轮约一半抽样位置来自困难池，总抽样数不增加。
-HARD_POOL_RATIO = 0.25   # 困难池占有分数训练样本的25%；分层模式组内按BCE排序，不读取验证损失。
-LOW_WATER_POOL_RATIO = 0.20  # 混合模式：困难池20%的名额用于补充少水体切片，其余保留全局高BCE样本。
+LOSS_NAME = "bce"  # deeplabv3/uafnet：bce 或 bce_dice；其余双类别方法用 ce。
+BCE_WEIGHT = 1.0   # 以下两项仅 bce_dice 使用。
+DICE_WEIGHT = 1.0
+# 单通道水体方法的优化设置；旧双类别方法仍用 Adam、不启用余弦和增强。
+OPTIMIZER_NAME = "adamw"
+WEIGHT_DECAY = 0.01
+COSINE_SCHEDULE = True
+TRAIN_AUGMENTATION = True  # 随机90度旋转和水平翻转。
+ABNORMAL_F1_THRESHOLD = 0.001  # 仅用于日志提示，不参与损失或选模。
+
+# ---------- 训练样本采样 ----------
+SAMPLING = "hard"  # random / hard / stratified_hard / hybrid_hard；困难采样搭配 BCE。
+HARD_WARMUP_EPOCHS = 2
+HARD_SAMPLE_RATIO = 0.5
+HARD_POOL_RATIO = 0.25
+LOW_WATER_POOL_RATIO = 0.20  # 仅 hybrid_hard：困难池中少水体样本的补充比例。
 WATER_GROUP_NAMES = ("无水体", "水体≤1%", "水体1%–10%", "水体10%–50%", "水体>50%")
-SAVE_FEATURE_MAPS = False  # 默认不输出训练中间层特征图；最终质量图仍由 quality 流程输出。
-FEATURE_MAP_INTERVAL = 5  # 第1轮、每5轮和最后一轮保存；不会额外执行模型前向。
-FEATURE_MAP_SAMPLES = 2  # 最多保存首个验证批次的前2幅；不保存全通道大张量。
+
+# ---------- 当前 DeepLabv3+ 风格模型 ----------
+DEEPLAB_BACKBONE = "pvt_v2_b2.in1k"
+DEEPLAB_DECODER_CHANNELS = 256
+DEEPLAB_LOW_LEVEL_CHANNELS = 48
+DEEPLAB_ASPP_RATES = (3, 6, 9)  # PVT 最深特征步长32；不是原论文步长16的配置。
+DEEPLAB_DROPOUT = 0.1
+# DeepLab 单头权重固定为1；下面的四头权重仅用于 UAFNet。
+
+# ---------- 其他模型选项：只有选中对应 METHOD 时生效 ----------
+BASE_CHANNELS = 32       # U-Net。
+DECODER_CHANNELS = 32    # PVT简单头、ResNet、UANet/UAFNet。
+STAGE = "uafm"           # 仅 UANet 分阶段使用。
+UAFNET_BACKBONE = "pvt_v2_b2.in1k"
+UAFNET_FINAL_RESIDUAL = True
+UAFNET_MBDC_DILATIONS = None  # None：固定原空洞率。
+UAFNET_HIGH_RESOLUTION_REFINEMENT = False
+UAFNET_REFINEMENT_DECODER = "uafm"  # uafm 或 unetpp。
+HEAD_LOSS_WEIGHTS = (1.0, 1.0, 1.0, 1.0)  # UAFNet：粗预测、两级辅助、最终头。
+
+# ---------- 质量输出 ----------
+POSTPROCESS_CHECKPOINTS = []  # 仅 postprocess 模式填写 .pth 绝对路径列表。
+POSTPROCESS_OPTIONS = dict(
+    image_dir=IMAGE_DIR, label_dir=LABEL_DIR,
+    use_saved_val=True, with_labels=True,
+    threshold=0.5, use_landcover=True, landcover_band=5, water_class=80,
+    save_masks=True, save_visuals=True, max_visualizations=None,
+)  # 无标签数据需填写影像绝对路径，label_dir=None，前两个开关设为False。
+SAVE_FEATURE_MAPS = False
+FEATURE_MAP_INTERVAL = 5
+FEATURE_MAP_SAMPLES = 2
 
 
 def build_hard_sample_plan(losses, hard_ratio=0.5, pool_ratio=0.25, seed=42, groups=None, low_water_pool_ratio=None):
@@ -224,7 +246,7 @@ class WaterSegmentationTrainer:
         cprint(f"模型：{self.model_info['model_name']}；构建参数：{self.model_kwargs}", color="cyan", flush=True)
         cprint(f"损失：{loss_name}；优化器：{optimizer_name}；初始学习率：{learning_rate}；"
               f"余弦退火：{cosine_schedule}；训练增强：{train_augmentation}", color="cyan", flush=True)
-        # UAFNet 单通道表示水体 logit；其余历史实验仍使用双类别 CE。
+        # 单通道水体方法输出 logit；历史双类别方法使用 CE。
         self.criterion = WaterSegmentationLoss(loss_name, ignore_index=IGNORE_INDEX, **self.loss_kwargs)
         cprint(f"损失配置：{self.loss_kwargs}；训练头权重：{self.head_loss_weights or '全部为1'}；"
               "验证仅最终头，不乘训练头权重", color="cyan", flush=True)
@@ -374,7 +396,7 @@ class WaterSegmentationTrainer:
                     if (not training and step == 1 and SAVE_FEATURE_MAPS
                             and isinstance(self.model, PVTUANet)
                             and (epoch == 1 or epoch == self.epochs or epoch % FEATURE_MAP_INTERVAL == 0)):
-                        from evaluation.visual import FeatureVisualizer
+                        from supervised.evaluation.visual import FeatureVisualizer
                         visualizer = FeatureVisualizer(self.model, FEATURE_MAP_SAMPLES)
                     # 钩子只读取本次验证特征，离开 with 后自动移除，不影响训练或其他批次。
                     with visualizer if visualizer is not None else nullcontext():
@@ -562,17 +584,19 @@ class WaterSegmentationTrainer:
             self.save_checkpoint(epoch)
 
 
-def create_trainer():
+def create_trainer(method=None):
     """平级选择网络与保存目录，然后创建同一个公共训练器。"""
+    method = METHOD if method is None else method
+    binary_method = method in ("uafnet", "deeplabv3")
     # 在创建训练器时解析，单极化自动构建单通道网络，并重新统计该通道的均值和标准差。
     bands = tuple(POLARIZATION_BANDS[name] for name in POLARIZATIONS)
-    if METHOD == "unet":
+    if method == "unet":
         model_class = UNet
         model_kwargs = dict(in_channels=len(bands), base_channels=BASE_CHANNELS)
         model_info = dict(model_name="unet", normalization="BatchNorm", base_channels=BASE_CHANNELS)
         experiment = "unet_baseline"
 
-    elif METHOD == "pvt":
+    elif method == "pvt":
         model_class = PVTWaterNet
         model_kwargs = dict(in_channels=len(bands), num_classes=2,
                             decoder_channels=DECODER_CHANNELS, pretrained=PRETRAINED)
@@ -580,7 +604,7 @@ def create_trainer():
                           normalization="LayerNorm + decoder BatchNorm", stage="backbone_projection_decoder")
         experiment = "pvt_baseline"
 
-    elif METHOD == "resnet50":
+    elif method == "resnet50":
         model_class = ResNet50WaterNet
         model_kwargs = dict(in_channels=len(bands), num_classes=2,
                             decoder_channels=DECODER_CHANNELS, pretrained=PRETRAINED)
@@ -588,7 +612,7 @@ def create_trainer():
                           normalization="BatchNorm", stage="backbone_projection_decoder")
         experiment = "resnet50_baseline"
 
-    elif METHOD == "uanet":
+    elif method == "uanet":
         model_class = PVTUANet
         model_kwargs = dict(in_channels=len(bands), num_classes=2,
                             decoder_channels=DECODER_CHANNELS, pretrained=PRETRAINED, stage=STAGE)
@@ -598,7 +622,27 @@ def create_trainer():
                           supervision="sum_CE_all_train_heads; final_head_validation")
         experiment = f"pvt_uanet_{STAGE}"
 
-    elif METHOD == "uafnet":
+    elif method == "deeplabv3":
+        model_class = PVTDeepLabV3Plus
+        model_kwargs = dict(in_channels=len(bands), num_classes=1, pretrained=PRETRAINED,
+                            backbone_name=DEEPLAB_BACKBONE, decoder_channels=DEEPLAB_DECODER_CHANNELS,
+                            low_level_channels=DEEPLAB_LOW_LEVEL_CHANNELS,
+                            atrous_rates=DEEPLAB_ASPP_RATES, dropout=DEEPLAB_DROPOUT)
+        model_info = dict(
+            model_name="pvt_deeplabv3plus", backbone=DEEPLAB_BACKBONE,
+            decoder="DeepLabv3+ style ASPP + low-level fusion", output_stride=32,
+            decoder_channels=DEEPLAB_DECODER_CHANNELS, low_level_channels=DEEPLAB_LOW_LEVEL_CHANNELS,
+            aspp_rates=DEEPLAB_ASPP_RATES, aspp_dropout=DEEPLAB_DROPOUT,
+            normalization="PVT LayerNorm + decoder BatchNorm; global pool branch without BN",
+            decoder_convolution="standard Conv2d, not separable", align_corners=False,
+            timm_version=timm.__version__, pretrained=PRETRAINED, supervision="single_head_" + LOSS_NAME,
+            input_representation="single_date_DFC_stored_values; train_mean_std",
+            implementation="PVT OS32 + DeepLabv3+ style decoder",
+            decoder_reference="https://arxiv.org/abs/1802.02611",
+        )
+        experiment = "pvt_deeplabv3plus"
+
+    elif method == "uafnet":
         # 水体论文的单模型结构；损失由 LOSS_NAME 选择，BCE+Dice 属于本项目对照实验。
         model_class = PVTUANet
         model_kwargs = dict(in_channels=len(bands), num_classes=1,
@@ -638,44 +682,44 @@ def create_trainer():
             model_info["refinement_decoder"] = "UAFM"
 
     else:
-        raise ValueError("METHOD 应为 unet、pvt、resnet50、uanet 或 uafnet")
+        raise ValueError("METHOD 应为 deeplabv3、uafnet、uanet、unet、pvt 或 resnet50")
 
-    if METHOD != "unet":
+    if method not in ("unet", "deeplabv3"):
         model_info.update(decoder=("SemanticFPNDecoder + NestedUNetDecoder" if model_info.get("model_name") == "pvt_unetpp_refinement"
                                    else "SemanticFPNDecoder"), decoder_channels=DECODER_CHANNELS,
                           timm_version=timm.__version__, pretrained=PRETRAINED)
 
-    baseline_loss = "bce" if METHOD == "uafnet" else "ce"
-    if (METHOD == "uafnet" and LOSS_NAME not in ("bce", "bce_dice")) or (METHOD != "uafnet" and LOSS_NAME != "ce"):
-        raise ValueError("当前 uafnet 可选 bce/bce_dice；其余双类别模型使用 ce")
+    baseline_loss = "bce" if binary_method else "ce"
+    if (binary_method and LOSS_NAME not in ("bce", "bce_dice")) or (not binary_method and LOSS_NAME != "ce"):
+        raise ValueError("deeplabv3/uafnet 可选 bce/bce_dice；其余双类别模型使用 ce")
     # BCE 保留历史目录；新损失进入独立目录，时间戳继续隔离每次运行。
     if LOSS_NAME != baseline_loss:
         experiment += f"_{LOSS_NAME}"
     if SAMPLING in ("hard", "stratified_hard", "hybrid_hard"):
-        if METHOD != "uafnet" or LOSS_NAME != "bce":
-            raise ValueError("本轮困难采样只比较 UAFNet + BCE；其他方法或损失请设 SAMPLING='random'")
+        if not binary_method or LOSS_NAME != "bce":
+            raise ValueError("困难采样支持 DeepLab/UAFNet + BCE；其他方法或损失请设 SAMPLING='random'")
         experiment += "_hard_sampling"
-    if METHOD == "uafnet" and UAFNET_FINAL_RESIDUAL:
+    if method == "uafnet" and UAFNET_FINAL_RESIDUAL:
         experiment += "_residual"
     if SAMPLING == "stratified_hard":
         experiment += "_stratified"
     elif SAMPLING == "hybrid_hard":
         experiment += "_hybrid"
-    if METHOD == "uafnet" and UAFNET_HIGH_RESOLUTION_REFINEMENT:
+    if method == "uafnet" and UAFNET_HIGH_RESOLUTION_REFINEMENT:
         experiment += "_highres"
-    if METHOD == "uafnet" and UAFNET_MBDC_DILATIONS is not None:
+    if method == "uafnet" and UAFNET_MBDC_DILATIONS is not None:
         experiment += "_scale_mbdc"
     # 非水体论文分支保持旧等权规则；修改 UAFNet 监督权重时单独保存实验。
-    head_loss_weights = tuple(HEAD_LOSS_WEIGHTS) if METHOD == "uafnet" else None
-    if head_loss_weights is not None and head_loss_weights != (1.0, 1.0, 1.0, 1.0):
+    head_loss_weights = (1.0,) if method == "deeplabv3" else tuple(HEAD_LOSS_WEIGHTS) if method == "uafnet" else None
+    if method == "uafnet" and head_loss_weights != (1.0, 1.0, 1.0, 1.0):
         experiment += "_head_weights"
         model_info["supervision"] = f"weighted_sum_{LOSS_NAME}_all_train_heads; final_head_validation"
     # 保留原 VV/VH 目录；单极化或其他组合独立保存，防止比较时混淆。
     if POLARIZATIONS != ("VV", "VH"):
         experiment += "_" + "_".join(name.lower() for name in POLARIZATIONS)
     model_info.update(polarizations=POLARIZATIONS, polarization_bands=dict(zip(POLARIZATIONS, bands)))
-    output_dir = ROOT / "outputs" / experiment if OUTPUT_DIR is None else Path(OUTPUT_DIR)
-    cprint(f"训练方法：{METHOD}；极化：{POLARIZATIONS}；文件波段：{bands}；实验目录：{output_dir}", color="cyan", flush=True)
+    output_dir = OUTPUT_ROOT / experiment if OUTPUT_DIR is None else Path(OUTPUT_DIR)
+    cprint(f"训练方法：{method}；极化：{POLARIZATIONS}；文件波段：{bands}；实验目录：{output_dir}", color="cyan", flush=True)
     return WaterSegmentationTrainer(
         model_class=model_class, model_kwargs=model_kwargs, model_info=model_info,
         image_dir=IMAGE_DIR, label_dir=LABEL_DIR, output_dir=output_dir,
@@ -684,10 +728,10 @@ def create_trainer():
         abnormal_f1_threshold=ABNORMAL_F1_THRESHOLD,
         loss_name=LOSS_NAME,
         loss_kwargs=dict(bce_weight=BCE_WEIGHT, dice_weight=DICE_WEIGHT) if LOSS_NAME == "bce_dice" else {},
-        optimizer_name="adamw" if METHOD == "uafnet" else "adam",
-        weight_decay=WEIGHT_DECAY if METHOD == "uafnet" else 0.0,
-        cosine_schedule=METHOD == "uafnet",
-        train_augmentation=METHOD == "uafnet" and TRAIN_AUGMENTATION,
+        optimizer_name=OPTIMIZER_NAME if binary_method else "adam",
+        weight_decay=WEIGHT_DECAY if binary_method else 0.0,
+        cosine_schedule=binary_method and COSINE_SCHEDULE,
+        train_augmentation=binary_method and TRAIN_AUGMENTATION,
         sampling=SAMPLING, hard_warmup_epochs=HARD_WARMUP_EPOCHS,
         hard_sample_ratio=HARD_SAMPLE_RATIO, hard_pool_ratio=HARD_POOL_RATIO,
         low_water_pool_ratio=LOW_WATER_POOL_RATIO,
@@ -695,14 +739,14 @@ def create_trainer():
     )
 
 
-def main():
+def main(method=None):
     """统一执行训练与后处理；后处理重载本次最佳权重，不沿用内存中的最后一轮。"""
     if RUN_MODE not in ("train_postprocess", "train", "postprocess"):
         raise ValueError("RUN_MODE 应为 train_postprocess、train 或 postprocess")
     checkpoints = list(POSTPROCESS_CHECKPOINTS)
     options = dict(POSTPROCESS_OPTIONS)
     if RUN_MODE != "postprocess":
-        trainer = create_trainer()
+        trainer = create_trainer() if method is None else create_trainer(method)
         trainer.train()
         if RUN_MODE == "train":
             return trainer.run_dir
@@ -719,7 +763,7 @@ def main():
             torch.cuda.empty_cache()
     if not checkpoints:
         raise ValueError("仅后处理时，请在 POSTPROCESS_CHECKPOINTS 填写检查点路径")
-    from evaluation.postprocess import run_postprocess
+    from supervised.evaluation.postprocess import run_postprocess
     cprint(f"开始后处理，使用检查点：{checkpoints}", color="cyan", attrs=["bold"], flush=True)
     return run_postprocess(checkpoints, **options)
 

@@ -2,12 +2,12 @@
 
 > **Original Author: Yanan Ji, 2026**
 
-`src/thres_seg` 是独立的传统阈值处理流程：直接读取影像，输出分割成果；可选标签仅用于评价。它不加载模型、不读取 checkpoint 中的数据划分、不执行网络对比或自动选参。
+`src/thres_segmentation` 是独立的传统阈值处理流程：直接读取影像，输出分割成果；可选标签仅用于评价。它不加载模型、不读取 checkpoint 中的数据划分、不执行网络对比或自动选参。
 
 ## 1. 文件与调用关系
 
 ```text
-src/thres_seg/main.py
+src/thres_segmentation/main.py
   ├─ MODE="dataset" → pipeline.py：栅格读取、分割、结果保存
   │    ├─ threshold.py：Lee 近似滤波与百分位分割
   │    ├─ evaluation/landcover.py：可选土地覆盖补水
@@ -20,11 +20,12 @@ src/thres_seg/main.py
 
 ## 2. 运行方式
 
-在 `src/thres_seg/main.py` 直接设置：
+在 `src/thres_segmentation/main.py` 直接设置：
 
 ```python
-IMAGE_DIR = ROOT / "data/Track1/train/images"
-LABEL_DIR = ROOT / "data/Track1/train/labels"
+IMAGE_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images/val")
+LABEL_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels/val")
+SPLIT_MANIFEST = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/split_manifest.csv")
 BANDS = {"VV": 1, "VH": 2}
 THRESHOLD_OPTIONS = dict(water_percent=10, mode="bottom", lee_window=5,
                          noise_ratio=.12, stretch=(1, 99), power_to_db=False)
@@ -34,14 +35,14 @@ THRESHOLD_OPTIONS = dict(water_percent=10, mode="bottom", lee_window=5,
 
 ```powershell
 conda activate sar-water
-python src/thres_seg/main.py
+python src/thres_segmentation/main.py
 ```
 
-处理无标签的 Track1 test 影像时，设置 `IMAGE_DIR=ROOT/"data/images"`、`LABEL_DIR=None`。处理纯 SAR 单波段文件时，设置实际影像目录、`BANDS={"VV":1}`、`USE_LANDCOVER=False`；不要将影像不存在的第5波段作为土地覆盖读取。
+处理无标签的 Track1 test 影像时，设置 `IMAGE_DIR=Path("E:/Code_projects/sar_water_extraction/data/images")`、`LABEL_DIR=None`、`SPLIT_MANIFEST=None`。处理纯 SAR 单波段文件时，设置实际影像目录、`BANDS={"VV":1}`、`USE_LANDCOVER=False`；不要将影像不存在的第5波段作为土地覆盖读取。
 
 当前默认参数 q=10 是显式固定的百分位比例。不会根据本次标签自动搜索最优参数或估计逐图真实水体面积。可以手工修改 q、暗/亮分支或 Lee 窗口。
 
-**处理范围是目录内全部影像，默认训练影像目录包含原来的训练和验证样本。** 因此本次全目录精度是该目录上的描述统计，不能直接与此前仅326幅验证影像的模型精度作公平排名。此前的联合对照结果保留为历史记录，不代表当前入口的运行方式。
+默认只处理当前固定清单中 active=1 的 val，标签只用于评价。外部影像需设置 `SPLIT_MANIFEST=None`，此时处理指定目录全部影像；外部有标签评价需另行确认完整标注范围。
 
 输出默认保存于 `outputs/thres_seg/quality/时间戳/`；也可直接设置 `OUTPUT_DIR` 为一个尚不存在的目录。默认保存最终掩膜，只绘制前10幅图；`MAX_VISUALIZATIONS=None` 绘制全部，不改变处理范围。
 
@@ -120,13 +121,13 @@ DFC 适配与原地理编码场景的差别：
 
 ## 7. 独立模型评价入口
 
-`src/evaluation/model_eval.py` 保留 single/scan 两种模式，负责整体指标或概率阈值扫描；`boundary_eval.py` 负责空间边界区域，`postprocess.py` 负责最终质量图及辅助数据修正。常规训练无需额外执行 model_eval。旧 `scripts/evaluate.py` 仅转调新入口，修改参数请在新文件顶部进行。
+`src/supervised/evaluation/model_eval.py` 保留 single/scan 两种模式，负责整体指标或概率阈值扫描；`boundary_eval.py` 负责空间边界区域，`postprocess.py` 负责最终质量图及辅助数据修正。常规训练无需额外执行 model_eval。旧 `scripts/evaluate.py` 仅转调新入口，修改参数请在新文件顶部进行。
 
 
 ## 2026-10-27：统一使用固定分组后的 val
 
-- `python src/thres_seg/main.py` 仍独立运行，不依赖 checkpoint。默认输入为 `data/Track1/train/images/val` 与 `labels/val`，按 `split_manifest.csv` 仅选 `split=val, active=1` 的287张；目录里的30张停用副本不会参与统计。这里路径中的第一层 `train` 是官方有标签数据池名，最终 `/val` 才是本项目内部验证分区。
-- `python src/evaluation/compare_threshold.py` 比较模型与传统法。先把顶部 `CHECKPOINT` 填为本次 grouped 训练的 `best_f1.pth`。默认不再使用历史模型；执行前核对清单 SHA256、训练名单和完整验证名单，不允许旧划分模型在新 val 上冒充未见样本评价。
+- `python src/thres_segmentation/main.py` 仍独立运行，不依赖 checkpoint。默认输入为 `data/Track1/train/images/val` 与 `labels/val`，按 `split_manifest.csv` 仅选 `split=val, active=1` 的287张；目录里的30张停用副本不会参与统计。这里路径中的第一层 `train` 是官方有标签数据池名，最终 `/val` 才是本项目内部验证分区。
+- `python scripts/compare_threshold.py` 比较模型与传统法。先把顶部 `CHECKPOINT` 填为本次 grouped 训练的 `best_f1.pth`。默认不再使用历史模型；执行前核对清单 SHA256、训练名单和完整验证名单，不允许旧划分模型在新 val 上冒充未见样本评价。
 - 两种方法共享287张图、标签有效域、边界缓冲带和固定采样点，输出整体 F1/IoU/Precision/Recall 以及局部边界混淆计数。对比入口不做土地覆盖补水；独立阈值入口若启用土地覆盖，额外 `_esa` 结果须与纯阈值结果区分。
 - 训练数据只用于网络拟合和归一化统计；重复核查可能读取训练影像的哈希，但它们不进入对比指标。阈值分割不利用标签决定强度阈值，也不在这次验证中自动搜索最佳参数。
 - val 可用于开发和选模，反复据此调参后不能称为完全独立的最终测试；最终泛化评价仍需另留未参与选模的区域/事件。

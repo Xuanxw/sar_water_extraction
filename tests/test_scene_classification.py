@@ -1,6 +1,10 @@
 """场景规则不把无水图、未知覆盖或永久水体误分为农田等陆地背景。"""
+from pathlib import Path
+import sys
 import unittest
 import numpy as np
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
 from classify_scenes import classify_arrays, describe_region
 
 

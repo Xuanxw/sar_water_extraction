@@ -10,7 +10,8 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import rasterio
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
+                str(Path(__file__).resolve().parents[1] / "scripts")]
 from prepare_train_val_split import assign_split, file_hash, move_split, scan_samples, write_csv
 
 
