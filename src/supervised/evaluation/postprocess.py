@@ -1,9 +1,22 @@
-"""模型概率集成与土地覆盖后处理；由 src/supervised/train.py 的统一入口调用。"""
+"""模型推理后执行以下后处理步骤：
+
+1. 内置/外部历史水体显式补入（按开关执行，保留raw）。
+2. 统计水体面积，并在共同有效覆盖内计算历史新增/消退范围与面积。
+3. 使用DEM/DSM高程估计水深，输出水位、距离及质量标记。
+4. 对照raw/post的像元和岸线精度，输出掩膜、统计表及质量图。
+
+阈值GIS的gis_worker.py另有DEM坡度/坡向与地形排除、OSM建筑/道路排除、
+WorldCover农田排除、填孔及连通域清理；这些步骤尚未接入本入口。
+本文件terrain_gradient仅供质量图显示，不参与水体掩膜修正。
+"""
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.landcover import read_landcover, merge_landcover
 from supervised.evaluation.boundary_eval import BoundaryEvaluator, save_boundary_figure
-from supervised.datasets.water_dataset import WaterDataset, resolve_sample_path
+from datasets.s1_dataset import WaterDataset, resolve_sample_path, sample_name
+from thres_segmentation.auxiliary_data import prepare_auxiliary_inputs
+from thres_segmentation.water_analysis import analyze_water, read_reference_water
+from datasets.speckle import SpeckleFilter
 from torch.utils.data import DataLoader
 import torch
 import rasterio
@@ -12,8 +25,10 @@ from matplotlib.colors import ListedColormap, BoundaryNorm
 from matplotlib.patches import Patch
 import matplotlib.pyplot as plt
 import csv
+import json
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import matplotlib
 matplotlib.use("Agg")  # 只保存对照图，不弹出窗口。
@@ -43,6 +58,7 @@ class WaterEnsemble:
                 std=checkpoint["std"].to(self.device).clamp_min(1e-6).view(1, -1, 1, 1),
                 image_dir=checkpoint["image_dir"], label_dir=checkpoint["label_dir"],
                 val_files=checkpoint["val_files"], ignore_index=checkpoint.get("ignore_index", -1),
+                speckle_filter=SpeckleFilter(checkpoint.get('speckle')),
             ))
             print(f"集成成员：{path}；模型：{checkpoint['model_name']}；轮次：{checkpoint['epoch']}", flush=True)
         # 支持成员各自选择不同波段、重复波段；读取它们的并集，再分别重排和标准化。
@@ -55,7 +71,14 @@ class WaterEnsemble:
         probabilities = []
         for member in self.members:
             indices = [self.bands.index(b) for b in member["bands"]]
-            inputs = (image[:, indices] - member["mean"]) / member["std"]
+            inputs = image[:, indices]
+            # 输入是文件存储值，不能假定已做辐射校正；复现各成员训练时的滤波和标准化。
+            filter_op = member['speckle_filter']
+            if filter_op.config is not None:
+                raw, masks = inputs.cpu().numpy(), valid_mask.cpu().numpy()
+                filtered = np.stack([filter_op(sample, mask) for sample, mask in zip(raw, masks)])
+                inputs = torch.from_numpy(filtered).to(self.device)
+            inputs = (inputs - member["mean"]) / member["std"]
             inputs = inputs.masked_fill(~valid_mask.unsqueeze(1), 0)
             with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
                 outputs = member["model"](inputs)
@@ -104,7 +127,7 @@ def save_result_figure(image_path, label, valid, probability, corrected, thresho
         changes[added] = (0, 210, 120)
     changes[~valid] = 0
     fig, axes = plt.subplots(4, 4, figsize=(20, 22))
-    for i in range(2):
+    for i in range(len(sar)):
         display_valid = valid & np.isfinite(sar[i])
         values = sar[i][display_valid]
         low, high = np.percentile(values, (2, 98)) if values.size else (0., 1.)
@@ -112,6 +135,8 @@ def save_result_figure(image_path, label, valid, probability, corrected, thresho
         stretched = np.clip((sar[i] - low) / max(float(high - low), 1e-6), 0, 1)
         axes[0, i].imshow(np.where(display_valid, stretched, np.nan), cmap="gray", vmin=0, vmax=1)
         axes[0, i].set_title(f"SAR band {i + 1} (P2-P98 display)")
+    if len(sar) < 2:
+        axes[0, 1].text(.5, .5, "Second SAR band unavailable", ha="center", va="center")
     gray = plt.get_cmap("gray").copy()
     gray.set_bad("black")
     for axis, mask, title in ((axes[0, 2], label, "Ground truth"),
@@ -239,8 +264,15 @@ def run_postprocess(checkpoint_paths, image_dir=None, label_dir=None,
                     use_landcover=True, landcover_band=5,
                     water_class=80, save_masks=True, output_dir=None,
                     save_visuals=True, max_visualizations=None,
-                    evaluate_boundaries=True):
-    """一次遍历完成预测、修正、精度表和可视化输出，场景与 bad case 由人工判断。"""
+                    evaluate_boundaries=True, auxiliary_options=None,
+                    auxiliary_cache_dir=None, analysis_options=None,
+                    scene_analysis_options=None, use_external_water=False):
+    """准备数据并推理后执行编号后处理步骤；标签仅用于步骤4的独立评价。
+
+    默认不下载、不补入外部历史水体。面积自动统计；配置参考/高程后分析变化/水深。
+    历史补水会压制退水，故始终分别分析 raw 与 postprocessed。
+    """
+    # 数据准备：恢复检查点输入契约、锁定样本清单，再下载/缓存外部辅助数据。
     ensemble = WaterEnsemble(checkpoint_paths, use_amp)
     first = ensemble.members[0]
     if use_saved_val and any(m["val_files"] != first["val_files"] for m in ensemble.members):
@@ -250,10 +282,33 @@ def run_postprocess(checkpoint_paths, image_dir=None, label_dir=None,
     dataset = WaterDataset(image_dir, label_dir, ensemble.bands)
     if use_saved_val:
         dataset.select_files(first["val_files"])
+    selected = {sample_name(path, image_dir): path for path in dataset.image_paths}
+    if not selected:
+        raise ValueError("后处理没有选中的影像")
+    download_options = dict(auxiliary_options or {})
+    if scene_analysis_options is not None:
+        if download_options:
+            raise ValueError("scene_analysis_options 已提供逐景辅助数据，请勿同时配置 auxiliary_options")
+        scene_options = {name: {**(analysis_options or {}), **scene_analysis_options[name]} for name in selected}
+    elif download_options or analysis_options:
+        cache = (Path(auxiliary_cache_dir) if auxiliary_cache_dir else
+                 Path(__file__).resolve().parents[3] / "data_cache/auxiliary")
+        scene_options = prepare_auxiliary_inputs(selected, cache, analysis_options, **download_options)
+    else:
+        scene_options = {name: {} for name in selected}
+    if use_external_water and any(not options.get("reference_path") for options in scene_options.values()):
+        raise ValueError("use_external_water 需要 reference_path 或 download_history=True")
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     output_dir = (first["path"].parent / "quality" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                   if output_dir is None else Path(output_dir))
     output_dir.mkdir(parents=True, exist_ok=False)
+    (output_dir / "postprocess.json").write_text(json.dumps(dict(
+        stages=["1 prepare", "2 predict", "3 auxiliary correction and analysis", "4 evaluate and export"],
+        checkpoints=[str(path) for path in checkpoint_paths], threshold=threshold,
+        use_landcover=use_landcover, landcover_band=landcover_band, water_class=water_class,
+        use_external_water=use_external_water, scene_analysis_options=scene_options,
+        note="Historical water addition can suppress retreat; compare raw and postprocessed analyses."
+    ), indent=2, ensure_ascii=False, default=str), encoding="utf-8")
     boundary = BoundaryEvaluator(output_dir / "boundary") if with_labels and evaluate_boundaries else None
     rows, visualized = [], 0
     # 每个成员单独统计，再比较集成与后处理，不能预设集成一定更好。
@@ -264,6 +319,7 @@ def run_postprocess(checkpoint_paths, image_dir=None, label_dir=None,
     print(f"样本数：{len(dataset)}；成员数：{len(ensemble.members)}；阈值：{threshold}；土地覆盖修正：{use_landcover}", flush=True)
 
     for step, batch in enumerate(loader, 1):
+        # 模型推理：各成员独立标准化/推理，平均概率后阈值化，得到后处理输入raw。
         image_valid = batch["valid_mask"].to(ensemble.device)
         probabilities, average = ensemble.predict(batch["image"], image_valid)
         raw = (average >= threshold) & image_valid
@@ -272,25 +328,48 @@ def run_postprocess(checkpoint_paths, image_dir=None, label_dir=None,
             label = batch["label"].to(ensemble.device)
             valid = label != first["ignore_index"]
         for i, name in enumerate(batch["name"]):
+            image_path = resolve_sample_path(image_dir, name)
+            options = scene_options[name]
+            # ------ 后处理1：内置/外部历史水体显式补入。------
+            # 内置WorldCover按water_class判水，外部参考按声明编码/覆盖面判水；
+            # 只在SAR有效区补入已知历史水体，未知区不参与；raw保留用于检查真实退水。
             if use_landcover:
-                cover, land_valid = read_landcover(resolve_sample_path(image_dir, name), landcover_band)
+                cover, land_valid = read_landcover(image_path, landcover_band)
                 observed_codes.update(np.unique(cover[land_valid]).tolist())
                 corrected[i] = merge_landcover(
                     raw[i], torch.as_tensor(cover, device=ensemble.device),
                     torch.as_tensor(land_valid, device=ensemble.device), image_valid[i], water_class)
-            if save_masks:
-                with rasterio.open(resolve_sample_path(image_dir, name)) as source:
+            if use_external_water:
+                reference_keys = ("reference_path", "reference_water_values", "reference_dry_values",
+                                  "reference_coverage_path", "vector_assume_complete")
+                history, known = read_reference_water(image_path, **{k: options[k] for k in reference_keys if k in options})
+                corrected[i] |= torch.as_tensor(history & known, device=ensemble.device) & image_valid[i]
+            row = dict(name=name, auxiliary_added_pixels=int((corrected[i] & ~raw[i]).sum().item()))
+            # ------ 后处理2：水体面积与历史新增/消退范围、面积统计。------
+            # raw/post分别交给analyze_water；比较仅使用共同有效覆盖，参考缺失时只统计面积。
+            # 不保存掩膜时使用临时栅格；不覆盖模型原始结果。
+            with TemporaryDirectory(prefix="water_analysis_", dir=output_dir) as scratch:
+                with rasterio.open(image_path) as source:
                     profile = source.profile.copy()
                 # 继承源栅格尺寸/定位；源文件没有地理参考时，输出也不能用于地理矢量定位。
                 profile.update(count=1, dtype="uint8", nodata=255, compress="lzw")
                 for kind, mask in (("raw", raw[i]), ("postprocessed", corrected[i])):
-                    path = output_dir / kind / Path(name).with_suffix(".tif")
+                    path = (output_dir / kind / Path(name).with_suffix(".tif") if save_masks
+                            else Path(scratch) / (kind + ".tif"))
                     path.parent.mkdir(parents=True, exist_ok=True)
                     array = mask.cpu().numpy().astype(np.uint8)
                     array[~batch["valid_mask"][i].numpy()] = 255
                     with rasterio.open(path, "w", **profile) as target:
                         target.write(array, 1)
-            row = dict(name=name)
+                    # ------ 后处理3：DEM/DSM用于几何水深估计（由analyze_water按配置执行）。------
+                    # 步骤2/3共用该调用；高程缺失则跳过水深。坡度/坡向及地形排除目前仅在
+                    # thres_segmentation/gis_worker.py中实现，本入口尚未执行这些掩膜步骤。
+                    analysis = analyze_water(path, output_dir / "analysis" / kind / Path(name).with_suffix(""), **options)
+                    prefix = "raw" if kind == "raw" else "post"
+                    row[prefix + "_water_area_m2"] = analysis["current_water"]["m2"] if analysis["current_water"] else None
+                    row[prefix + "_area_status"] = analysis["status"]
+            # ------ 后处理4：评价与输出。------
+            # 相同有效标签域比较raw/post，按混淆计数汇总；无标签不报告精度。
             for prefix, prediction in (("raw", raw[i]), ("post", corrected[i])):
                 if with_labels:
                     counts = torch.bincount(label[i][valid[i]] * 2 + prediction[valid[i]].long(), minlength=4)

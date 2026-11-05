@@ -5,6 +5,10 @@ import numpy as np
 import rasterio
 import torch
 from torch.utils.data import DataLoader, Dataset
+if __package__:
+    from .speckle import SpeckleFilter
+else:
+    from speckle import SpeckleFilter  # 支持直接执行本数据读取脚本。
 
 # 直接修改这里的变量，然后运行 python src/supervised/datasets/water_dataset.py。
 DATA_ROOT = Path("E:/Code_projects/sar_water_extraction/data")
@@ -47,10 +51,11 @@ class WaterDataset(Dataset):
     保留原始存储值和标签编码，不应用 scale/offset，不推断水体类别。
     """
 
-    def __init__(self, image_dir, label_dir=None, bands=None):
+    def __init__(self, image_dir, label_dir=None, bands=None, speckle=None):
         """建立文件列表；标签按相对路径和不含扩展名的文件名配对。"""
         self.image_dir = Path(image_dir)
         self.bands = bands
+        self.speckle_filter = SpeckleFilter(speckle)
         self.image_paths = sorted(path for path in self.image_dir.rglob("*")
                                   if path.is_file() and path.suffix.lower() in EXTENSIONS)
         self.label_paths = None
@@ -83,6 +88,7 @@ class WaterDataset(Dataset):
         valid = np.isfinite(data.data).all(axis=0) & ~np.ma.getmaskarray(data).any(axis=0)
         image = data.filled(0)
         image[:, ~valid] = 0  # 无效位置占位为 0，有效性仍由 valid_mask 单独记录。
+        image = self.speckle_filter(image, valid)
         sample = {
             "image": torch.from_numpy(image),
             "valid_mask": torch.from_numpy(valid),

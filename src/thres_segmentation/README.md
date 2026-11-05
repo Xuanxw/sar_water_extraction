@@ -1,22 +1,40 @@
 # 独立阈值分割与水体边界质量评价
 
-> **Original Author: Yanan Ji, 2026**
+> **原创作者: 季亚楠, 2026**
 
 `src/thres_segmentation` 是独立的传统阈值处理流程：直接读取影像，输出分割成果；可选标签仅用于评价。它不加载模型、不读取 checkpoint 中的数据划分、不执行网络对比或自动选参。
+
+## 当前BC整景入口
+
+直接运行 `python E:\Code_projects\sar_water_extraction\src\thres_segmentation\main.py`。
+顶部默认`DATA_LAYOUT="full_scene"`，输入`I:\水体数据\prepared_scenes\images\val`及对应labels、split_manifest。只读取清单active=1的val，单VV band 1，关闭土地覆盖。`SCENE_PREFIX=None`包含BC2/BC3；只处理BC3可设`"BC3-"`。这会改变评价范围，模型对照时必须使用相同名单。
+
+`source_image`指向原始GeoTIFF或ZIP，`metadata.py`读取原始栅格头和严格同名XML。ZIP不整包解压；不猜用目录第一份XML。`metadata.csv`记录原始路径、原始CRS/变换/网格间距、标签字段的原文值及XML来源/哈希；`metadata/`保留XML副本。缺失角度保持空值，不补默认角度。XML中的pixelValue、雷达斜距/方位间距可能描述上游产品，不能覆盖当前GeoTIFF的实数类型和地理编码网格；不据此自动转dB或进行辐射校正。
+
+当前纯SAR阈值不使用航向角/入射角进行修正。读取这些字段是为保存准确的来源，**不代表已启用DEM雷达阴影/叠掩处理**。准备影像必须与原始GeoTIFF网格一致，标签也必须同网格。
+
+整景使用三遍有界窗口扫描：原始有效像素统计→带halo的Lee滤波及全景精确百分位→再次滤波并按同一阈值逐块写mask。`BLOCK_SIZE=1024`控制内存，不生成小切片；不会每块独立估计噪声、拉伸或阈值。有效0保留，未知标签255不参与精度，但影像有效的未知区域仍输出预测。
+
+精确百分位通过临时磁盘映射缓冲原地选择，峰值磁盘约`8×单景有效像素数`字节（十亿像素约7.45GiB）；使用`CACHE_DIR`，正常完成或Python异常退出时清理。强制杀进程可能留下临时目录。此方案增加I/O以避免把多份整景浮点数组加载到内存；输出仍是原网格GeoTIFF，不缩放输入。当前按场景依次执行，默认全部val，不自动启动批处理。
+
+`figures/`是最长边`PREVIEW_SIZE=1200`的最近邻缩略图，小水域可能在预览中消失；图中文字、整体`metrics.csv`和逐景`per_image.csv`均来自全分辨率计数。无标签区域不作为非水体评价。`boundary/metrics.csv`与`boundary/per_image.csv`为原生像素1/3/5半径内的精确计数，窗口halo避免块边界伪岸线。整景模式暂不输出旧切片流程的定额采样点和边界PNG，避免把每窗口定额当成每整景定额；边界评价使用全区域计数。
+
+旧DFC使用`DATA_LAYOUT="patch"`，恢复DFC路径、VV/VH和需要的土地覆盖设置；下文DFC说明及历史记录仅适用于该模式。
 
 ## 1. 文件与调用关系
 
 ```text
 src/thres_segmentation/main.py
-  ├─ MODE="dataset" → pipeline.py：栅格读取、分割、结果保存
+  ├─ MODE="download" → auxiliary_data.py：辅助下载、缓存、逐景裁剪
+  ├─ MODE="dataset" → 可选辅助准备 → scene_pipeline.py / pipeline.py：分割、分析、保存
   │    ├─ threshold.py：Lee 近似滤波与百分位分割
   │    ├─ evaluation/landcover.py：可选土地覆盖补水
   │    ├─ evaluation/metrics.py：有标签时统计整体像素精度
   │    └─ evaluation/boundary_eval.py：有标签时统计缓冲带和固定点
-  └─ MODE="gui" → gui.py → gis_worker.py / esa_worker.py
+  └─ MODE="gui" → gui.py → gis_worker.py：本地数据处理和日志
 ```
 
-独立批处理不导入 PyTorch、模型模块或 GUI 模块。原 GUI 功能保留，仍依赖原有 GDAL、OpenCV、GeoPandas、PySide6 环境。`scripts/sar_water_extraction_esa_ui_osm_dsm.py` 是原 GUI 的兼容入口。
+独立批处理不导入 PyTorch、模型模块或 GUI 模块。GUI 保留本地数据处理界面，仍依赖原有 GDAL、OpenCV、GeoPandas、PySide6 环境；网络下载由 main.py 的独立辅助模块负责。`scripts/sar_water_extraction_esa_ui_osm_dsm.py` 是原 GUI 的兼容入口。
 
 ## 2. 运行方式
 
@@ -133,3 +151,146 @@ DFC 适配与原地理编码场景的差别：
 - val 可用于开发和选模，反复据此调参后不能称为完全独立的最终测试；最终泛化评价仍需另留未参与选模的区域/事件。
 
 对于外部数据，独立阈值入口可设 `SPLIT_MANIFEST=None` 并指定新目录。`run_comparison(..., split_manifest=None)` 保留显式历史复核/外部评价调用；直接执行脚本始终传入当前固定清单，不回退到旧模型。
+
+## 8. 水体面积、历史变化和 DEM/DSM 水深（2026-11-04）
+
+`water_analysis.py` 为三个入口共用的分析模块：整景 `scene_pipeline.py`、旧切片 `pipeline.py` 和 GUI 的 `SARWorker`。分析使用最终水体掩膜，不使用评价标签作为历史水体。历史数据不参与当前提取阈值选择。
+
+### 配置与运行
+
+安装 `requirements.txt` 中的 `pyproj>=3.6,<4`，或在当前运行环境执行 `python -m pip install "pyproj>=3.6,<4"`。历史矢量读写使用已有依赖 Fiona。GUI 仍需要原有 PySide6、GDAL 等依赖。
+
+- 批处理：修改 `main.py` 的 `ANALYSIS_OPTIONS` 后照常运行。面积自动统计；`reference_path=None` 不比较变化；`elevation_path=None` 不计算水深。默认两个可选路径都为空，需填入自己的文件。
+- GUI：新增“面积、变化与水深”页。选历史文件、编码、有效覆盖面，按需启用水深。高程路径留空时可复用本次 DEM 地形处理的高程；只有坡度/坡向文件时必须单独提供 DEM/DSM。main 下载的 Copernicus GLO-30 按 DSM 标记，GUI 选择该文件时也应选择 DSM。
+- 手动指定本地参考时，多景使用同一套分析参数；开启 main 的辅助下载后，则逐景自动准备对应范围并传入各景路径。不同参考年份仍需分别运行。`depth_scope='new_water'` 需要历史数据；若明确要估算全部水体，可设 `'all_water'`。
+
+已有水体掩膜也可单独分析，不必重复分割（从项目根目录设置 `PYTHONPATH=src`）：
+
+```python
+from thres_segmentation.water_analysis import analyze_water
+
+result = analyze_water(
+    mask_path=r'E:\results\SARWater.tif',  # 0非水体、1水体、255无效
+    output_dir=r'E:\results\analysis_new',  # 必须是新目录
+    reference_path=r'E:\reference\historical_water.tif',
+    reference_water_values=(1,), reference_dry_values=(0,),
+    elevation_path=r'E:\terrain\dem.tif',
+    elevation_kind='DEM', elevation_scale=1., depth_scope='new_water',
+)
+```
+
+**历史编码必须确认：**
+
+| 数据来源 | 水体值 | 非水体值 |
+|---|---|---|
+| 当前阈值输出 / 普通二值掩膜 | 1 | 0 |
+| 旧版 GUI 下载的 `esa_water_mask.tif` | 0 | 1 |
+| 原始 ESA WorldCover | 80 | 10,20,30,40,50,60,70,90,95,100 |
+
+栅格 NoData、内部有效掩膜以外、未配置的类别及覆盖外均为未知，不能作为非水体。历史类别使用最近邻对齐，DEM/DSM 使用双线性对齐到当前掩膜网格。输入必须包含正确 CRS；无 CRS 的旧切片可继续分割，但面积报告 `unavailable_missing_crs`，不伪造平方米。
+
+历史水体矢量支持 SHP、GPKG、GeoJSON 中的 Polygon/MultiPolygon（多图层 GPKG 默认读取首层；需先导出指定水体层）。所有要素都按水体面处理，不能混入行政区或非水体要素。必须设置 `reference_coverage_path` 为调查有效范围面，或明确设置 `vector_assume_complete=True`，表示水体矢量完整覆盖当前影像、面外可视为非水体。不会根据水体面包络自动猜测有效调查范围。空水体图层在已知调查范围内表示非水体。多边形按像元中心栅格化，边界存在分辨率量化误差。
+
+### 面积和变化口径
+
+投影网格使用仿射行列式和 CRS 两轴单位换算平方米，支持英尺及旋转网格；这属于地图投影平面面积，保留投影变形，定量比较应使用适宜的当地/等积投影。经纬度网格使用对应椭球的逐像元多边形面积，不能把平方度当平方米。
+
+当前总水体面积按当前有效覆盖统计；以下变化面积全部限定在 **当前与历史共同有效覆盖** 内：
+
+- 持续水体：当前水体 ∩ 历史水体。
+- 新增水体：当前水体 ∩ 历史非水体。
+- 消退水体：当前非水体 ∩ 历史水体。
+- 净变化：新增面积 − 消退面积 = 共同覆盖内当前水体面积 − 历史水体面积。
+
+报告另列共同覆盖面积、历史未知面积和当前总水体面积；不能把当前全覆盖面积与历史局部面积直接相减。WorldCover 属于特定时期/定义的产品，与当前水体差异不自动等于一次洪水。相邻景/重叠切片面积不可直接求和为区域总面积，需先按时间和覆盖去重或拼接。
+
+### 水深方法与适用边界
+
+方法参考本地 `docs/papers/isprs-annals-XI-3-2026-493-2026.pdf` 第 3.3.1 节和 `docs/papers/1-s2.0-S1569843226003286-main.pdf` 第 3.2–3.3 节。前者给出岸线高程反距离加权水位及水位减地形高程，后者强调连通水体的水位约束。
+
+实现步骤：对当前水体做四连通分组 → 每组取一像元外侧的有效非水体岸线 → 从对齐的 DEM/DSM 取岸线高程 → 同组内用最近至多 `depth_neighbors=100` 个岸线样本做距离平方反比加权 → `depth = water_level − elevation`。距离使用以场景中心为原点的局部方位等距投影，以米为单位；大范围区域仍有投影变形，建议按水文完整区域处理。只使用历史已知非水体岸线（存在参考时），不将历史水体、无效区或影像裁切边界当作干岸线。
+
+至少需要 `depth_min_boundary=3` 个可用岸线样本，每个像元只使用 `depth_max_distance_m=5000` 米范围内的样本。单连通域岸线超过20万点时按顺序等间隔抽样，并在组件表记录抽样前后数量；这些是可调整的工程参数，不是经本项目实测标定的参数。不同连通域独立拟合，近岸高程不跨独立水体混用。该方法仍可能在一个复杂连通域内跨越堤坝或弯曲岸线进行欧氏距离插值，不具备水动力模型的水力连通约束。
+
+这是借鉴论文的**单时相几何估算基线**，未实现 FLEXTH Method B 的完整坡度过滤、缺口闭合、百分位策略，也未实现 KDFIMv2 的多时相补全、地形路由和淹没历时计算。区别于论文将负值归零，本实现把实质负深度设为 NoData 并标记冲突；仅绝对值不超过 `1e-9 m` 的浮点舍入误差归零。合法零水深保留。
+
+DEM/DSM 高程须用 `elevation_scale` 转成米；重投影只处理水平坐标，不转换垂直基准。上采样到 SAR 分辨率不会提升 DEM/DSM 的地形细节或精度。DSM 中建筑、植被会影响估计，其结果是相对地表模型表面的高度差，不能直接当裸地积水深度。普通 DEM/DSM 通常缺少永久水体水底地形，因此默认只对历史已知非水体中的新增水体计算深度；没有历史数据时若选择 `all_water`，必须自行确认水下地形适用性。岸线定位、配准、地形垂直误差、桥梁/堤防和连通性误差均会传递到水深，需用同期水位或实测深度验证。
+
+面积和变化采用窗口读写，不改变网格或把窗口当独立场景。水深为保证整景连通性，目前使用整景数组，默认 `depth_max_pixels=25000000` 防止无界内存占用，超过则明确报错；该上限仍可能占用数 GB 内存，应使用水文完整 ROI 或在确认内存容量后调整，不能无提示地切块生成局部水位。
+
+### 输出
+
+批处理：`analysis/<method>/<scene>/`，即使 `SAVE_MASKS=False` 也通过临时掩膜完成分析。GUI：提取输出目录下新建带时间戳的 `analysis_*`，避免覆盖历史分析。
+
+| 文件 | 内容 |
+|---|---|
+| `summary.json` / `areas.csv` | 面积 m²/ha/km²、共同覆盖口径、输入参数、质量计数和方法限制；JSON仅在成功完成后写入 |
+| `water_change.tif` | 0持续非水体、1持续水体、2新增、3消退、255未知 |
+| `water_changes.gpkg` | 新增/消退多边形及类别、m²面积；与栅格一致，不做边界平滑；可在处理窗口处切分为多个要素 |
+| `water_depth_m.tif` | 有效水深，NoData=-9999，0为合法值 |
+| `water_level_m.tif` | 插值水面高程，包含负深度冲突点的水位供诊断 |
+| `boundary_distance_m.tif` | 获得足够支持时距最近使用岸线点的距离 |
+| `depth_quality.tif` | 0非目标、1成功估算、2高程缺失、3岸线不足、4距离内支持不足、5负深度冲突、6排除历史水体、7历史未知、255当前无效 |
+| `depth_components.csv` | 各连通水体岸线样本数、估计像元数和负深度数量 |
+
+变化产品仅在指定历史参考时生成，水深产品仅在指定高程时生成。体积、面积加权平均水深仅对质量码1的有效估算区域积分，不代表未估算部分或永久水体的总体积。
+
+验证：`python -m unittest discover -s tests -p test_water_analysis.py -v`，另运行现有 `test_threshold_pipeline.py` 和 `test_bc_threshold.py`。合成测试检验面积/编码/NoData/边界和数值语义，不代表真实场景的水深精度验证。
+
+## 9. main 辅助数据下载与基础 GUI
+
+代码中的批处理阶段统一标注为 **1 数据准备 → 2 基础预测 → 3 辅助修正/水体分析 → 4 评价与输出**。
+`pipeline.py` 的切片流程保留原始阈值结果及可选内置 WorldCover 补水结果；
+`scene_pipeline.py` 使用全景统一阈值和分块 I/O，外部历史数据用于对比，不强制补水。
+GUI 的 `gis_worker.py` 也按四阶段注释，其阶段3保持原有顺序：
+填孔 → 建筑/道路/地形/农田排除 → 形态学并恢复排除区 → 连通域筛选；阶段4输出最终水体与分析成果。
+这些注释不改变现有 GIS 参数或算法顺序。
+
+监督模型现已复用这里的下载/缓存和水体分析模块，配置入口是
+`src/supervised/train.py` 的 `POSTPROCESS_OPTIONS`，用法见[项目说明](../../README.md#后处理四阶段与在线辅助数据)。
+两类模型的滤波/归一化均不代表已经执行 Sigma0/Gamma0 辐射校正。
+
+辅助数据准备由 `auxiliary_data.py` 实现，通过 `main.py` 调用，不依赖 PySide6、GeoPandas、OpenCV 或 `osgeo`，也不调用 `ESAWaterWorker`/`SARWorker`。GUI 只保留本地文件选择、处理参数、运行控制和日志；已移除专用历史下载页、自动 DEM 下载选择和需要联网的 OSM/WorldCover 掩膜开关。旧 `esa_worker.py` 及 GIS 工作线程中的历史下载代码不再由基础 GUI 触发。
+
+在 `main.py` 顶部设置：
+
+```python
+MODE = 'dataset'  # 先下载/准备，再提取与分析；改为'download'则只准备辅助数据。
+AUXILIARY_OPTIONS = dict(
+    download_history=True,
+    download_elevation=True,
+    worldcover_year=2021,
+    buffer_m=1000.,
+    max_tiles_per_scene=64,
+    max_mosaic_pixels=100000000,
+    timeout=60,
+    retries=3,
+)
+```
+
+仍使用同一个命令：`python src/thres_segmentation/main.py`。下载开关默认关闭，需按需开启；`MODE='download'` 至少开启一个开关。仅下载高程时不要求历史数据；`MODE='dataset'` 中的默认 `new_water` 水深则需要历史参考，缺少时在下载前报错。
+
+- **历史水体**：支持 [ESA WorldCover 2020 v100 和 2021 v200](https://esa-worldcover.org/en/data-access)，下载对应3°瓦片并提取80类水体；不是按任意日期下载灾前 SAR 或动态水体。两个年份的算法版本不同，年份差异也可能含分类方法差异。
+- **高程**：下载 [Copernicus GLO-30 公共 COG](https://registry.opendata.aws/copernicus-dem/) 的1°瓦片，作为 DSM、米制高程传给水深模块；不作为裸地 DTM 或水下测深数据。
+- **本地优先**：`ANALYSIS_OPTIONS['reference_path']` / `['elevation_path']` 已填有效本地文件时，对应下载被跳过。本地文件不存在会明确报错，不静默替换为远程产品。
+- **逐景范围**：按实际 `active=1, split=val` 清单和 `SCENE_PREFIX` 选择各景；外部目录模式与分割使用相同扩展名。每景分别读取 CRS 和包围框，避免仅取第一景或把相隔很远的景拼成巨幅辅助影像。影像包围框内部的 NoData 由后续分析有效掩膜排除。
+- **自动接入**：下载后为各景提供 `scene_analysis_options`，直接连接历史比较及水深模块，无需手动复制文件名。不同极化方法共享该景的辅助数据，不重复下载。
+
+缓存目录由 `AUXILIARY_CACHE_DIR` 控制：
+
+```text
+data_cache/auxiliary/
+  tiles/worldcover/       原始WorldCover瓦片和.source.json来源记录
+  tiles/copernicus/       原始Copernicus瓦片和.source.json来源记录
+  scenes/<范围与产品标识>/worldcover.tif 或 copernicus.tif
+                          对应.manifest.json记录源文件、范围及输出签名
+  batch_<标识>.json       成功准备后的逐景输入、产品、URL及analysis_options清单
+```
+
+新 `worldcover.tif` 统一为 **1水体、0非水体、255未知**，与当前提取结果一致；原始类别0、NoData及未识别类别均保留为未知。旧 GUI 的 `esa_water_mask.tif` 仍是0水体/1非水体，手动引用时必须选择旧编码。
+
+原始瓦片以流式方式下载到唯一临时文件，校验 HTTP 长度、TIFF签名、CRS及角部栅格块后原子替换；HTML/XML错误页不能作为成功数据。缓存命中需来源URL、文件大小、修改时间匹配并通过栅格检查，下载时计算 SHA256 记录在来源文件中（不等同于服务端发布校验和）。派生裁剪按源文件签名复用，使用最细源网格角分辨率、窗口拼接，不把整瓦片读入 NumPy 内存。Copernicus 在高纬度可能含变宽经度像元，重采样不提升其真实分辨率。
+
+某个瓦片404、访问失败或文件不完整时，准备任务报错，不将缺失瓦片默认为陆地或零高程，也不发布本次成功清单；此前成功的瓦片缓存仍可复用。没有断点续传，失败重试从该瓦片起点重新下载。跨180°经线场景需要先拆分；场景瓦片数和裁剪像元数有上限，避免错误范围触发大规模下载。缓存需预留原始瓦片与逐景辅助影像磁盘空间。
+
+验证入口：`python -m unittest discover -s tests -p test_auxiliary_data.py -v`。下载回归使用本地真实GeoTIFF内容和受控HTTP响应，覆盖缓存复用、错误页、截断、重试、取消、两期编码、拼接、逐景选择及 main 模式传递；实际下载仍依赖网络和服务端数据可用性。

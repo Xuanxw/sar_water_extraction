@@ -3,6 +3,8 @@ import csv
 import gc
 import hashlib
 import shutil
+import random
+import traceback
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +25,8 @@ from termcolor import cprint
 # 支持按文件路径直接运行，也支持包导入。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from datasets.water_dataset import IGNORE_INDEX, WaterDataset, sample_name
+from datasets.sar_scene_dataset import IGNORE_INDEX, SARSceneDataset
+from datasets.speckle import SpeckleFilter
 from supervised.models.losses import WaterSegmentationLoss
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.models.unet import UNet
@@ -34,28 +37,54 @@ from supervised.models.resnet import ResNet50WaterNet
 # ---------- 执行入口 ----------
 ROOT = Path(r"E:\Code_projects\sar_water_extraction")
 METHOD = "deeplabv3"  # deeplabv3、uafnet、uanet、unet、pvt、resnet50。
-RUN_MODE = "train_postprocess"  # train：仅训练；postprocess：仅输出质量结果。
+RUN_MODE = "train"  # 下一轮：仅调整平方根类别权重；只训练，质量输出由你单独执行。
+# None 从头训练；填写 last.pth 从已完成轮次继续，train_end.pth 可重跑本轮验证。
+RESUME_CHECKPOINT = None  # 新权重方案从同一ImageNet初始化开始，不续跑旧损失实验。
 
 # ---------- 数据与输出：修改成实际绝对路径 ----------
-IMAGE_DIR = Path(r"E:\Code_projects\sar_water_extraction\data\Track1\train\images")
-LABEL_DIR = Path(r"E:\Code_projects\sar_water_extraction\data\Track1\train\labels")
+IMAGE_DIR = Path(r"I:\水体数据\prepared_scenes\images")
+LABEL_DIR = Path(r"I:\水体数据\prepared_scenes\labels")
 OUTPUT_ROOT = Path(r"E:\Code_projects\sar_water_extraction\outputs")
-OUTPUT_DIR = None  # None：在 OUTPUT_ROOT 下按模型命名；指定时填写绝对路径。
+OUTPUT_DIR = Path(r"E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_labels_corrected")
 # 有 split_manifest.csv 时使用固定 active train/val，VAL_RATIO 不重新拆分数据。
-POLARIZATIONS = ("VV", "VH")  # 单极化改为 ("VV",)，不会自动生成缺失极化。
-POLARIZATION_BANDS = {"VV": 1, "VH": 2}
+POLARIZATIONS = ("VV",)  # 单极化改为 ("VV",)，不会自动生成缺失极化。
+POLARIZATION_BANDS = {"VV": 1}
 VAL_RATIO = 0.2  # 仅无固定清单的旧数据/合成测试使用。
 MAX_SAMPLES = None  # None 使用全部有效样本；小整数用于试跑。
 
+# ---------- 在线斑点滤波：先滤波，再计算/应用训练集均值标准差 ----------
+SPECKLE_FILTER = "none"  # none：保持现有基线；lee：开启独立滤波实验。
+SPECKLE_INPUT_DOMAIN = "amplitude"  # 线性幅度；若确认是线性功率则填 intensity，不支持dB。
+SPECKLE_WINDOW_SIZE = 3  # 普通Lee的奇数窗口；先用3×3，避免同时改变多个实验因素。
+SPECKLE_ENL = 1.0  # 功率域等效视数参数，不代表已测得本批ORG的真实ENL。
+# 开启/修改滤波时设 RESUME_CHECKPOINT=None；旧模型不能作为同一次实验直接续跑。
+# 不改写影像；amplitude会平方→功率域Lee→开方，最后仍以幅度进入标准化。
+
+# ---------- 整景读取：只在内存中取窗口，不生成切片文件 ----------
+DATA_LAYOUT = "full_scene"  # 旧DFC实验可明确设为patch，才使用旧数据集。
+SCENE_OPTIONS = dict(
+    cache_dir=Path(r"E:\Code_projects\sar_water_extraction\data_cache\bc_scenes"),
+    window_size=1024, halo=128,  # 中心768×768计分，四周128像素仅提供上下文。
+    normalization_windows=2,    # 每个训练景固定抽2个窗口估计输入统计量；不使用val。
+    max_open_scenes=4,
+    windows_per_epoch=4096,     # 每轮抽取的训练窗口上限；验证仍覆盖全部已标注窗口。
+    num_workers=2,              # 每worker独立句柄；有界预取和GDAL缓存。
+)
+
 # ---------- 通用训练参数 ----------
-PRETRAINED = True  # ImageNet 编码器初始化；不是接着水体检查点续训。
+PRETRAINED = True  # 从本地缓存的ImageNet权重初始化编码器；解码器重新初始化。
+# prepare_bc3重建后：SHP面内水体1、面外非水体0。仅加载编码器预训练，不续训旧标签下的水体模型。
+CPU_THREADS = 4  # 限制主进程CPU线程，避免模型初始化/小算子过度并行。
 BATCH_SIZE = 2
 EPOCHS = 20
 LEARNING_RATE = 1e-4
 SEED = 42
 LOSS_NAME = "bce"  # deeplabv3/uafnet：bce 或 bce_dice；其余双类别方法用 ce。
 BCE_WEIGHT = 1.0   # 以下两项仅 bce_dice 使用。
-DICE_WEIGHT = 1.0
+DICE_WEIGHT = 1.0  # LOSS_NAME="bce"时不参与损失。
+CLASS_WEIGHT_MODE = "train_pixels_sqrt"  # none、train_pixels（原基线）、train_pixels_sqrt（本次对照）。
+# 逆频率或其平方根，再使训练分布下平均权重为1；未知像素和val均不参与。
+# 仅作用于训练损失，验证loss仍使用未加权BCE。
 # 单通道水体方法的优化设置；旧双类别方法仍用 Adam、不启用余弦和增强。
 OPTIMIZER_NAME = "adamw"
 WEIGHT_DECAY = 0.01
@@ -64,7 +93,7 @@ TRAIN_AUGMENTATION = True  # 随机90度旋转和水平翻转。
 ABNORMAL_F1_THRESHOLD = 0.001  # 仅用于日志提示，不参与损失或选模。
 
 # ---------- 训练样本采样 ----------
-SAMPLING = "hard"  # random / hard / stratified_hard / hybrid_hard；困难采样搭配 BCE。
+SAMPLING = "random"  # 本轮用固定种子的随机窗口抽样，与类别权重配合；先关闭困难重采样。
 HARD_WARMUP_EPOCHS = 2
 HARD_SAMPLE_RATIO = 0.5
 HARD_POOL_RATIO = 0.25
@@ -91,11 +120,38 @@ UAFNET_REFINEMENT_DECODER = "uafm"  # uafm 或 unetpp。
 HEAD_LOSS_WEIGHTS = (1.0, 1.0, 1.0, 1.0)  # UAFNet：粗预测、两级辅助、最终头。
 
 # ---------- 质量输出 ----------
-POSTPROCESS_CHECKPOINTS = []  # 仅 postprocess 模式填写 .pth 绝对路径列表。
+POSTPROCESS_CHECKPOINTS = [Path(r"E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_balanced_bce_labels_corrected_bc_scenes\20261103_203233_244527\best_f1.pth")]
+# 整景仅单模型，默认扫描全部val；复用相同output_dir可继续未完成景。
+SCENE_QUALITY_OPTIONS = dict(
+    output_dir=Path(r"E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_balanced_bce_labels_corrected_bc_scenes\20261103_203233_244527\quality\baseline_scan"),
+    thresholds=[i/100 for i in range(1,100)], threshold=0.5,
+    boundary_radii=(1,3,5), save_probabilities=True, save_visuals=True,
+    opening_radius=0, closing_radius=0, num_workers=0, scene_limit=None,
+)
 POSTPROCESS_OPTIONS = dict(
+    # 数据准备：只对所选验证/外部影像下载；与阈值分割共用缓存，本地路径优先。
     image_dir=IMAGE_DIR, label_dir=LABEL_DIR,
     use_saved_val=True, with_labels=True,
-    threshold=0.5, use_landcover=True, landcover_band=5, water_class=80,
+    auxiliary_cache_dir=Path(r"E:\Code_projects\sar_water_extraction\data_cache\auxiliary"),
+    auxiliary_options=dict(download_history=False, download_elevation=False,
+                           worldcover_year=2021, buffer_m=1000.,
+                           max_tiles_per_scene=64, max_mosaic_pixels=100000000,
+                           timeout=60, retries=3),
+    # 模型推理参数：复现检查点的滤波/归一化，生成后处理输入raw。
+    threshold=0.5,
+    # 后处理1：内置/外部历史水体显式补入；与下载开关独立，默认只对比。
+    use_landcover=False, landcover_band=5, water_class=80,
+    use_external_water=False,
+    # 后处理2/3：面积与历史变化统计，以及DEM/DSM几何水深估计。
+    # 监督入口尚未接入阈值GIS的坡度/坡向、地形、OSM建筑道路或农田排除。
+    analysis_options=dict(
+        reference_path=None, reference_water_values=(1,), reference_dry_values=(0,),
+        reference_coverage_path=None, vector_assume_complete=False,
+        elevation_path=None, elevation_kind="DEM", elevation_scale=1.,
+        depth_scope="new_water", depth_neighbors=100, depth_min_boundary=3,
+        depth_max_distance_m=5000., depth_max_pixels=25000000,
+    ),  # 下载高程是DSM（米）；new_water水深需要历史参考，永久水体没有水底高程。
+    # 后处理4：评价与输出；分别保留raw/post分析成果及相同有效域内的质量指标。
     save_masks=True, save_visuals=True, max_visualizations=None,
 )  # 无标签数据需填写影像绝对路径，label_dir=None，前两个开关设为False。
 SAVE_FEATURE_MAPS = False
@@ -157,12 +213,24 @@ class WaterSegmentationTrainer:
         loss_name="ce", optimizer_name="adam", weight_decay=0.0,
         cosine_schedule=False, train_augmentation=False, loss_kwargs=None,
         sampling="random", hard_warmup_epochs=2, hard_sample_ratio=0.5, hard_pool_ratio=0.25,
-        low_water_pool_ratio=0.20, head_loss_weights=None,
+        low_water_pool_ratio=0.20, head_loss_weights=None, scene_options=None, class_weight_mode="none",
+        resume_checkpoint=None, speckle=None,
     ):
         """准备固定划分、输入统计量、模型、优化器和实验目录。"""
         self.image_dir, self.label_dir = Path(image_dir), Path(label_dir)
         self.output_dir = Path(output_dir)
         self.model_kwargs, self.model_info = dict(model_kwargs), dict(model_info)
+        self.resume_path = Path(resume_checkpoint) if resume_checkpoint is not None else None
+        # 仅加载用户指定的本地训练检查点；先放CPU，避免临时占用两份显存。
+        resume = torch.load(self.resume_path, map_location="cpu", weights_only=False) if self.resume_path else None
+        self.speckle = SpeckleFilter(speckle).config
+        # 尽早拦截，避免先花时间统计整套影像后才发现续跑预处理不同。
+        if resume is not None and SpeckleFilter(resume.get('speckle')).config != self.speckle:
+            raise ValueError('续跑滤波配置与检查点不同；滤波对照请设RESUME_CHECKPOINT=None')
+        cprint(f"标准化前斑点滤波：{self.speckle or '关闭'}", 'cyan', flush=True)
+        if self.speckle is not None:
+            self.output_dir = self.output_dir.with_name(self.output_dir.name + '_lee')
+        self.start_epoch, self.resume_validation = 1, False
         self.bands, self.batch_size, self.epochs = bands, batch_size, epochs
         self.learning_rate, self.val_ratio, self.seed = learning_rate, val_ratio, seed
         self.max_samples = max_samples
@@ -194,52 +262,116 @@ class WaterSegmentationTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.use_amp = self.device.type == "cuda"
 
-        self.dataset = WaterDataset(self.image_dir, self.label_dir, bands)
-        split_path = self.image_dir.parent / "split_manifest.csv"
-        self.split_info = {"split_strategy": "legacy_random", "split_manifest_sha256": ""}
-        if split_path.is_file():
-            # 物理文件全部保留；只有清单 active=1 的代表样本参加训练/验证。
-            with split_path.open(encoding="utf-8-sig", newline="") as stream:
-                split_rows = list(csv.DictReader(stream))
-            indices = {sample_name(path, self.image_dir): i for i, path in enumerate(self.dataset.image_paths)}
-            active = [row for row in split_rows if int(row["active"]) == 1]
-            train_rows = [row for row in active if row["split"] == "train"]
-            val_rows = [row for row in active if row["split"] == "val"]
-            if {r["group_id"] for r in train_rows} & {r["group_id"] for r in val_rows}:
-                raise ValueError("固定清单的同组样本不能跨 train/val")
-            train_ids = [indices[row["name"]] for row in train_rows]
-            val_ids = [indices[row["name"]] for row in val_rows]
+        self.scene_options = dict(scene_options) if scene_options is not None else None
+        self.loader_options = dict(num_workers=0)
+        if self.scene_options is not None:
+            if self.label_dir.resolve() != (self.image_dir.parent/'labels').resolve():
+                raise ValueError('整景影像/标签需位于同一prepared_scenes根目录的images和labels下')
+            options = dict(self.scene_options)
+            workers = options.pop('num_workers', 2)
+            self.windows_per_epoch = options.pop('windows_per_epoch', None)
+            self.loader_options = dict(num_workers=workers, pin_memory=self.use_amp)
+            if workers:
+                self.loader_options.update(persistent_workers=True, prefetch_factor=2)
+            self.dataset = SARSceneDataset(self.image_dir.parent, bands=bands, seed=seed, speckle=self.speckle, **options)
+            split_path = self.dataset.manifest_path
+            train_ids, val_ids = self.dataset.train_ids, self.dataset.val_ids
             if max_samples is not None:
-                # 短程试跑也保留两侧的固定归属，不从全部文件重新随机抽样。
-                limit = max(1, int(max_samples * (1 - val_ratio)))
-                train_ids, val_ids = train_ids[:limit], val_ids[:max(1, max_samples - limit)]
-            if not train_ids or not val_ids:
-                raise ValueError("固定清单需要非空的 train 和 val 有效样本")
-            self.train_set = Subset(self.dataset, train_ids)
-            self.val_set = Subset(self.dataset, val_ids)
-            self.split_info = dict(split_strategy="scene_stratified_grouped",
+                # 仅试跑限制窗口数，不改变地理归属；正式配置为None。
+                limit = max(1, int(max_samples*(1-val_ratio)))
+                train_ids = [train_ids[i] for i in np.linspace(0, len(train_ids)-1, min(limit,len(train_ids)), dtype=int)]
+                val_ids = [val_ids[i] for i in np.linspace(0, len(val_ids)-1, min(max(1,max_samples-limit),len(val_ids)), dtype=int)]
+            self.train_set, self.val_set = Subset(self.dataset, train_ids), Subset(self.dataset, val_ids)
+            self.split_info = dict(split_strategy='scene_grouped_core_windows', data_layout='full_scene',
                                    split_manifest=str(split_path),
-                                   split_manifest_sha256=hashlib.sha256(split_path.read_bytes()).hexdigest())
-            # 新划分的分数不可直接与历史随机划分混排，使用独立实验目录。
-            self.output_dir = self.output_dir.with_name(self.output_dir.name + "_grouped")
-            cprint(f"固定分组清单：{split_path}；停用副本/标签冲突：{len(split_rows) - len(active)}", "cyan", flush=True)
+                                   split_manifest_sha256=hashlib.sha256(split_path.read_bytes()).hexdigest(),
+                                   window_size=self.dataset.window_size, window_halo=self.dataset.halo,
+                                   validation_protocol='nonoverlap_core_all_labeled_pixels; halo_context; no resize',
+                                   window_cache_key=self.dataset.cache_key,
+                                   loader_workers=workers, loader_prefetch=2 if workers else 0,
+                                   normalization_protocol='fixed_training_windows_estimate',
+                                   normalization_windows_per_scene=self.dataset.normalization_windows,
+                                   train_windows_per_epoch=self.windows_per_epoch,
+                                   evaluation_scope='smoke_window_subset' if max_samples is not None else 'all_active_labeled_scene_cores')
+            revision = self.image_dir.parent / 'revision_settings.json'
+            if revision.is_file():
+                self.split_info['label_revision_sha256'] = hashlib.sha256(revision.read_bytes()).hexdigest()
+                self.split_info['label_semantics'] = '0 non_water; 1 water; 255 invalid; SHP union is water'
+            self.output_dir = self.output_dir.with_name(self.output_dir.name + '_bc_scenes')
         else:
-            if (self.image_dir / "train").is_dir() or (self.image_dir / "val").is_dir():
-                raise FileNotFoundError("已分区的数据需要 split_manifest.csv，不能静默重新随机划分")
-            # 保留旧目录与合成测试兼容路径；新正式数据必须使用上面的固定清单。
-            if max_samples is not None:
-                self.dataset.image_paths = self.dataset.image_paths[:max_samples]
-            val_size = max(1, int(len(self.dataset) * val_ratio))
-            self.train_set, self.val_set = random_split(
-                self.dataset, [len(self.dataset) - val_size, val_size],
-                generator=torch.Generator().manual_seed(seed),
-            )
-        self.train_loader = DataLoader(self.train_set, batch_size=batch_size, shuffle=True, num_workers=0)
-        self.val_loader = DataLoader(self.val_set, batch_size=batch_size, shuffle=False, num_workers=0)
+            from datasets.s1_dataset import WaterDataset, sample_name
+            self.dataset = WaterDataset(self.image_dir, self.label_dir, bands, speckle=self.speckle)
+            split_path = self.image_dir.parent / "split_manifest.csv"
+            self.split_info = {"split_strategy": "legacy_random", "split_manifest_sha256": ""}
+            if split_path.is_file():
+                # 物理文件全部保留；只有清单 active=1 的代表样本参加训练/验证。
+                with split_path.open(encoding="utf-8-sig", newline="") as stream:
+                    split_rows = list(csv.DictReader(stream))
+                indices = {sample_name(path, self.image_dir): i for i, path in enumerate(self.dataset.image_paths)}
+                active = [row for row in split_rows if int(row["active"]) == 1]
+                train_rows = [row for row in active if row["split"] == "train"]
+                val_rows = [row for row in active if row["split"] == "val"]
+                if {r["group_id"] for r in train_rows} & {r["group_id"] for r in val_rows}:
+                    raise ValueError("固定清单的同组样本不能跨 train/val")
+                train_ids = [indices[row["name"]] for row in train_rows]
+                val_ids = [indices[row["name"]] for row in val_rows]
+                if max_samples is not None:
+                    # 短程试跑也保留两侧的固定归属，不从全部文件重新随机抽样。
+                    limit = max(1, int(max_samples * (1 - val_ratio)))
+                    train_ids, val_ids = train_ids[:limit], val_ids[:max(1, max_samples - limit)]
+                if not train_ids or not val_ids:
+                    raise ValueError("固定清单需要非空的 train 和 val 有效样本")
+                self.train_set = Subset(self.dataset, train_ids)
+                self.val_set = Subset(self.dataset, val_ids)
+                self.split_info = dict(split_strategy="scene_stratified_grouped",
+                                       split_manifest=str(split_path),
+                                       split_manifest_sha256=hashlib.sha256(split_path.read_bytes()).hexdigest())
+                # 新划分的分数不可直接与历史随机划分混排，使用独立实验目录。
+                self.output_dir = self.output_dir.with_name(self.output_dir.name + "_grouped")
+                cprint(f"固定分组清单：{split_path}；停用副本/标签冲突：{len(split_rows) - len(active)}", "cyan", flush=True)
+            else:
+                if (self.image_dir / "train").is_dir() or (self.image_dir / "val").is_dir():
+                    raise FileNotFoundError("已分区的数据需要 split_manifest.csv，不能静默重新随机划分")
+                # 保留旧目录与合成测试兼容路径；新正式数据必须使用上面的固定清单。
+                if max_samples is not None:
+                    self.dataset.image_paths = self.dataset.image_paths[:max_samples]
+                val_size = max(1, int(len(self.dataset) * val_ratio))
+                self.train_set, self.val_set = random_split(
+                    self.dataset, [len(self.dataset) - val_size, val_size],
+                    generator=torch.Generator().manual_seed(seed),
+                )
+        self.train_loader = DataLoader(self.train_set, batch_size=batch_size, shuffle=True, **self.loader_options)
+        self.val_loader = DataLoader(self.val_set, batch_size=batch_size, shuffle=False, **self.loader_options)
         cprint(f"设备：{self.device}；训练/内部验证：{len(self.train_set)}/{len(self.val_set)}", color="cyan", flush=True)
         self.calculate_normalization()
 
-        self.model = model_class(**self.model_kwargs).to(self.device)
+        # 整景索引已记录每个不重叠核心的0/1数量，直接求和，不重复扫描影像。
+        if class_weight_mode not in ("none", "train_pixels", "train_pixels_sqrt"):
+            raise ValueError("class_weight_mode应为none、train_pixels或train_pixels_sqrt")
+        if class_weight_mode in ("train_pixels", "train_pixels_sqrt"):
+            if self.scene_options is None or loss_name != "bce" or sampling != "random":
+                raise ValueError("本轮类别平衡采用整景+BCE+random，其他实验请设CLASS_WEIGHT_MODE='none'")
+            water, background = self.dataset.windows[self.train_set.indices, 5:7].sum(axis=0).tolist()
+            if min(water, background) == 0:
+                raise ValueError("类别平衡需要训练标签同时含水体和非水体")
+            total = water + background
+            weights = np.array((total / (2 * background), total / (2 * water)))
+            if class_weight_mode == 'train_pixels_sqrt':
+                weights = np.sqrt(weights)
+                weights /= np.dot(weights, (background / total, water / total))
+            self.loss_kwargs['class_weights'] = tuple(weights.tolist())
+            self.split_info['train_class_pixels'] = dict(background=background, water=water)
+            cprint(f"训练类别像素：非水体={background}，水体={water}；BCE类别权重={self.loss_kwargs['class_weights']}", 'cyan', flush=True)
+        self.model_info['class_weight_mode'] = class_weight_mode
+        self.validation_loss_kwargs = dict(self.loss_kwargs)
+        self.validation_loss_kwargs.pop('class_weights', None)  # val保持原始损失口径。
+
+        if resume is not None:
+            self.check_resume_compatibility(resume)
+        construction_kwargs = dict(self.model_kwargs)
+        if resume is not None and "pretrained" in construction_kwargs:
+            construction_kwargs["pretrained"] = False  # 随后加载完整模型，不再访问HF下载编码器。
+        self.model = model_class(**construction_kwargs).to(self.device)
         # 新分支增加了初始化随机数消耗；重置后两轮的抽样、增强和 dropout 从相同随机状态开始。
         if split_path.is_file():
             torch.manual_seed(seed)
@@ -248,8 +380,9 @@ class WaterSegmentationTrainer:
               f"余弦退火：{cosine_schedule}；训练增强：{train_augmentation}", color="cyan", flush=True)
         # 单通道水体方法输出 logit；历史双类别方法使用 CE。
         self.criterion = WaterSegmentationLoss(loss_name, ignore_index=IGNORE_INDEX, **self.loss_kwargs)
+        self.validation_criterion = WaterSegmentationLoss(loss_name, ignore_index=IGNORE_INDEX, **self.validation_loss_kwargs)
         cprint(f"损失配置：{self.loss_kwargs}；训练头权重：{self.head_loss_weights or '全部为1'}；"
-              "验证仅最终头，不乘训练头权重", color="cyan", flush=True)
+              "验证仅最终头，不乘训练头/类别权重", color="cyan", flush=True)
         if optimizer_name == "adamw":
             self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         else:
@@ -259,10 +392,15 @@ class WaterSegmentationTrainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
         # 每次运行单独保存，不覆盖历史实验；CSV 字段沿用原有诊断记录。
-        self.run_dir = self.output_dir / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        self.run_dir.mkdir(parents=True, exist_ok=False)
-        if split_path.is_file():
+        self.run_dir = (self.resume_path.parent if resume is not None else
+                        self.output_dir / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+        if resume is None:
+            self.run_dir.mkdir(parents=True, exist_ok=False)
+        if resume is None and split_path.is_file():
             shutil.copy2(split_path, self.run_dir / "split_manifest.csv")
+            revision = self.image_dir.parent / 'revision_settings.json'
+            if revision.is_file():
+                shutil.copy2(revision, self.run_dir / 'label_revision.json')
         self.metrics_path = self.run_dir / "metrics.csv"
         self.metric_fields = [
             "epoch", "phase", "loss", "iou", "f1", "precision", "recall",
@@ -272,13 +410,21 @@ class WaterSegmentationTrainer:
             "accuracy", "specificity", "false_positive_rate", "false_negative_rate",
             "false_discovery_rate", "background_iou", "mean_iou", "balanced_accuracy", "kappa", "mcc",
         ]
-        with self.metrics_path.open("w", newline="", encoding="utf-8-sig") as stream:
-            csv.DictWriter(stream, fieldnames=self.metric_fields).writeheader()
+        if resume is None:
+            with self.metrics_path.open("w", newline="", encoding="utf-8-sig") as stream:
+                csv.DictWriter(stream, fieldnames=self.metric_fields).writeheader()
         cprint(f"本次实验目录：{self.run_dir}", color="cyan", attrs=["bold"], flush=True)
         self.best_loss = float("inf")
         self.best_f1 = float("-inf")
-        self.train_files = [sample_name(self.dataset.image_paths[i], self.image_dir) for i in self.train_set.indices]
-        self.val_files = [sample_name(self.dataset.image_paths[i], self.image_dir) for i in self.val_set.indices]
+        self.best_balanced_accuracy = float("-inf")
+        if self.scene_options is not None:
+            self.train_files = [self.dataset.names[i] for i in self.train_set.indices]
+            self.val_files = [self.dataset.names[i] for i in self.val_set.indices]
+            self.split_info['train_scene_files'] = sorted({self.dataset.scenes[int(self.dataset.windows[i,0])]['name'] for i in self.train_set.indices})
+            self.split_info['val_scene_files'] = sorted({self.dataset.scenes[int(self.dataset.windows[i,0])]['name'] for i in self.val_set.indices})
+        else:
+            self.train_files = [sample_name(self.dataset.image_paths[i], self.image_dir) for i in self.train_set.indices]
+            self.val_files = [sample_name(self.dataset.image_paths[i], self.image_dir) for i in self.val_set.indices]
         if sampling != "random":
             self.train_position = {name: i for i, name in enumerate(self.train_files)}
             self.sample_losses = torch.full((len(self.train_set),), float("nan"))
@@ -288,15 +434,122 @@ class WaterSegmentationTrainer:
             if sampling in ("stratified_hard", "hybrid_hard"):
                 self.sampling_fields += ["water_ratio", "water_group"]
                 self.group_fields = ["epoch", "water_group", "group_name", "train_samples", "hard_pool_samples", "selected_count"]
-                with (self.run_dir / "sampling_groups.csv").open("w", newline="", encoding="utf-8-sig") as stream:
-                    csv.DictWriter(stream, fieldnames=self.group_fields).writeheader()
-            with (self.run_dir / "sampling.csv").open("w", newline="", encoding="utf-8-sig") as stream:
-                csv.DictWriter(stream, fieldnames=self.sampling_fields).writeheader()
+                if resume is None:
+                    with (self.run_dir / "sampling_groups.csv").open("w", newline="", encoding="utf-8-sig") as stream:
+                        csv.DictWriter(stream, fieldnames=self.group_fields).writeheader()
+            if resume is None:
+                with (self.run_dir / "sampling.csv").open("w", newline="", encoding="utf-8-sig") as stream:
+                    csv.DictWriter(stream, fieldnames=self.sampling_fields).writeheader()
         cprint(f"采样配置：{self.sampling_config}", color="cyan", flush=True)
+        if resume is not None:
+            self.restore_training(resume)
+
+    def check_resume_compatibility(self, checkpoint):
+        """续跑沿用原实验，拒绝把不同标签、波段或网络混入同一记录。"""
+        same_model = lambda values: {k: v for k, v in values.items() if k != "pretrained"}
+        if SpeckleFilter(checkpoint.get('speckle')).config != self.speckle:
+            raise ValueError('续跑滤波配置与检查点不同')
+        expected = dict(model_name=self.model_info['model_name'], bands=tuple(self.bands),
+                        loss_name=self.loss_name, loss_kwargs=self.loss_kwargs,
+                        optimizer_name=self.optimizer_name, weight_decay=self.weight_decay,
+                        train_augmentation=self.train_augmentation, sampling_config=self.sampling_config,
+                        head_loss_weights=self.head_loss_weights, batch_size=self.batch_size,
+                        seed=self.seed, epochs=self.epochs, max_samples=self.max_samples, learning_rate=self.learning_rate)
+        if same_model(checkpoint['model_kwargs']) != same_model(self.model_kwargs):
+            raise ValueError('续跑模型结构与检查点不同；新实验请设RESUME_CHECKPOINT=None')
+        for key, value in expected.items():
+            if checkpoint.get(key) != value:
+                raise ValueError(f'续跑配置{key}与检查点不同；EPOCHS表示原实验总轮数，不能当作追加轮数')
+        for key in ('split_manifest_sha256', 'label_revision_sha256', 'window_cache_key',
+                    'window_size', 'window_halo', 'train_windows_per_epoch'):
+            if key in self.split_info and checkpoint.get(key) != self.split_info[key]:
+                raise ValueError(f'续跑数据{key}与检查点不同；请确认仍使用同一标签和划分')
+        for key in ('mean', 'std'):
+            current = getattr(self, key).detach().cpu().flatten()
+            if not torch.allclose(current, checkpoint[key].float().flatten(), rtol=1e-6, atol=1e-6):
+                raise ValueError(f'续跑归一化{key}与检查点不同')
+        if 'optimizer_state_dict' not in checkpoint:
+            raise ValueError('旧检查点缺少优化器状态，不能作为完整续跑；仅加载模型属于另一次微调')
+
+    def restore_training(self, checkpoint):
+        """恢复轮次边界状态；本轮验证尚未完成时，只重跑验证，不重复训练。"""
+        epoch = int(checkpoint['epoch'])
+        phase = checkpoint.get('resume_phase', 'epoch_end')  # 兼容已有last.pth。
+        if phase not in ('epoch_end', 'train_end'):
+            raise ValueError(f'不支持的续跑阶段：{phase}')
+        if tuple(checkpoint['train_files']) != tuple(self.train_files) or tuple(checkpoint['val_files']) != tuple(self.val_files):
+            raise ValueError('续跑训练/验证样本顺序与检查点不同')
+        if (self.scheduler is None) != (checkpoint.get('scheduler_state_dict') is None):
+            raise ValueError('续跑学习率调度器设置不一致')
+        self.mean = checkpoint['mean'].to(self.device).view(1, -1, 1, 1)
+        self.std = checkpoint['std'].to(self.device).view(1, -1, 1, 1)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if phase == 'train_end':
+            # 本轮optimizer更新已完成；验证重放后推进LR，不触发首轮未step的误报。
+            self.optimizer._opt_called = True
+        if self.scheduler is not None:
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        if checkpoint.get('scaler_state_dict'):
+            self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        elif self.use_amp:
+            cprint('旧检查点未保存有效AMP状态：采用新的GradScaler，不保证逐批一致。', 'yellow', flush=True)
+        self.best_loss = checkpoint['best_val_loss']
+        self.best_f1 = checkpoint.get('best_val_f1', float('-inf'))
+        self.best_balanced_accuracy = checkpoint.get('best_val_balanced_accuracy', float('-inf'))
+        self.phase_metrics = checkpoint['phase_metrics']
+        self.recent_train_files = checkpoint.get('recent_train_files', [])
+        self.resume_validation = phase == 'train_end'
+        self.start_epoch = epoch if self.resume_validation else epoch + 1
+        if self.sampling != 'random':
+            self.sample_losses = checkpoint['sampling_losses']
+            self.sample_last_seen = checkpoint['sampling_last_seen']
+            self.sampling_plan, self.hard_pool = checkpoint.get('sampling_plan'), checkpoint.get('hard_pool', [])
+
+        # 中断可能留下已完成train但尚未保存checkpoint的CSV行。先备份，再保留对应状态以前的记录。
+        for filename in ('metrics.csv', 'sampling.csv', 'sampling_groups.csv'):
+            path = self.run_dir / filename
+            if not path.exists():
+                if filename == 'metrics.csv':
+                    raise ValueError('原实验缺少metrics.csv，不能在原目录续写')
+                continue
+            with path.open(encoding='utf-8-sig', newline='') as stream:
+                reader = csv.DictReader(stream)
+                fields, rows = reader.fieldnames, list(reader)
+            if filename == 'metrics.csv' and fields != self.metric_fields:
+                raise ValueError('原metrics.csv字段与当前训练器不一致')
+            kept = [row for row in rows if int(row['epoch']) <= epoch and
+                    not (self.resume_validation and int(row['epoch']) == epoch and row.get('phase') == 'val')]
+            if kept != rows:
+                backup = path.with_name(path.stem + '.before_resume_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.csv')
+                shutil.copy2(path, backup)
+                pending = path.with_suffix('.csv.partial')
+                with pending.open('w', encoding='utf-8-sig', newline='') as stream:
+                    writer = csv.DictWriter(stream, fieldnames=fields)
+                    writer.writeheader()
+                    writer.writerows(kept)
+                pending.replace(path)
+                cprint(f'未对应检查点的尾部记录已备份：{backup}', 'yellow', flush=True)
+        rng = checkpoint.get('rng_state')
+        if rng:
+            random.setstate(rng['python'])
+            np.random.set_state(rng['numpy'])
+            torch.set_rng_state(rng['torch'])
+            if self.use_amp and rng.get('cuda'):
+                torch.cuda.set_rng_state_all(rng['cuda'])
+        else:
+            cprint('旧检查点没有随机数状态：已恢复模型/优化器/调度器/AMP，但不能逐批复现中断前的随机增强。', 'yellow', flush=True)
+        cprint(f'续跑：{self.resume_path}；第{self.start_epoch}轮至{self.epochs}轮；'
+               f'{"先重跑本轮验证" if self.resume_validation else "开始下一轮训练"}；'
+               f'LR={self.optimizer.param_groups[0]["lr"]:.8g}；AMP scale={self.scaler.get_scale():g}',
+               'cyan', attrs=['bold'], flush=True)
 
     def prepare_train_sampling(self, epoch):
         """按上一轮结束时的难度记录生成本轮计划；前几轮仍使用原随机 DataLoader。"""
         if self.sampling == "random":
+            if self.scene_options is not None and self.windows_per_epoch is not None:
+                plan = torch.randperm(len(self.train_set), generator=torch.Generator().manual_seed(self.seed+epoch))[:self.windows_per_epoch].tolist()
+                self.train_loader = DataLoader(self.train_set, batch_size=self.batch_size, sampler=plan, **self.loader_options)
             return
         count = len(self.train_set)
         self.hard_pool = []
@@ -309,17 +562,34 @@ class WaterSegmentationTrainer:
                 low_water_pool_ratio=self.sampling_config.get("low_water_pool_ratio"))
             # 索引始终属于 train_set，不是原始 dataset，更不包含 val_set。
             self.train_loader = DataLoader(self.train_set, batch_size=self.batch_size,
-                                           sampler=self.sampling_plan, num_workers=0)
+                                           sampler=self.sampling_plan, **self.loader_options)
+        if self.scene_options is not None and self.windows_per_epoch is not None:
+            if self.sampling_plan is None:
+                self.sampling_plan = torch.randperm(count, generator=torch.Generator().manual_seed(self.seed+epoch)).tolist()
+            self.sampling_plan = self.sampling_plan[:self.windows_per_epoch]
+            self.train_loader = DataLoader(self.train_set, batch_size=self.batch_size,
+                                           sampler=self.sampling_plan, **self.loader_options)
         self.sample_loss_sum = torch.zeros(count, dtype=torch.float64)
         self.sample_observations = torch.zeros(count, dtype=torch.long)
         self.sample_draws = (torch.ones(count, dtype=torch.long) if self.sampling_plan is None else
                              torch.bincount(torch.tensor(self.sampling_plan), minlength=count))
-        cprint(f"Epoch {epoch} 采样：{'普通预热' if self.sampling_plan is None else '随机 + 困难'}；"
+        cprint(f"Epoch {epoch} 采样：{'随机 + 困难' if self.hard_pool else '普通采样/预热'}；"
               f"总抽样 {int(self.sample_draws.sum())}；不同样本 {int((self.sample_draws > 0).sum())}；"
               f"困难池 {len(self.hard_pool)}", color="blue", flush=True)
 
     def calculate_normalization(self):
         """只用训练集统计均值/标准差；分层和混合模式同时记录标签水体比例。"""
+        if self.scene_options is not None:
+            mean, std, indices = self.dataset.normalization(self.train_set.indices)
+            self.mean = torch.tensor(mean, dtype=torch.float32, device=self.device).view(1,-1,1,1)
+            self.std = torch.tensor(std, dtype=torch.float32, device=self.device).view(1,-1,1,1)
+            self.split_info['normalization_window_indices'] = indices
+            if self.sampling in ('stratified_hard', 'hybrid_hard'):
+                counts = self.dataset.windows[self.train_set.indices, 5:7]
+                self.sample_water_ratios = torch.from_numpy(counts[:,0]/counts.sum(axis=1))
+                self.sample_groups = torch.bucketize(self.sample_water_ratios, torch.tensor([0.,.01,.1,.5],dtype=torch.float64))
+            cprint(f"训练窗口统计：mean={mean}；std={std}；缓存可复用", 'cyan', flush=True)
+            return
         channel_sum = np.zeros(len(self.bands), dtype=np.float64)
         channel_square_sum = np.zeros_like(channel_sum)
         pixel_count = 0
@@ -360,16 +630,18 @@ class WaterSegmentationTrainer:
         amp_skipped_steps = nonfinite_loss_batches = 0
         confusion = torch.zeros(4, dtype=torch.int64, device=self.device)
         phase_start = perf_counter()
+        scene_counts = {}
 
         for step, batch in enumerate(loader, 1):
-            image = batch["image"].to(self.device)
-            label = batch["label"].to(self.device)
+            image = batch["image"].to(self.device, non_blocking=True)
+            label = batch["label"].to(self.device, non_blocking=True)
             valid = label != IGNORE_INDEX
             count = int(valid.sum().item())
             ignored_pixels += label.numel() - count
             if count == 0:
                 skipped_batches += 1
                 continue
+            # 数据集已按开关完成线性域滤波；这里不重复滤波。
             image = (image - self.mean) / self.std
             image = image.masked_fill(~batch["valid_mask"].to(self.device).unsqueeze(1), 0)
             if training:
@@ -413,7 +685,7 @@ class WaterSegmentationTrainer:
                                    for weight, output in zip(weights, predictions))
                     else:
                         # 验证仍是最终预测的原始损失，可与等权基线按相同规则选模。
-                        loss = self.criterion(logits, label)
+                        loss = self.validation_criterion(logits, label)
                 if training and self.sampling != "random":
                     # 难度仍取最终头更新前的原始 BCE，不乘该头的训练权重。
                     # 同一图本轮重复抽到时取均值；这是增强/训练模式下的在线难度估计。
@@ -457,6 +729,10 @@ class WaterSegmentationTrainer:
                           else logits.detach().argmax(dim=1))
             # 真实值*2+预测值：0=TN、1=FP、2=FN、3=TP。
             confusion += torch.bincount(label[valid] * 2 + prediction[valid], minlength=4)
+            if not training and self.scene_options is not None:
+                for i, scene in enumerate(batch['scene_id']):
+                    counts = torch.bincount(label[i][valid[i]]*2 + prediction[i][valid[i]], minlength=4).cpu().numpy()
+                    scene_counts[scene] = scene_counts.get(scene, np.zeros(4, dtype=np.int64)) + counts
             if step % 50 == 0:
                 cprint(f"Epoch {epoch} {phase}：{step}/{len(loader)} 批", color="yellow" if training else "green", flush=True)
 
@@ -490,6 +766,12 @@ class WaterSegmentationTrainer:
                             train_samples=int(members.sum()),
                             hard_pool_samples=int((self.sample_groups[pool_indices] == group).sum()),
                             selected_count=int(self.sample_draws[members].sum())))
+        if scene_counts:
+            # 每景统计已标注核心像素；面积较大的景不掩盖小景的表现。
+            scene_rows = [dict(scene_id=scene, **metrics_from_counts(counts)) for scene, counts in scene_counts.items()]
+            with (self.run_dir/f'val_scenes_epoch_{epoch:03d}.csv').open('w',encoding='utf-8-sig',newline='') as stream:
+                writer = csv.DictWriter(stream, fieldnames=scene_rows[0])
+                writer.writeheader(); writer.writerows(scene_rows)
         tn, fp, fn, tp = confusion.tolist()
         pixel_metrics = metrics_from_counts((tn, fp, fn, tp))
         iou, f1 = pixel_metrics["iou"], pixel_metrics["f1"]
@@ -510,24 +792,35 @@ class WaterSegmentationTrainer:
               f"水体 IoU={iou:.4f}，F1={f1:.4f}，P={precision:.4f}，R={recall:.4f}", color="yellow" if training else "green", attrs=["bold"], flush=True)
         cprint(f"真实/预测水体比例：{metrics['true_water_ratio']:.4%}/{metrics['pred_water_ratio']:.4%}；"
               f"TN/FP/FN/TP：{tn}/{fp}/{fn}/{tp}；AMP 跳过更新：{amp_skipped_steps} 次", color="red" if amp_skipped_steps else ("yellow" if training else "green"), flush=True)
+        cprint(f"非水体召回率={metrics['specificity']:.4f}；两类平均召回率={metrics['balanced_accuracy']:.4f}；"
+              f"两类mIoU={metrics['mean_iou']:.4f}", color="yellow" if training else "green", flush=True)
+        if not training and (tp == 0 or tn == 0) and tp + fn > 0 and tn + fp > 0:
+            cprint("验证中至少一个类别没有正确预测，不能把水体F1高视为训练成功。", "red", flush=True)
         return metrics
 
-    def save_checkpoint(self, epoch):
+    def save_checkpoint(self, epoch, phase="epoch_end"):
         """保持最低验证 loss 选 best，另外保存 last 和满足条件的异常快照。"""
-        metrics = self.phase_metrics["val"]
-        epoch_loss = metrics["loss"]
-        improved = epoch_loss < self.best_loss
+        metrics = self.phase_metrics.get("val", {})
+        epoch_loss = metrics.get("loss", float("inf"))
+        improved = phase == "epoch_end" and epoch_loss < self.best_loss
         if improved:
             self.best_loss = epoch_loss
-        abnormal = not np.isfinite(epoch_loss) or (
+        abnormal = phase == "epoch_end" and (not np.isfinite(epoch_loss) or (
             metrics["tp"] + metrics["fn"] > 0 and metrics["f1"] < self.abnormal_f1_threshold
-        )
-        # 保留已有字段；state_dict 包含 BN 缓冲区，UAFNet 另存优化器等训练状态。
+        ))
+        # NumPy随机状态用普通列表保存，继续兼容weights_only=True的检查点读取器。
+        numpy_state = np.random.get_state()
+        numpy_state = (numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:])
+        # 保留已有字段；state_dict包含BN缓冲区。
         checkpoint = {
             "model_state_dict": self.model.state_dict(), **self.model_info, **getattr(self, "split_info", {}),
             "model_kwargs": self.model_kwargs, "in_channels": len(self.bands),
             "bands": self.bands, "mean": self.mean.cpu().flatten(), "std": self.std.cpu().flatten(),
+            "speckle": self.speckle,  # 评价/预测恢复相同预处理；旧检查点缺此字段表示关闭。
             "ignore_index": IGNORE_INDEX, "epoch": epoch, "val_loss": epoch_loss,
+            "resume_phase": phase,
+            "rng_state": dict(python=random.getstate(), numpy=numpy_state,
+                              torch=torch.get_rng_state(), cuda=torch.cuda.get_rng_state_all() if self.use_amp else None),
             "best_val_loss": self.best_loss, "phase_metrics": self.phase_metrics,
             "seed": self.seed, "learning_rate": self.learning_rate, "batch_size": self.batch_size,
             "epochs": self.epochs, "val_ratio": self.val_ratio, "max_samples": self.max_samples,
@@ -539,53 +832,76 @@ class WaterSegmentationTrainer:
             "recent_train_files": self.recent_train_files,
             "train_files": self.train_files, "val_files": self.val_files,
             "loss_name": self.loss_name, "loss_kwargs": self.loss_kwargs,
+            "validation_loss_kwargs": self.validation_loss_kwargs,
             "head_loss_weights": self.head_loss_weights,  # None 表示旧版默认等权。
             "sampling_config": self.sampling_config,
             "loss_reduction": ("CE valid-pixel mean" if not self.criterion.binary else
-                               "BCE valid-pixel mean; optional Dice per-image mean, smooth=1"),
+                               "train: class-weighted BCE valid-pixel mean; val: unweighted BCE; optional Dice per-image mean, smooth=1"),
         }
         if self.sampling != "random":
             checkpoint.update(sampling_losses=self.sample_losses, sampling_last_seen=self.sample_last_seen,
                               sampling_plan=self.sampling_plan, hard_pool=self.hard_pool)
             if self.sampling in ("stratified_hard", "hybrid_hard"):
                 checkpoint.update(sampling_water_ratios=self.sample_water_ratios, sampling_groups=self.sample_groups)
-        if self.criterion.binary:
-            # best 仍按 loss 保存；另存 F1 最佳，避免与日志最高 F1 混淆。
-            checkpoint.update(loss_name=self.loss_name, optimizer_name=self.optimizer_name,
-                              weight_decay=self.weight_decay, train_augmentation=self.train_augmentation,
-                              optimizer_state_dict=self.optimizer.state_dict(),
-                              scaler_state_dict=self.scaler.state_dict(),
-                              scheduler_state_dict=self.scheduler.state_dict() if self.scheduler else None)
-        filenames = ["last.pth"]
-        if self.criterion.binary and metrics["f1"] > self.best_f1:
+        # 所有网络都保存完整训练状态；验证前的train_end尚未推进调度器。
+        checkpoint.update(loss_name=self.loss_name, optimizer_name=self.optimizer_name,
+                          weight_decay=self.weight_decay, train_augmentation=self.train_augmentation,
+                          optimizer_state_dict=self.optimizer.state_dict(),
+                          scaler_state_dict=self.scaler.state_dict(),
+                          scheduler_state_dict=self.scheduler.state_dict() if self.scheduler else None)
+        filenames = ["last.pth"] if phase == "epoch_end" else ["train_end.pth"]
+        if phase == "epoch_end" and self.criterion.binary and metrics["f1"] > self.best_f1:
             self.best_f1 = metrics["f1"]
             filenames.append("best_f1.pth")
         if self.criterion.binary:
             checkpoint["best_val_f1"] = self.best_f1
+        # 两类平均召回率作为补充选模依据；全水/全非水的退化预测仅为0.5。
+        if phase == "epoch_end" and metrics["balanced_accuracy"] > self.best_balanced_accuracy:
+            self.best_balanced_accuracy = metrics["balanced_accuracy"]
+            filenames.append("best_balanced_accuracy.pth")
+        checkpoint["best_val_balanced_accuracy"] = self.best_balanced_accuracy
         if improved:
             filenames.append("best.pth")
         if abnormal:
             filenames.append("abnormal.pth")
         for filename in filenames:
-            torch.save(checkpoint, self.run_dir / filename)
-            cprint(f"已保存：{self.run_dir / filename}", color="magenta", flush=True)
+            target = self.run_dir / filename
+            pending = target.with_suffix('.pth.partial')
+            torch.save(checkpoint, pending)
+            pending.replace(target)  # 完整写好后替换，避免中断损坏上一份last.pth。
+            cprint(f"已保存：{target}", color="magenta", flush=True)
 
     def train(self):
-        """逐轮执行训练 → 验证 → 保存。"""
-        for epoch in range(1, self.epochs + 1):
-            self.phase_metrics = {}
-            self.recent_train_files = []
-            self.prepare_train_sampling(epoch)
-            for phase, loader in (("train", self.train_loader), ("val", self.val_loader)):
-                self.phase_metrics[phase] = self.run_epoch(epoch, phase, loader)
-            # CSV 记录本轮实际使用的 lr；调度后保存，为下一轮保留调度器状态。
-            if self.scheduler is not None:
-                self.scheduler.step()
-            self.save_checkpoint(epoch)
+        """按总目标轮数续跑；验证失败保留train_end，训练失败回到上一轮last。"""
+        try:
+            for epoch in range(self.start_epoch, self.epochs + 1):
+                if not (self.resume_validation and epoch == self.start_epoch):
+                    self.phase_metrics = {}
+                    self.recent_train_files = []
+                    self.prepare_train_sampling(epoch)
+                    self.phase_metrics["train"] = self.run_epoch(epoch, "train", self.train_loader)
+                    self.save_checkpoint(epoch, phase="train_end")
+                self.phase_metrics["val"] = self.run_epoch(epoch, "val", self.val_loader)
+                self.resume_validation = False
+                # 本轮验证成功后才推进LR；保存的last对应下一轮的学习率。
+                if self.scheduler is not None:
+                    self.scheduler.step()
+                self.save_checkpoint(epoch)
+        except (Exception, KeyboardInterrupt):
+            path = self.run_dir / "training_error.log"
+            with path.open('a', encoding='utf-8') as stream:
+                stream.write('\n' + datetime.now().isoformat() + '\n' + traceback.format_exc())
+            cprint(f'训练中断，完整报错已保存：{path}', 'red', flush=True)
+            raise  # 不隐藏数据错误，也不静默跳过样本。
+        finally:
+            if self.scene_options is not None:
+                self.dataset.close()
 
 
 def create_trainer(method=None):
     """平级选择网络与保存目录，然后创建同一个公共训练器。"""
+    if DATA_LAYOUT not in ('full_scene', 'patch'):
+        raise ValueError('DATA_LAYOUT应为full_scene或patch')
     method = METHOD if method is None else method
     binary_method = method in ("uafnet", "deeplabv3")
     # 在创建训练器时解析，单极化自动构建单通道网络，并重新统计该通道的均值和标准差。
@@ -718,6 +1034,10 @@ def create_trainer(method=None):
     if POLARIZATIONS != ("VV", "VH"):
         experiment += "_" + "_".join(name.lower() for name in POLARIZATIONS)
     model_info.update(polarizations=POLARIZATIONS, polarization_bands=dict(zip(POLARIZATIONS, bands)))
+    if CLASS_WEIGHT_MODE == "train_pixels":
+        experiment += "_balanced_bce"
+    if DATA_LAYOUT == 'full_scene':
+        model_info['input_representation'] = 'BC_single_date_stored_VV; sampled_train_window_mean_std'
     output_dir = OUTPUT_ROOT / experiment if OUTPUT_DIR is None else Path(OUTPUT_DIR)
     cprint(f"训练方法：{method}；极化：{POLARIZATIONS}；文件波段：{bands}；实验目录：{output_dir}", color="cyan", flush=True)
     return WaterSegmentationTrainer(
@@ -736,11 +1056,18 @@ def create_trainer(method=None):
         hard_sample_ratio=HARD_SAMPLE_RATIO, hard_pool_ratio=HARD_POOL_RATIO,
         low_water_pool_ratio=LOW_WATER_POOL_RATIO,
         head_loss_weights=head_loss_weights,
+        scene_options=SCENE_OPTIONS if DATA_LAYOUT == "full_scene" else None,
+        class_weight_mode=CLASS_WEIGHT_MODE,
+        resume_checkpoint=RESUME_CHECKPOINT,
+        speckle=(dict(method=SPECKLE_FILTER, input_domain=SPECKLE_INPUT_DOMAIN,
+                      window_size=SPECKLE_WINDOW_SIZE, enl=SPECKLE_ENL)
+                 if SPECKLE_FILTER != 'none' else None),
     )
 
 
 def main(method=None):
     """统一执行训练与后处理；后处理重载本次最佳权重，不沿用内存中的最后一轮。"""
+    torch.set_num_threads(CPU_THREADS)
     if RUN_MODE not in ("train_postprocess", "train", "postprocess"):
         raise ValueError("RUN_MODE 应为 train_postprocess、train 或 postprocess")
     checkpoints = list(POSTPROCESS_CHECKPOINTS)
@@ -763,6 +1090,15 @@ def main(method=None):
             torch.cuda.empty_cache()
     if not checkpoints:
         raise ValueError("仅后处理时，请在 POSTPROCESS_CHECKPOINTS 填写检查点路径")
+    if DATA_LAYOUT == 'full_scene':
+        if len(checkpoints) != 1:
+            raise ValueError('整景质量入口目前一次处理一个模型，模型间用同一阈值网格对照')
+        from supervised.evaluation.scene_quality import run_scene_quality
+        scene_options = dict(SCENE_QUALITY_OPTIONS)
+        if RUN_MODE == 'train_postprocess':
+            # 新实验不能写进旧模型的quality目录。
+            scene_options['output_dir'] = None
+        return run_scene_quality(checkpoints[0], image_dir=IMAGE_DIR, label_dir=LABEL_DIR, **scene_options)
     from supervised.evaluation.postprocess import run_postprocess
     cprint(f"开始后处理，使用检查点：{checkpoints}", color="cyan", attrs=["bold"], flush=True)
     return run_postprocess(checkpoints, **options)

@@ -1,6 +1,6 @@
 # SAR 水体提取
 
-本仓库用于有监督 SAR 水体语义分割，提供数据读取、模型训练、固定验证集评价、质量可视化，以及独立的传统阈值分割。当前默认模型为 **PVT + DeepLabv3+ 风格解码器**，输入为 DFC Track 1 的 VV/VH 两个波段。
+本仓库用于有监督 SAR 水体语义分割，提供数据读取、模型训练、固定验证集评价、质量可视化，以及独立的传统阈值分割。当前默认模型为 **PVT + DeepLabv3+ 风格解码器**，默认输入为已准备的 BC 整景单 VV 数据；DFC Track 1 的 VV/VH 作为历史可选配置保留。
 
 README 只介绍通用用法。算法说明放在 `docs/`，实验分析放在 `codex_analysis/`，训练及预测产物放在 `outputs/`。
 
@@ -27,10 +27,10 @@ sar_water_extraction/
 │   ├── supervised/
 │   │   ├── train.py                   # 统一训练入口
 │   │   ├── validation.py              # 固定模型验证与质量报告
-│   │   ├── datasets/                  # 读取、检查、BC数据准备
 │   │   ├── models/                    # 模型、损失、检查点重建
 │   │   ├── evaluation/                # 指标、边界、后处理、阈值扫描
 │   │   └── experimental/              # MobileNetV2 + U-Net对照
+│   ├── datasets/                     # 读取、检查、BC数据准备与标签修订
 │   └── thres_segmentation/            # 独立传统阈值分割与GUI
 ├── scripts/
 │   ├── compare_threshold.py           # 模型与传统法在同一val上对比
@@ -45,7 +45,7 @@ sar_water_extraction/
 
 ## 数据准备
 
-训练入口使用以下绝对路径：
+历史 DFC 数据配置（需同时设 DATA_LAYOUT="patch"、CLASS_WEIGHT_MODE="none"）：
 
 ```python
 IMAGE_DIR = Path(r"E:\Code_projects\sar_water_extraction\data\Track1\train\images")
@@ -65,7 +65,7 @@ data/Track1/train/
 
 有固定划分清单时只读取 `active=1` 的样本，训练和验证使用各自子目录，不再按 `VAL_RATIO` 随机重分。更换清单需要重新检查区域重叠、重复样本及模型是否曾训练过新 val。
 
-当前训练影像按 `POLARIZATION_BANDS={"VV":1,"VH":2}` 读取。模型输入只取所选 SAR 波段；DEM、坡度、土地覆盖等辅助波段可用于质量图或另行声明的修正，不自动进入模型。标签使用水体 `1`、非水体 `0`；文件中的 nodata/无效区域在数据读取后使用 `IGNORE_INDEX=-1` 排除。新增数据中未经标注的区域必须标为无效，不能直接当作非水体。
+DFC 影像按 `POLARIZATION_BANDS={"VV":1,"VH":2}` 读取；BC 默认使用 `{"VV":1}`。模型输入只取所选 SAR 波段；DEM、坡度、土地覆盖等辅助波段可用于质量图或另行声明的修正，不自动进入模型。标签使用水体 `1`、非水体 `0`；文件中的 nodata/无效区域在数据读取后使用 `IGNORE_INDEX=-1` 排除。新增数据中未经标注的区域必须标为无效，不能直接当作非水体。
 
 训练使用存储数值，并仅从训练集计算每个通道的均值、标准差。验证和推理复用检查点中保存的统计量。不会自动进行辐射校正、地理编码、单位换算或转 dB；更换传感器前需另行确认数据表示与训练输入是否兼容。
 
@@ -77,47 +77,78 @@ data/Track1/train/
 python E:\Code_projects\sar_water_extraction\src\datasets\prepare_bc_data.py
 ```
 
-默认 `MODE="split"`，只统计已采用场景的 train/val 和地理组，不读取影像、不检查地物或几何。`MODE="inspect"` 才打印前三景格式。当前读取 `I:\水体数据\水体数据_train_val划分_已确认.csv`，其中“已确认”表示用户决定纳入，不表示标签已完成验收。当前新数据路径指向 `I:\水体数据`，与原 DFC 数据分开存放。
+默认 `MODE="labels"` 仅重建已有标签；首次导入SAR时显式设置 `MODE="prepare"`，按整景输出，不裁剪、不缩放、不生成512×512小切片。`MODE="split"` 仅显示划分；`MODE="inspect"` 显示少量源文件的格式。输入清单为 `I:\水体数据\水体数据_train_val划分_已确认.csv`，沿用地理组及train/val归属。
 
-| 输入 | 支持方式 |
+支持具有地理参考的实数GeoTIFF（`.tif/.tiff`），以及内含唯一GeoTIFF的ZIP；标签为SHP面及其配套文件。ZIP逐景临时展开，完成后清理缓存，原始文件保留。
+
+顶部主要配置：
+
+| 变量 | 含义 |
 |---|---|
-| `.tif` / `.tiff` | 具有坐标系和地理变换的实数 GeoTIFF，两种后缀等价 |
-| `.zip` | 包含唯一一个 GeoTIFF；正式准备时逐景展开到临时目录，处理后清理 |
-| `.shp` 标签 | 面/多部件面及其配套属性、坐标系文件；排除精度评价点文件 |
-| 裸 binary / 复数 SLC | 不直接输入；需明确尺寸、类型、地理参考及物理含义，先生成实数 GeoTIFF |
-
-正式切块前按顺序配置：
-
-1. 核实标签字段含义，填写 `CLASS_FIELD` / `CLASS_MAP`；属性含义不同的景放在 `SCENE_CLASS_RULES`。目标编码为 `0=确认非水体`、`1=确认水体`，不能根据字段数字猜类别。
-2. 核实影像有效域。优先使用源 nodata/内部掩膜；否则填写已确认的 `INPUT_NODATA_VALUE` 或提供同网格 `VALID_MASK_DIR`。只有确认整景有效才设 `ALLOW_ALL_VALID_SOURCE=True`，不默认剔除零值。
-3. 将划分 CSV 中决定纳入的景设为“是否采用=是”或“已确认”，保持已有 train/val 和地理组不变。`待确认`、`否` 不进入正式准备。
-4. 设置 `MODE="prepare"`，使用新的 `OUTPUT_DIR` 后运行。保留原始 ZIP、SHP 和划分 CSV；异常时不覆盖旧结果、不自动修复无效面。
-
-默认输出到 `I:\水体数据\prepared`：
+| `OUTPUT_DIR` | 统一为 `I:\水体数据\prepared_scenes`；labels模式原位替换标签，prepare模式不会覆盖已完成目录 |
+| `BANDS=(1,)` | 当前输出单VV，保留原始存储数值 |
+| `READ_WINDOW_SIZE=1024` | 内部读写窗口，用于控制内存；不是训练窗口，不影响整景输出尺寸 |
+| `CLASS_FIELD` / `CLASS_MAP` | 当前BC成果使用 `None` / `{None:1}`：所有SHP面为水体，不依据class字段区分水陆 |
+| `OUTSIDE_LABEL` | 当前BC面外已确认为非水体，设为0；其他未完整标注的数据必须设为255 |
+| `SCENE_CLASS_RULES` | 明确含义后可为特殊场景配置单独的字段和映射 |
+| `ALLOW_ALL_VALID_SOURCE=True` | 未声明无效域时按用户要求保留全部有限数值，包括0；仍尊重源文件有效掩膜 |
+| `INPUT_NODATA_VALUE` / `VALID_MASK_DIR` | 可选显式无效值或同网格有效范围掩膜 |
 
 ```text
-prepared/
-├── images/train/、images/val/  # 单VV、float32、512×512 GeoTIFF
-├── labels/train/、labels/val/  # 同名uint8 GeoTIFF，0/1/255，nodata=255
-├── split_manifest.csv         # 切片、地理组、源路径、窗口、有效/类别像素数
-├── scene_split.csv            # 输入景级清单副本
-└── preparation_settings.txt   # 实际波段、标签映射及有效域配置
+prepared_scenes/
+├── images/train/、images/val/  # 每景一个float32 GeoTIFF，原始宽高/CRS/网格
+├── labels/train/、labels/val/  # 同名同尺寸uint8标签，0/1/255
+├── split_manifest.csv         # 每景一行：划分、地理组、源路径、尺寸及像素数
+├── scene_split.csv            # 输入划分副本
+├── preparation_settings.txt   # 本次实际配置
+└── skipped_scenes.csv         # 有跳过场景时记录原因
 ```
 
-标签在影像原生网格上按像素中心栅格化，必要时先转换坐标系。矢量外、未映射类别、正负面冲突、影像无效域及边缘填充均为 `255`，当前 `WaterDataset` 会将其读取为 `IGNORE_INDEX=-1`。全未知切片跳过；若只有水体正样本、没有任何确认的非水体，不能作为完整二分类训练集发布。成功结束才产生正式 `split_manifest.csv`；仅有 `.partial` 时不要启动训练。
+标签按原生网格的像素中心栅格化，必要时转换矢量坐标系。当前BC语义为面内水体1、面外非水体0；源无效像素与正负标签冲突为255。孔洞属于面外，重叠水体面取并集。图例设置为水体黑、非水体白、255为nodata；显示颜色不参与训练。其他数据若标注覆盖不完整，必须把面外设为255。没有任何有效0/1监督像素的整景标为active=0，不用于训练或精度统计。缺少类别字段或没有可映射类别的场景暂跳过，不猜测含义；无效几何不自动修复。
 
-准备过程保留存储值及原生像素间距，不自动转 dB、应用 scale/offset 或重采样。1 m 与3 m切片的实际覆盖范围不同；统一格式并不等于完成跨传感器适配。未知区域仍可提供影像上下文，但不参与监督或精度计量；局部标注的成绩也不能代表整景精度。
+内部窗口逐块写入同一幅整景文件，使用压缩及大TIFF支持；不会一次把整幅影像加载到内存。整景影像和标签写完后才登记清单，支持未完成目录续跑；旧切片清单不能续跑到整景目录。仍有跳过场景或数据不完整时保留`.partial`，成功完成后才发布正式清单。已有源数据和旧切片不删除。
 
-数据准备成功后，在 `src/supervised/train.py` 设置：
+准备过程不转dB、不应用scale/offset、不重采样。统一存储形式不等于完成跨传感器适配；局部标注的指标不能代表整景所有区域的精度。
 
-```python
-IMAGE_DIR = Path(r"I:\水体数据\prepared\images")
-LABEL_DIR = Path(r"I:\水体数据\prepared\labels")
-POLARIZATIONS = ("VV",)
-POLARIZATION_BANDS = {"VV": 1}
+### 原位重建已经准备好的整景标签
+
+`prepare_bc_data.py` 现在默认 `MODE="labels"`，调用同一标签重建入口，输出根目录统一为 `I:\水体数据\prepared_scenes`；不会再写入 `prepared_scenes_new`。只有首次导入原始SAR时才使用 `MODE="prepare"`。
+
+停止读取此数据的训练/评价后，运行：
+
+```powershell
+python E:\Code_projects\sar_water_extraction\src\datasets\prepare_bc3.py
 ```
 
-同时将 `POSTPROCESS_OPTIONS` 中的 `use_landcover` 设为 `False`，新单波段数据没有 DFC 第5波段土地覆盖。现有双极化水体检查点不能直接作为单VV模型加载；本准备脚本不修改训练配置，也不启动训练。
+该入口读取 `I:\水体数据\prepared_scenes\split_manifest.csv` 中的原始SHP路径，按照对应SAR网格重新栅格化，直接替换 `prepared_scenes\labels\train` 和 `labels\val` 中的GeoTIFF。水体面内为1、面外为0，无效SAR位置为255（忽略）。色带0白、1黑，显示颜色不能用来判断像素值；不要对旧标签直接做 `1-label`。保留原SAR、原SHP、景号与train/val地理分组，不创建VRT或新版本数据目录。
+
+顶部 `DATA_DIR` 指定原位替换目录，`READ_WINDOW_SIZE` 控制内部读写内存。每景先写临时标签，完整关闭后替换原文件；全部完成后同步 `split_manifest.csv` 像素统计、`label_statistics.json` 和 `revision_settings.json`。中断后重新运行会从第一景重建；`.labels_rebuilding` 存在时训练读取器拒绝使用尚未完成的数据。
+
+标签替换后，训练读取器按文件变化自动重建窗口索引、训练归一化统计和类别权重，无须手动删除缓存。重新开始训练，不续训旧标签下的水体模型。`revise_bc_labels.py` 是此前建立独立V2的入口，本次不使用。
+
+**整景训练使用 `src/datasets/sar_scene_dataset.py`**，整景模式不使用S1读取器。`src/supervised/train.py` 默认读取 `I:\水体数据\prepared_scenes\images` 和 `labels`，使用单VV PVT＋DeepLabv3+风格模型、BCE、batch size 2。旧DFC实验只有显式选择`DATA_LAYOUT="patch"`并恢复数据路径/波段配置才使用旧读取器。
+
+整景读取参数位于`SCENE_OPTIONS`：
+
+| 参数 | 默认值与作用 |
+|---|---|
+| `window_size` / `halo` | 1024 / 128；中心768×768负责监督和计分，周围上下文只作为输入 |
+| `windows_per_epoch` | 4096；每轮训练抽样上限，`None`遍历全部训练窗口；当前使用随机窗口抽样，关闭困难重采样 |
+| `normalization_windows` | 每个训练景固定抽2个有标注核心的窗口，使用其中全部有效SAR像素估计均值/标准差；不使用val，不按水体类别筛选 |
+| `num_workers` / `max_open_scenes` | 2 / 4；每worker独立有限文件缓存、2批预取、64MiB GDAL缓存，GPU使用锁页内存 |
+| `cache_dir` | `E:\Code_projects\sar_water_extraction\data_cache\bc_scenes`，保存小型窗口索引及归一化缓存，不保存小影像切片 |
+
+首次索引用连续标签条带扫描，不加载整景数组；源文件尺寸/修改时间、VRT引用的SAR、采用清单或窗口配置变化会改变缓存键。后续复用索引。归一化是固定训练窗口的**抽样估计**，不是全景逐像素统计，参数和抽样索引保存在检查点中；推理必须复用这些参数。
+
+训练每轮是窗口抽样轮次，不等于遍历全部原始场景。验证遍历全部有0/1标签的核心窗口，不受训练抽样上限限制；核心互不重叠，每个已标注像素仅统计一次。输出常规`metrics.csv`、最佳/最后检查点及每轮`val_scenes_epoch_*.csv`。后者用于检查各景结果，不能将未知区域算成非水体。
+
+新实验在 `RESUME_CHECKPOINT=None` 时使用 `PRETRAINED` 决定是否加载ImageNet编码器权重；显式指定续跑检查点时恢复已有水体模型，不再下载或加载ImageNet初始化权重。`CLASS_WEIGHT_MODE="train_pixels"` 仅使用train不重叠核心的已标注像素，设置BCE类别权重 `w_c=N/(2*N_c)`，顺序为非水体、水体；未知255不计数。它让两类在全训练像素总体上的权重总量相同，并不保证每批类别平衡或效果提升。为避免叠加重加权，本轮使用 `SAMPLING="random"`；改回旧实验时设类别权重模式为`none`。
+
+训练loss使用类别加权，val loss保持未加权，两者不能直接按数值大小判断过拟合。精度指标不加权，概率阈值仍为0.5；加权可能改变概率校准，后续阈值选择仅用val。DeepLab只有一个监督头，头权重为1；UAFNet的四头权重不影响它。
+
+除原有`best.pth`（val loss最低）、`best_f1.pth`和`last.pth`，另保存`best_balanced_accuracy.pth`，按水体与非水体召回率的平均值选取。全水体/全非水体预测在两类均存在时该值为0.5；仍须结合两类mIoU、误差图、各景表现判断质量，文件名中的best不表示模型已经有效。
+
+当前训练内验证采用带上下文的中心裁取拼接计量，不是重叠概率平均。训练验证本身不保存全幅预测。整景概率/掩膜/质量图由train.py的postprocess模式分派到scene_quality生成，详见下方“BC整景质量输出”。当前不自动导出矢量。
 
 ## 训练配置
 
@@ -127,16 +158,33 @@ POLARIZATION_BANDS = {"VV": 1}
 |---|---|---|
 | 执行方式 | `METHOD`、`RUN_MODE` | 选择模型及训练/质量输出流程 |
 | 数据 | `IMAGE_DIR`、`LABEL_DIR`、`POLARIZATIONS`、`POLARIZATION_BANDS` | 数据路径、极化与文件波段映射 |
-| 输出 | `OUTPUT_ROOT`、`OUTPUT_DIR` | 根目录与可选绝对路径覆盖；每次运行创建新时间戳目录 |
-| 训练 | `PRETRAINED`、`BATCH_SIZE`、`EPOCHS`、`LEARNING_RATE`、`SEED` | 初始化、批次、轮数、学习率和随机种子 |
+| 斑点滤波 | `SPECKLE_FILTER`、`SPECKLE_INPUT_DOMAIN`、`SPECKLE_WINDOW_SIZE`、`SPECKLE_ENL` | 标准化前的在线 Lee 滤波，默认关闭 |
+| 输出 | `OUTPUT_ROOT`、`OUTPUT_DIR` | 新实验创建时间戳目录；续跑沿用检查点所在实验目录 |
+| 训练 | `RESUME_CHECKPOINT`、`PRETRAINED`、`BATCH_SIZE`、`EPOCHS`、`LEARNING_RATE`、`SEED` | 续跑/初始化、批次、总目标轮数、学习率和随机种子 |
 | 优化 | `OPTIMIZER_NAME`、`WEIGHT_DECAY`、`COSINE_SCHEDULE`、`TRAIN_AUGMENTATION` | 单通道水体方法的优化与增强设置 |
-| 损失 | `LOSS_NAME`、`BCE_WEIGHT`、`DICE_WEIGHT` | 选择损失；后两项仅 BCE+Dice 使用 |
+| 损失 | `LOSS_NAME`、`CLASS_WEIGHT_MODE`、`BCE_WEIGHT`、`DICE_WEIGHT` | 选择损失及BCE类别权重；后两项仅 BCE+Dice 使用 |
 | 采样 | `SAMPLING`、`HARD_WARMUP_EPOCHS`、`HARD_SAMPLE_RATIO`、`HARD_POOL_RATIO` | 随机/困难采样及比例 |
 | DeepLab | `DEEPLAB_*` | 编码器、解码宽度、ASPP空洞率、Dropout |
 | 其他网络 | `UAFNET_*`、`STAGE`、`HEAD_LOSS_WEIGHTS` 等 | 仅选中对应模型时生效 |
-| 质量输出 | `POSTPROCESS_OPTIONS`、`POSTPROCESS_CHECKPOINTS` | 推理工作点、土地覆盖修正、掩膜和可视化 |
+| 质量输出 | `POSTPROCESS_CHECKPOINTS`、`SCENE_QUALITY_OPTIONS` / `POSTPROCESS_OPTIONS` | 整景使用前者配置，旧切片使用后者；推理、计量和可视化 |
 
 默认 `METHOD="deeplabv3"` 使用 PVT-v2-B2 编码器、ASPP 和浅层跳连，单头 BCE，解码通道256、浅层投影48、空洞率 `(3,6,9)`。输入512×512时，深层16×16特征经过ASPP，与128×128浅层特征融合，最后恢复到512×512。它是输出步长32、普通卷积的 DeepLabv3+ 风格适配，不是原论文完整配置。
+
+斑点滤波位于 `src/datasets/speckle.py`。开启一个新的滤波训练时设置：
+
+```python
+RESUME_CHECKPOINT = None
+SPECKLE_FILTER = "lee"
+SPECKLE_INPUT_DOMAIN = "amplitude"  # 仅在确认是线性幅度时使用；功率填 intensity。
+SPECKLE_WINDOW_SIZE = 3
+SPECKLE_ENL = 1.0
+```
+
+`none` 保留未滤波路径；`lee` 使用普通 Lee 自适应滤波，依据 SNAP S1TBX 的局部统计公式以 NumPy/SciPy 独立实现，不需要启动 SNAP/GAMMA。幅度输入先平方为功率，滤波后开方恢复幅度；功率输入保持功率，不接受 dB。ENL 是可调的功率域等效视数参数，不是本数据已测定的属性；数值越大平滑越弱。此前 ORG 文件检查未能确认幅度/功率，配置本身不会自动判别单位，也不代表已完成辐射校正。
+
+滤波只作用于读取的影像，不修改源 TIFF、标签或有效掩膜。整景读取在窗口外增加滤波半径，再裁回模型输入，减少块边缘接缝；零值仍可有效，无效像素不进入邻域统计。开启后新实验目录附加 `_lee`，重新统计滤波后的训练均值/标准差，单独缓存；标签窗口索引继续复用。
+
+滤波配置随检查点保存，模型评价和质量输出按检查点恢复，旧检查点默认关闭。启用/关闭或修改滤波参数不能作为同一次训练续跑；应将 `RESUME_CHECKPOINT=None` 开始独立实验，之后续跑该实验时保持同一滤波配置。训练、验证与预测均执行相同预处理。
 
 其他方法可这样选择：
 
@@ -157,11 +205,25 @@ POLARIZATION_BANDS = {"VV": 1}
 - `train`：只训练。
 - `postprocess`：不训练，使用 `POSTPROCESS_CHECKPOINTS` 指定的绝对路径。
 
-默认是重新训练，`PRETRAINED=True` 不表示续训旧水体模型。DeepLab已整合到 `src/supervised/train.py`，不再提供旧的独立DeepLab脚本。
+`PRETRAINED=True` 只控制新实验的编码器初始化，是否续跑由 `RESUME_CHECKPOINT` 决定。DeepLab已整合到 `src/supervised/train.py`，不再提供旧的独立DeepLab脚本。
+
+### 中断后续跑
+
+在 `src/supervised/train.py` 顶部设置 `RESUME_CHECKPOINT` 为已有实验 `last.pth` 的绝对路径；设置为 `None` 表示新实验。随后仍运行同一个训练入口：
+
+```powershell
+python E:\Code_projects\sar_water_extraction\src\supervised\train.py
+```
+
+`EPOCHS` 表示总目标轮数：检查点完成第11轮、`EPOCHS=20` 时，从第12轮继续至第20轮。恢复模型、优化器、学习率调度器、AMP和最佳指标，保留原实验目录及此前日志。当前数据划分、波段、模型和训练配置需与检查点兼容；更换标签或算法方案应建立新实验。
+
+新版还会在一轮训练结束、验证开始前保存 `train_end.pth`。如果验证中断，可将续跑路径指向它，重新执行这一轮完整验证，然后继续训练；`last.pth` 表示训练和验证均完成的轮次。训练批次中途的进度不会逐批保存，未保存部分需要重做。
+
+新版检查点保存随机数状态；旧检查点若缺失会明确提示，仍可恢复其已有训练状态，但不能保证与不中断时逐批完全相同。检查点通过临时文件完整写入后替换；训练报错保留traceback供排查，不静默跳过坏样本。
 
 ## 训练与质量产物
 
-每次运行保存到独立时间戳目录，已有结果不会因重跑而被覆盖。
+新实验保存到独立时间戳目录；续跑沿用原实验目录，继续追加指标并更新检查点。
 
 | 文件或目录 | 含义 |
 |---|---|
@@ -177,9 +239,53 @@ POLARIZATION_BANDS = {"VV": 1}
 
 `SAVE_FEATURE_MAPS=False` 关闭中间层特征图。质量图是最终成果，不属于训练中间特征。`use_landcover=True` 会额外生成土地覆盖修正结果，评价网络本身时使用 **raw** 掩膜及指标，不把修正结果混入原始模型成绩。
 
+### 后处理四阶段与在线辅助数据
+
+监督入口 `src/supervised/train.py` 的 `POSTPROCESS_OPTIONS`，以及阈值入口
+`src/thres_segmentation/main.py` 和对应 pipeline，按以下阶段注释：
+
+1. **数据准备**：锁定所选验证/外部影像，恢复输入契约；按每景范围下载并缓存辅助数据。本地参考文件优先。
+2. **基础预测**：监督模型恢复各检查点滤波/标准化，平均概率并阈值化；阈值模型执行 Lee、百分位拉伸及阈值分割。这些处理不等于 Sigma0/Gamma0 辐射校正。
+3. **辅助修正与水体分析**：保留原始预测，按显式开关补水；统计面积，结合历史参考计算新增/消退，结合 DEM/DSM 估计几何水深。
+4. **评价与输出**：标签仅用于独立计分；修正前后使用相同有效标签域、汇总混淆计数，输出掩膜、CSV、质量图及分析栅格。
+
+监督后处理复用阈值分割的 `auxiliary_data.py` 和 `water_analysis.py`。在
+`POSTPROCESS_OPTIONS` 中设置：
+
+```python
+auxiliary_options=dict(download_history=True, download_elevation=True,
+                       worldcover_year=2021, buffer_m=1000.),
+auxiliary_cache_dir=Path(r"E:\Code_projects\sar_water_extraction\data_cache\auxiliary"),
+use_landcover=False,       # 不要求输入影像自带第5波段。
+use_external_water=False,  # 只对比历史数据；显式True才将历史水体补入postprocessed。
+```
+
+保持现有 `analysis_options` 的其余参数即可。仅下载历史水体时关闭
+`download_elevation`；默认 `depth_scope='new_water'` 需要历史参考。
+`reference_path` 可指定本地历史栅格或水体矢量；矢量需有效调查覆盖面，或明确声明完整覆盖。
+不同景已有不同辅助文件时，可直接传入 `scene_analysis_options={样本名: 分析参数}`，
+此时将 `auxiliary_options=None`，避免与自动准备产生歧义。
+
+默认下载和外部补水开关均关闭。下载 WorldCover 后只用于变化对比，
+不会自动改写模型结果；历史补水可能消除真实退水，因此始终分别分析 `raw` 与
+`postprocessed`，评价模型及退水时应检查 `raw`。高程当前用于水深估计，
+未将坡度直接作为监督模型的硬排除条件。
+
+监督产物新增 `postprocess.json`（样本辅助路径及开关）、
+`analysis/raw/<样本>/`、`analysis/postprocessed/<样本>/`，以及 `per_image.csv` 中的
+`raw_water_area_m2`、`post_water_area_m2`、面积可用状态和辅助新增像素数。
+`save_masks=False` 时仍通过临时掩膜完成分析；无 CRS 且无外部参考时面积标记为不可用，
+有外部参考则要求 CRS，不能用像素数冒充平方米。
+当前质量图中的 DEM/WorldCover 面板仍展示输入影像内置波段；外部辅助数据的结果见 `analysis/`。
+
+在线产品支持 WorldCover 2020/2021 静态水体参考及 Copernicus GLO-30 DSM，
+不代表任意日期的灾前状态或水下地形。水深是岸线高程插值的几何估算；
+输入范围、编码、缓存与质量码详见 [阈值分割说明](src/thres_segmentation/README.md)。
+上述外部辅助水体和水深功能属于旧切片后处理路径。`DATA_LAYOUT='full_scene'` 时，train.py会分派到独立的窗口化scene_quality路径；两条路径的配置不混用。
+
 ## 固定模型验证与概率阈值扫描
 
-固定阈值、输出质量结果和汇总：
+旧DFC切片的固定阈值验证与质量汇总如下；BC整景使用train.py的postprocess模式或下面model_eval.py的单次评价，勿将整景直接交给旧validation.py整图报告：
 
 ```powershell
 python E:\Code_projects\sar_water_extraction\src\supervised\validation.py
@@ -220,7 +326,7 @@ python E:\Code_projects\sar_water_extraction\src\thres_segmentation\main.py
 ## 模型与传统阈值结果对比
 
 ```powershell
-python E:\Code_projects\sar_water_extraction\scripts\compare_threshold.py
+python E:\Code_projects\sar_water_extraction\src\compare_threshold.py
 ```
 
 该脚本只在同一组val、共同有效像素上比较整体与边界精度，不使用train评价。支持“现场计算”或“读取已有掩膜”两种输入方式，也可两者混用。
@@ -263,3 +369,62 @@ THRESHOLD_MASK_DIRS = {
 ## 回归检查
 
 在仓库根目录运行 `python -m unittest discover -s tests`。测试使用临时合成数据；模型权重重载不会重新下载预训练权重。
+
+
+## BC整景质量输出与独立优化对照
+
+整景质量输出仍从 `src/supervised/train.py` 进入。选择 `RUN_MODE="postprocess"`，在
+`POSTPROCESS_CHECKPOINTS` 填写一个整景检查点，`SCENE_QUALITY_OPTIONS` 配置输出目录、
+阈值网格、保存项和可选开闭运算。不会启动训练，也不会修改原始SAR、标签或模型。
+运行时按训练窗口与halo读取，核心区不重叠写回原地理网格；标签只参与评价。
+当前该入口使用检查点保存的完整val景；外部无标签影像和多模型集成仍需单独适配。
+
+- `thresholds`：一次模型推理中扫描多个概率阈值，默认0.01～0.99，步长0.01。
+- `threshold`：输出raw/post掩膜的固定工作点；扫描最优点不会自动替换它。
+- `opening_radius`、`closing_radius`：局部形态学半径（像素）；均为0时post与raw一致。
+  这里不执行DEM/土地覆盖/OSM修正，也不进行整景连通域面积筛除。
+- `boundary_radii`：真值水体内外距离带，单位像素；不同地面分辨率下不能直接当作相同米数。
+- `boundary_points`：每景每侧每半径最多固定抽样点数，默认256；种子固定，独立于预测。
+  两侧定额抽样改变类别占比，采样点结果与全距离带结果分别报告。
+- `save_probabilities`：输出压缩float32概率GeoTIFF；数值扫描直接基于logit，避免概率量化影响判别。
+- `save_visuals`：每景一张降采样预览；图上指标来自原分辨率全景计数。
+- `output_dir`：相同配置可继续未完成景；修改阈值/形态学/检查点时另用目录。
+- `scene_limit=None`：全val；只用于试跑的景数限制必须明确保留在配置中，不能当作完整val结果。
+
+输出目录位于检查点旁的 `quality/`：
+
+| 文件/目录 | 含义 |
+|---|---|
+| `raw/`、`postprocessed/` | 原始及修正二值GeoTIFF：水体1、非水体0、无效255 |
+| `probability/` | float32水体概率，nodata=-1；概率并非已经过置信度校准 |
+| `figures/` | SAR、真值、raw、post、TP/FP/FN对照预览 |
+| `threshold_overall.csv` | 按全部有效像素汇总的阈值曲线，附逐景宏平均F1 |
+| `threshold_scenes.csv`、`threshold_groups.csv` | 各阈值的逐景/地理组指标 |
+| `precision_targets.csv`、`recall_targets.csv` | 达到指定P或R要求的实测最优点，不做插值 |
+| `threshold_boundary.csv`、`post_boundary.csv` | 全距离带的严格局部分类计数，不是容差Boundary F1 |
+| `threshold_boundary_points.csv`、`post_boundary_points.csv` | 固定采样点对应指标 |
+| `boundary_points/` | 可复核点位的行列号、标签、logit和raw/post预测 |
+| `training_parity.csv` | 完成后核对0.5工作点与原训练验证的混淆计数差 |
+| `status.json` | 已完成/预期景数；complete为false时只是阶段结果 |
+| `counts/` | 每景计数与完成标记，用于中断续跑，不是训练中间特征 |
+
+类别权重在 `CLASS_WEIGHT_MODE` 选择：`none` 为等权；`train_pixels` 为原逆频率；
+`train_pixels_sqrt` 为逆频率平方根。后两者均保持训练像素分布下平均权重为1，
+验证损失不加权。切换策略应 `RESUME_CHECKPOINT=None` 并使用新的输出目录；
+输入、划分、采样、种子、训练步数和网络保持一致。正式训练需要将RUN_MODE改为train。
+
+BN诊断使用 `scripts/calibrate_bn.py`：在顶部设置 `RUN_DIR`、`CHECKPOINT_NAME`、
+`CALIBRATION_SAMPLES`。整景只从保存的train窗口固定随机取样，逐层恢复统计量；
+同一完整val比较前后结果。校准结果另存 `bn_calibration/`，属于推理对照，不可当作原训练续跑检查点。
+Lee滤波保持独立实验；需要确认幅度/功率表达，不能代替辐射校正。
+
+逐景数值审查入口：
+
+```powershell
+python E:\Code_projects\sar_water_extraction\src\datasets\inspect_radiometry.py
+```
+
+默认每景3×3内部网格中心、256×256原分辨率抽样，输出到 `codex_analysis/radiometry_audit/`。
+`scene_statistics.csv`包含原始数值分位数、零值/负值比例、标签两类数值分布和元数据；
+`review_scenes.csv`列出待审查项。参考范围使用训练景的正值条件中位数，优先同传感器/像元间距。正值条件统计不改变有效像素定义，包含零值的统计同时保留。
+异常标记不等于错误数据，不自动删除或加权；此统计也无法单独确定DN是幅度还是功率。

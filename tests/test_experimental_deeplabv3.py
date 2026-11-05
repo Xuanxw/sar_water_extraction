@@ -110,7 +110,7 @@ class DeepLabExperimentTests(unittest.TestCase):
                  patch.object(train, "DEEPLAB_DECODER_CHANNELS", 32), \
                  patch.object(train, "DEEPLAB_LOW_LEVEL_CHANNELS", 16), \
                  patch.object(train, "EPOCHS", 3), \
-                 patch.object(train, "RUN_MODE", "train_postprocess"), \
+                 patch.multiple(train, POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2}, DATA_LAYOUT="patch", CLASS_WEIGHT_MODE="none", SAMPLING="hard"), patch.object(train, "RUN_MODE", "train_postprocess"), \
                  patch.object(train, "POSTPROCESS_OPTIONS", dict(threshold=.5, use_landcover=False,
                               save_masks=True, save_visuals=False)), \
                  patch.object(torch.cuda, "is_available", return_value=False):

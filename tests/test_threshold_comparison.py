@@ -12,7 +12,7 @@ import torch
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
                 str(Path(__file__).resolve().parents[1] / "scripts")]
-import compare_threshold
+import compare_threshold as compare_threshold
 from supervised.evaluation.boundary_eval import boundary_regions, confusion_counts
 
 

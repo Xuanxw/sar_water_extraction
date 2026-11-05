@@ -4,6 +4,7 @@ torch
 timm==1.0.30
 matplotlib
 scipy
+pyproj>=3.6,<4
 termcolor
 segmentation-models-pytorch==0.5.0
 fiona>=1.9,<2

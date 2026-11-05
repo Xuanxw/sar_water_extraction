@@ -13,7 +13,7 @@ from scipy.ndimage import distance_transform_edt
 
 ROOT = Path("E:/Code_projects/sar_water_extraction")
 sys.path.insert(0, str(ROOT / "src"))
-from datasets.water_dataset import sample_name, resolve_sample_path
+from datasets.s1_dataset import sample_name, resolve_sample_path
 
 IMAGE_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images")
 LABEL_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels")

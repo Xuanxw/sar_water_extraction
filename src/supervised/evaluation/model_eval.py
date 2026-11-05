@@ -3,6 +3,7 @@ from math import log
 from pathlib import Path
 from datetime import datetime
 import csv
+import hashlib
 import sys
 
 ROOT = Path("E:/Code_projects/sar_water_extraction")
@@ -10,25 +11,22 @@ sys.path.insert(0, str(ROOT / "src"))  # 从 evaluation 直接运行时找到项
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
-from supervised.datasets.water_dataset import WaterDataset
+from datasets.sar_scene_dataset import SARSceneDataset
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.metrics import metrics_from_counts
 
-CHECKPOINT_PATH = Path("E:/Code_projects/sar_water_extraction/outputs/pvt_deeplabv3plus_hard_sampling_grouped/20261028_164752_622039/best_f1.pth")
-IMAGE_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/images")
-LABEL_DIR = Path("E:/Code_projects/sar_water_extraction/data/Track1/train/labels")
-USE_SAVED_VAL = True  # True只评价保存的val；False评价指定的外部有标签集合。
-BATCH_SIZE = None     # None沿用检查点的batch size。
-USE_AMP = None        # None沿用检查点的AMP设置，CPU使用float32。
-THRESHOLD = 0.5       # 单次评价的水体概率阈值。
-MODE = "single"      # single固定阈值；scan对以下检查点做概率阈值扫描。
-SCAN_CHECKPOINTS = {
-    "UAFNet": Path("E:/Code_projects/sar_water_extraction/outputs/pvt_uafnet_hard_sampling_residual_grouped/20261027_212638_633640/best_f1.pth"),
-    "Nested": Path("E:/Code_projects/sar_water_extraction/outputs/pvt_unetpp_hard_sampling_residual_grouped/20261028_105832_612811/best_f1.pth"),
-    "DeepLab": CHECKPOINT_PATH,
-}
+CHECKPOINT_PATH = Path(r"E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_balanced_bce_labels_corrected_bc_scenes\20261103_203233_244527\best_f1.pth")
+IMAGE_DIR = Path(r"I:\水体数据\prepared_scenes\images")
+LABEL_DIR = Path(r"I:\水体数据\prepared_scenes\labels")
+USE_SAVED_VAL = True
+BATCH_SIZE = None
+USE_AMP = None
+THRESHOLD = 0.5
+MODE = "single"
+SCAN_CHECKPOINTS = {"BC_DeepLab": CHECKPOINT_PATH}
+
 SCAN_THRESHOLDS = [i / 1000 for i in range(10, 991)]  # 0.01～0.99，步长 0.001；各模型相同。
 PRECISION_TARGETS = (0.80, 0.85, 0.90)
 
@@ -70,10 +68,27 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
     ignore_index = checkpoint.get("ignore_index", -1)
     image_dir = Path(checkpoint["image_dir"] if image_dir is None else image_dir)
     label_dir = Path(checkpoint["label_dir"] if label_dir is None else label_dir)
-    dataset = WaterDataset(image_dir, label_dir, bands)
-    if use_saved_val:
-        # 按训练时保存的文件名和顺序评价，不重新随机划分。
-        dataset.select_files(checkpoint["val_files"])
+    scene_dataset = None
+    if checkpoint.get('data_layout') == 'full_scene':
+        if not use_saved_val:
+            raise ValueError('整景复评需使用保存的验证窗口名单；外部数据需单独定义验证协议')
+        split_path = image_dir.parent/'split_manifest.csv'
+        if hashlib.sha256(split_path.read_bytes()).hexdigest() != checkpoint['split_manifest_sha256']:
+            raise ValueError('整景采用清单与检查点不一致')
+        scene_dataset = SARSceneDataset(image_dir.parent,
+            Path(r'E:\Code_projects\sar_water_extraction\data_cache\bc_scenes'), bands=bands,
+            window_size=checkpoint['window_size'], halo=checkpoint['window_halo'],
+            speckle=checkpoint.get('speckle'))
+        positions = {name:i for i,name in enumerate(scene_dataset.names)}
+        ids = [positions[name] for name in checkpoint['val_files']]
+        if not set(ids) <= set(scene_dataset.val_ids):
+            raise ValueError('验证名单包含训练窗口')
+        dataset = Subset(scene_dataset, ids)
+    else:
+        from datasets.s1_dataset import WaterDataset
+        dataset = WaterDataset(image_dir, label_dir, bands, speckle=checkpoint.get('speckle'))
+        if use_saved_val:
+            dataset.select_files(checkpoint['val_files'])
     batch_size = checkpoint["batch_size"] if batch_size is None else batch_size
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     use_amp = checkpoint.get("amp_enabled", False) if use_amp is None else use_amp
@@ -126,6 +141,8 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
             if step % 50 == 0:
                 print(f"评价：{step}/{len(loader)} 批", flush=True)
 
+    if scene_dataset is not None:
+        scene_dataset.close()
     if valid_pixels == 0:
         raise ValueError("没有可用于评价的有效标签像素")
     tn, fp, fn, tp = confusion.tolist()

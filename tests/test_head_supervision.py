@@ -53,7 +53,7 @@ class HeadSupervisionTests(unittest.TestCase):
         torch.set_num_threads(2)
 
     def make_trainer(self, folder, weights):
-        with patch.object(train, "WaterDataset", TinyDataset), \
+        with patch("datasets.s1_dataset.WaterDataset", TinyDataset), \
              patch.object(torch.cuda, "is_available", return_value=False):
             trainer = train.WaterSegmentationTrainer(
                 FourIndependentHeads, {}, {"model_name": "pvt_uafnet"},
@@ -123,7 +123,7 @@ class HeadSupervisionTests(unittest.TestCase):
     def test_factory_changes_only_head_supervision_and_output_directory(self):
         options = []
         for weights in ((1., 1., 1., 1.), WEIGHTS):
-            with patch.object(train, "METHOD", "uafnet"), patch.object(train, "UAFNET_BACKBONE", "pvt_v2_b2.in1k"), patch.object(train, "UAFNET_REFINEMENT_DECODER", "uafm"), patch.object(train, "UAFNET_HIGH_RESOLUTION_REFINEMENT", False), patch.object(train, "UAFNET_MBDC_DILATIONS", None), patch.object(train, "LOSS_NAME", "bce"), \
+            with patch.multiple(train, METHOD="uafnet", DATA_LAYOUT="patch", POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2}), patch.object(train, "UAFNET_BACKBONE", "pvt_v2_b2.in1k"), patch.object(train, "UAFNET_REFINEMENT_DECODER", "uafm"), patch.object(train, "UAFNET_HIGH_RESOLUTION_REFINEMENT", False), patch.object(train, "UAFNET_MBDC_DILATIONS", None), patch.object(train, "LOSS_NAME", "bce"), \
                  patch.object(train, "SAMPLING", "hard"), patch.object(train, "OUTPUT_DIR", None), \
                  patch.object(train, "UAFNET_FINAL_RESIDUAL", True), \
                  patch.object(train, "HEAD_LOSS_WEIGHTS", weights), \
@@ -144,7 +144,7 @@ class HeadSupervisionTests(unittest.TestCase):
 
     def test_other_methods_keep_equal_supervision(self):
         for method in ("unet", "pvt", "resnet50", "uanet"):
-            with self.subTest(method=method), patch.object(train, "METHOD", method), \
+            with self.subTest(method=method), patch.multiple(train, METHOD=method, DATA_LAYOUT="patch", POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2}), \
                  patch.object(train, "LOSS_NAME", "ce"), patch.object(train, "SAMPLING", "random"), \
                  patch.object(train, "HEAD_LOSS_WEIGHTS", WEIGHTS), \
                  patch.object(train, "WaterSegmentationTrainer") as factory:

@@ -48,3 +48,5 @@ src/*/_version_.py
 data/
 outputs/
 codex*/
+# 可重建的整景窗口索引和归一化缓存
+/data_cache/

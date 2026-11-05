@@ -1,5 +1,7 @@
 """检验概率集成、土地覆盖修正以及输出掩膜与标签的隔离。"""
 import csv
+import json
+from io import BytesIO
 import sys
 import unittest
 from pathlib import Path
@@ -14,7 +16,109 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
                 str(Path(__file__).resolve().parents[1] / "scripts")]
 from supervised.evaluation import postprocess
 from supervised import train
+
+
+class RasterResponse(BytesIO):
+    def __init__(self, body):
+        super().__init__(body)
+        self.headers = {"Content-Type": "image/tiff", "Content-Length": str(len(body))}
+
+
 class PostprocessTests(unittest.TestCase):
+    def test_downloaded_auxiliary_analysis_and_explicit_water_addition(self):
+        """真实栅格/对齐/分析，只有HTTP和模型替换：下载不应隐式补水或改变验证名单。"""
+        class Ensemble:
+            def __init__(self, paths, use_amp):
+                self.device, self.bands = torch.device("cpu"), (1,)
+                self.members = [dict(image_dir=images, label_dir=None, val_files=["a.tif"],
+                                     path=Path("unused.pth"), ignore_index=-1)]
+
+            def predict(self, image, valid):
+                probability = image[:, 0].clamp(0, 1)
+                return [probability], probability
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            images = root / "images"
+            images.mkdir()
+            transform = rasterio.transform.from_origin(117.01, 30.02, .001, .001)
+
+            def raster(path, data, nodata):
+                with rasterio.open(path, "w", driver="GTiff", width=7, height=7, count=1,
+                                   dtype=data.dtype, nodata=nodata, crs="EPSG:4326", transform=transform) as target:
+                    target.write(data, 1)
+                return path.read_bytes()
+
+            sar = np.zeros((7, 7), dtype="float32")
+            sar[2:5, 2:5] = 1
+            sar[0, 0] = -9999
+            raster(images / "a.tif", sar, -9999)
+            # 未选中的影像没有CRS；若错误地下载整个目录，这里应使测试失败。
+            with rasterio.open(images / "b.tif", "w", driver="GTiff", count=1,
+                               width=7, height=7, dtype="uint8") as target:
+                target.write(np.zeros((7, 7), dtype="uint8"), 1)
+            cover = np.full((7, 7), 40, dtype="uint8")
+            cover[0, 0] = cover[1, 1] = cover[3, 3] = 80
+            cover[3, 4] = 0  # WorldCover未知，不能变成“陆地”或修正依据。
+            terrain = np.full((7, 7), 5, dtype="float32")
+            terrain[2:5, 2:5] = 2
+            cover_body = raster(root / "cover.tif", cover, 255)
+            terrain_body = raster(root / "terrain.tif", terrain, -9999)
+            options = dict(with_labels=False, use_landcover=False, batch_size=1,
+                           auxiliary_cache_dir=root / "cache",
+                           auxiliary_options=dict(download_history=True, download_elevation=True, buffer_m=0),
+                           save_visuals=True)
+
+            def respond(url, **kwargs):
+                return RasterResponse(cover_body if "worldcover" in url.full_url.lower() else terrain_body)
+
+            with patch.object(postprocess, "WaterEnsemble", Ensemble), \
+                 patch("urllib.request.urlopen", side_effect=respond) as request:
+                postprocess.run_postprocess(["unused.pth"], output_dir=root / "baseline", **options)
+            self.assertEqual(request.call_count, 2)
+            baseline = root / "baseline"
+            with rasterio.open(baseline / "raw/a.tif") as source:
+                raw = source.read(1)
+            with rasterio.open(baseline / "postprocessed/a.tif") as source:
+                np.testing.assert_array_equal(raw, source.read(1))
+            self.assertTrue((baseline / "figures/a.png").is_file())  # 单波段图也能输出。
+            self.assertFalse((baseline / "raw/b.tif").exists())
+            raw_summary = json.loads((baseline / "analysis/raw/a/summary.json").read_text())
+            self.assertEqual(raw_summary["depth"]["elevation_kind"], "DSM")
+            self.assertGreater(raw_summary["change"]["lost_water"]["m2"], 0)
+            self.assertTrue((baseline / "analysis/raw/a/water_depth_m.tif").is_file())
+            with rasterio.open(baseline / "analysis/raw/a/water_change.tif") as source:
+                self.assertEqual(source.read(1)[3, 4], 255)
+
+            # 相同辅助数据走缓存；只有显式开启补水才修正，并继续保留raw的退水证据。
+            options["save_visuals"] = False
+            with patch.object(postprocess, "WaterEnsemble", Ensemble), \
+                 patch("urllib.request.urlopen", side_effect=AssertionError("应复用缓存")):
+                postprocess.run_postprocess(["unused.pth"], use_external_water=True,
+                                           output_dir=root / "corrected", **options)
+            with rasterio.open(root / "corrected/postprocessed/a.tif") as source:
+                corrected = source.read(1)
+            expected = raw.copy()
+            expected[1, 1] = 1
+            np.testing.assert_array_equal(corrected, expected)
+            self.assertEqual(corrected[0, 0], 255)
+            post_summary = json.loads((root / "corrected/analysis/postprocessed/a/summary.json").read_text())
+            self.assertEqual(post_summary["change"]["lost_water"]["m2"], 0)
+            with (root / "corrected/per_image.csv").open(encoding="utf-8-sig") as stream:
+                row = next(csv.DictReader(stream))
+            self.assertEqual(int(row["auxiliary_added_pixels"]), 1)
+            self.assertLess(float(row["raw_water_area_m2"]), float(row["post_water_area_m2"]))
+            # 已准备的逐景路径直接复用；不保存mask时分析仍生成，临时文件正常清理。
+            prepared = json.loads((baseline / "postprocess.json").read_text(encoding="utf-8"))["scene_analysis_options"]
+            with patch.object(postprocess, "WaterEnsemble", Ensemble), \
+                 patch("urllib.request.urlopen", side_effect=AssertionError("本地参考不得联网")):
+                postprocess.run_postprocess(["unused.pth"], with_labels=False, use_landcover=False,
+                    save_masks=False, save_visuals=False, scene_analysis_options=prepared,
+                    output_dir=root / "analysis_only")
+            self.assertFalse((root / "analysis_only/raw").exists())
+            self.assertFalse(list((root / "analysis_only").glob("water_analysis_*")))
+            self.assertTrue((root / "analysis_only/analysis/raw/a/water_depth_m.tif").is_file())
+
     def test_terrain_gradient_uses_confirmed_scales_and_preserves_missing_data(self):
         # 每列增加 10 个高程值；10 米像元、1 米/值时为 45 度平面坡。
         dem = np.tile(np.arange(5, dtype=float) * 10, (5, 1))
@@ -78,7 +182,8 @@ class PostprocessTests(unittest.TestCase):
         ensemble = postprocess.WaterEnsemble.__new__(postprocess.WaterEnsemble)
         ensemble.device, ensemble.use_amp, ensemble.bands = torch.device("cpu"), False, (1,)
         ensemble.members = [dict(model=torch.nn.Identity(), bands=(1,),
-                                 mean=torch.zeros(1,1,1,1), std=torch.ones(1,1,1,1))]
+                                 mean=torch.zeros(1,1,1,1), std=torch.ones(1,1,1,1),
+                                 speckle_filter=postprocess.SpeckleFilter())]
         logits = torch.tensor([[[[-2e-7, -6.437767e-8, -1e-8, 0., 1e-8, 2e-7]]]])
         members, average = ensemble.predict(logits, torch.ones(1,1,6,dtype=torch.bool))
         expected = logits[:,0] >= 0
@@ -147,6 +252,9 @@ class PostprocessTests(unittest.TestCase):
         for variant in ("b2", "b3", "b4", "b5"):
             with patch.object(train, "METHOD", "uafnet"), patch.object(train, "UAFNET_REFINEMENT_DECODER", "uafm"), patch.object(train, "UAFNET_HIGH_RESOLUTION_REFINEMENT", False), patch.object(train, "UAFNET_MBDC_DILATIONS", None), \
                  patch.object(train, "LOSS_NAME", "bce"), \
+                 patch.object(train, "CLASS_WEIGHT_MODE", "none"), \
+                 patch.object(train, "POLARIZATIONS", ("VV", "VH")), \
+                 patch.object(train, "POLARIZATION_BANDS", {"VV": 1, "VH": 2}), \
                  patch.object(train, "SAMPLING", "random"), \
                  patch.object(train, "HEAD_LOSS_WEIGHTS", (1., 1., 1., 1.)), \
                  patch.object(train, "UAFNET_FINAL_RESIDUAL", False), \

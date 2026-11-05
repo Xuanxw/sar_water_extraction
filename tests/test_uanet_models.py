@@ -81,14 +81,14 @@ class UANetTests(unittest.TestCase):
                             valid_mask=torch.ones(64, 64, dtype=torch.bool))
 
         with TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
-            with patch.object(train, "METHOD", "uanet"), patch.object(train, "STAGE", "full"), \
+            with patch.multiple(train, METHOD="uanet", DATA_LAYOUT="patch", POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2}), patch.object(train, "STAGE", "full"), \
                  patch.object(train, "LOSS_NAME", "ce"), \
                  patch.object(train, "SAMPLING", "random"), \
                  patch.object(train, "IMAGE_DIR", Path(folder) / "images"), \
                  patch.object(train, "LABEL_DIR", Path(folder) / "labels"), \
                  patch.object(train, "OUTPUT_DIR", Path(folder)), \
                  patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 1), \
-                 patch.object(train, "WaterDataset", TinyDataset), \
+                 patch("datasets.s1_dataset.WaterDataset", TinyDataset), \
                  patch.object(torch.cuda, "is_available", return_value=False):
                 trainer = train.create_trainer()
                 trainer.train()

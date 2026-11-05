@@ -37,7 +37,7 @@ class EvaluationTests(unittest.TestCase):
 
     def test_known_confusion_matrix_for_binary_and_two_class_models(self):
         class Dataset(torch.utils.data.Dataset):
-            def __init__(self, image_dir, label_dir, bands):
+            def __init__(self, image_dir, label_dir, bands, speckle=None):
                 self.image_paths = [Path(image_dir) / "a.tif", Path(image_dir) / "b.tif"]
 
             def select_files(self, names):
@@ -71,7 +71,7 @@ class EvaluationTests(unittest.TestCase):
                                   mean=torch.zeros(1), std=torch.ones(1),
                                   model_kwargs=dict(num_classes=channels))
                 with patch.object(evaluate.torch, "load", return_value=checkpoint), \
-                     patch.object(evaluate, "WaterDataset", Dataset), \
+                     patch("datasets.s1_dataset.WaterDataset", Dataset), \
                      patch.object(evaluate, "load_model", return_value=Model(channels)), \
                      patch.object(torch.cuda, "is_available", return_value=False):
                     metrics = evaluate.evaluate("unused.pth")

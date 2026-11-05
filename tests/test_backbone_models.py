@@ -76,13 +76,13 @@ class BackboneTests(unittest.TestCase):
         for method in ("pvt", "resnet50"):
             # 临时目录固定在本项目 tests 内，结束时只清理该次测试生成的文件。
             with self.subTest(method=method), TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
-                with patch.object(train, "METHOD", method), patch.object(train, "IMAGE_DIR", Path(folder) / "images"), \
+                with patch.multiple(train, METHOD=method, DATA_LAYOUT="patch", POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2}), patch.object(train, "IMAGE_DIR", Path(folder) / "images"), \
                      patch.object(train, "LABEL_DIR", Path(folder) / "labels"), \
                      patch.object(train, "OUTPUT_DIR", Path(folder)), \
                      patch.object(train, "LOSS_NAME", "ce"), \
                      patch.object(train, "SAMPLING", "random"), \
                      patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 1), \
-                     patch.object(train, "WaterDataset", TinyDataset), \
+                     patch("datasets.s1_dataset.WaterDataset", TinyDataset), \
                      patch.object(torch.cuda, "is_available", return_value=False):
                     trainer = train.create_trainer()
                     trainer.train()

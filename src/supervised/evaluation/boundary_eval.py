@@ -176,3 +176,26 @@ def save_boundary_figure(label, valid, regions, points, output_path):
     figure.tight_layout()
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=120, bbox_inches="tight", pad_inches=.2)
+
+
+class BoundaryPointReservoir:
+    """整景固定数量等概率采样；跨窗口合并，不偏向边界像素较少的窗口。"""
+    def __init__(self, name, radius, region, max_points=256, seed=42):
+        key=f'{seed}|{name}|{radius}|{region}'.encode('utf-8')
+        self.rng=np.random.default_rng(int.from_bytes(hashlib.sha256(key).digest()[:8],'little'))
+        self.limit,self.seen=max_points,0
+        self.points=np.empty((0,6),np.float64)  # row,col,gt,logit,raw,post
+
+    def update(self, mask, label, scores, raw, post, top, left):
+        indices=np.flatnonzero(mask)
+        n=len(indices)
+        if n==0:
+            return
+        keep=min(self.limit,self.seen+n)
+        take=int(self.rng.hypergeometric(n,self.seen,keep))
+        old=self.points[self.rng.choice(len(self.points),keep-take,replace=False)]
+        selected=indices[self.rng.choice(n,take,replace=False)]
+        rows,cols=np.unravel_index(selected,mask.shape)
+        new=np.column_stack((rows+top,cols+left,label[rows,cols],scores[rows,cols],raw[rows,cols],post[rows,cols]))
+        self.points=np.concatenate((old,new))
+        self.seen+=n

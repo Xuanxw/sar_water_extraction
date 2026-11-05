@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
                 str(Path(__file__).resolve().parents[1] / "scripts")]
 from datasets import prepare_bc_data as prepare
-from datasets.water_dataset import WaterDataset
+from datasets.s1_dataset import WaterDataset
 
 
 class PrepareWaterDataTests(unittest.TestCase):
@@ -61,46 +61,51 @@ class PrepareWaterDataTests(unittest.TestCase):
     def row(self, name='SAMPLE_A', split='train'):
         return dict(scene_id=name,split=split,group_id='G_a',scene='合成场景')
 
-    def test_zip_tiff_reprojection_padding_conflicts_and_dataset_reader(self):
+    def test_full_scene_zip_grid_values_unknown_and_reader(self):
         with TemporaryDirectory() as temp:
-            root=Path(temp)
-            source,label,data,transform,shapes=self.sources(root,reproject=True)
-            archive=root/'SAMPLE_A.zip'
-            with ZipFile(archive,'w',ZIP_DEFLATED) as z:
-                z.write(source,'nested/SAMPLE_A.TIFF')
-            output=self.output(root)
-            rows=prepare.prepare_scene(self.row(),archive,label,output,root/'cache',bands=(1,),tile_size=4,
-                                       field='kind',class_map={0:0,1:1})
-            self.assertGreater(len(rows),0)
-            self.assertEqual(list((root/'cache').iterdir()),[])
-            expected=np.full(data.shape,255,dtype='uint8')
-            bg=rasterize([(shapes[0][0],1)],out_shape=data.shape,transform=transform).astype(bool)
-            water=rasterize([(shapes[1][0],1)],out_shape=data.shape,transform=transform).astype(bool)
-            valid=data!=-9999
-            expected[bg & ~water & valid]=0
-            expected[water & ~bg & valid]=1
-            with (output/'split_manifest.csv').open('w',encoding='utf-8-sig',newline='') as f:
-                writer=csv.DictWriter(f,fieldnames=prepare.MANIFEST_FIELDS)
-                writer.writeheader();writer.writerows(rows)
-            dataset=WaterDataset(output/'images',output/'labels',(1,))
-            dataset.select_files([r['name'] for r in rows])
-            for row,sample in zip(rows,dataset):
-                top,left=row['row_off'],row['col_off']
-                h,w=row['source_height'],row['source_width']
-                with rasterio.open(output/'labels/train'/row['name']) as target:
-                    result=target.read(1)
-                    self.assertEqual(target.nodata,255)
-                    self.assertEqual(target.crs,rasterio.crs.CRS.from_epsg(32650))
-                    self.assertEqual(target.transform,transform*rasterio.Affine.translation(left,top))
-                np.testing.assert_array_equal(result[:h,:w],expected[top:top+h,left:left+w])
-                self.assertTrue(np.all(result[h:]==255))
-                self.assertTrue(np.all(result[:,w:]==255))
-                np.testing.assert_array_equal(sample['label'].numpy(),np.where(result==255,-1,result.astype(np.int64)))
-                self.assertEqual(tuple(sample['image'].shape),(1,4,4))
-                if top==0 and left==0:
-                    self.assertTrue(sample['valid_mask'][0,0])  # 合法0值不得删除。
-                    self.assertFalse(sample['valid_mask'][2,1])
-                    self.assertEqual(int(sample['label'][1,3]),-1)  # 冲突区域不任意覆盖。
+            root = Path(temp)
+            source, label, data, transform, shapes = self.sources(root, reproject=True)
+            archive = root/'SAMPLE_A.zip'
+            with ZipFile(archive, 'w', ZIP_DEFLATED) as z:
+                z.write(source, 'nested/SAMPLE_A.TIFF')
+            output = self.output(root)
+            rows = prepare.prepare_scene(self.row(), archive, label, output, root/'cache',
+                                         bands=(1,), read_window_size=4, field='kind', class_map={0:0,1:1})
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row['name'], 'SAMPLE_A.tif')
+            self.assertEqual((row['source_height'], row['source_width']), data.shape)
+            self.assertEqual(list((root/'cache').iterdir()), [])
+            expected = np.full(data.shape, 255, dtype='uint8')
+            bg = rasterize([(shapes[0][0],1)], out_shape=data.shape, transform=transform).astype(bool)
+            water = rasterize([(shapes[1][0],1)], out_shape=data.shape, transform=transform).astype(bool)
+            valid = data != -9999
+            expected[bg & ~water & valid] = 0
+            expected[water & ~bg & valid] = 1
+            with rasterio.open(output/'labels/train'/row['name']) as target:
+                self.assertEqual(target.shape, data.shape)  # 不补齐到窗口整数倍。
+                self.assertEqual(target.transform, transform)
+                self.assertEqual(target.crs, rasterio.crs.CRS.from_epsg(32650))
+                self.assertEqual(target.nodata, 255)
+                np.testing.assert_array_equal(target.read(1), expected)
+            with rasterio.open(output/'images/train'/row['name']) as target:
+                self.assertEqual(target.shape, data.shape)
+                self.assertEqual(target.transform, transform)
+                result = target.read(1)
+                np.testing.assert_array_equal(result[valid], data[valid])
+                self.assertTrue(np.isnan(result[~valid]).all())
+                self.assertEqual(result[0,0], 0)  # 保留有效零值。
+                self.assertEqual(result[-1,-1], data[-1,-1])  # 无标签区域仍保留SAR。
+            self.assertEqual(row['ignored_pixels'], int((expected==255).sum()))
+            self.assertEqual(row['water_pixels'], int((expected==1).sum()))
+            self.assertEqual(row['background_pixels'], int((expected==0).sum()))
+            self.assertEqual(row['valid_pixels'], int(valid.sum()))
+            self.assertEqual(len(list((output/'images/train').glob('*.tif'))), 1)
+            self.assertFalse(list(output.rglob('*.partial')))
+            dataset = WaterDataset(output/'images/train', output/'labels/train', (1,))
+            sample = dataset[0]
+            np.testing.assert_array_equal(sample['label'].numpy(), np.where(expected==255,-1,expected.astype('int64')))
+            self.assertEqual(tuple(sample['image'].shape), (1,7,9))
 
     def test_undeclared_validity_requires_confirmation(self):
         with TemporaryDirectory() as temp:
@@ -108,9 +113,9 @@ class PrepareWaterDataTests(unittest.TestCase):
             source,label,*_=self.sources(root,nodata=None)
             with self.assertRaisesRegex(ValueError,'没有声明无效域'):
                 prepare.prepare_scene(self.row(),source,label,self.output(root),root/'cache',bands=(1,),
-                                      tile_size=4,field='kind',class_map={0:0,1:1})
+                                      read_window_size=4,field='kind',class_map={0:0,1:1})
             rows=prepare.prepare_scene(self.row(),source,label,self.output(root),root/'cache',bands=(1,),
-                                       tile_size=4,field='kind',class_map={0:0,1:1},input_nodata=-9999)
+                                       read_window_size=4,field='kind',class_map={0:0,1:1},input_nodata=-9999)
             self.assertTrue(rows)
 
     def test_mapping_and_invalid_geometry_are_not_guessed_or_repaired(self):
@@ -139,7 +144,7 @@ class PrepareWaterDataTests(unittest.TestCase):
             with split.open('w',encoding='utf-8-sig',newline='') as f:
                 writer=csv.writer(f);writer.writerow(['影像编号','数据划分','场景','是否采用']);writer.writerows(entries)
             config=dict(MODE='prepare',SPLIT_CSV=split,IMAGE_ROOT=root/'source_images',LABEL_ROOT=root/'source_labels',
-                        OUTPUT_DIR=root/'prepared',CACHE_DIR=root/'cache',TILE_SIZE=4,CLASS_FIELD='kind',CLASS_MAP={0:0,1:1})
+                        OUTPUT_DIR=root/'prepared',CACHE_DIR=root/'cache',READ_WINDOW_SIZE=4,CLASS_FIELD='kind',CLASS_MAP={0:0,1:1})
             with patch.multiple(prepare,**config),redirect_stdout(StringIO()):
                 prepare.main()
             manifest=list(csv.DictReader((root/'prepared/split_manifest.csv').open(encoding='utf-8-sig')))
@@ -165,7 +170,7 @@ class PrepareWaterDataTests(unittest.TestCase):
                     writer=csv.writer(f);writer.writerow(['影像编号','数据划分','场景','是否采用'])
                     writer.writerow(['SAMPLE_A','train','地点；G_a',status])
             config=dict(MODE='prepare',SPLIT_CSV=split,IMAGE_ROOT=root/'source_images',LABEL_ROOT=root/'source_labels',
-                        OUTPUT_DIR=root/'prepared',CACHE_DIR=root/'cache',TILE_SIZE=4,CLASS_FIELD='kind',CLASS_MAP={0:0,1:1})
+                        OUTPUT_DIR=root/'prepared',CACHE_DIR=root/'cache',READ_WINDOW_SIZE=4,CLASS_FIELD='kind',CLASS_MAP={0:0,1:1})
             write_status('待确认')
             with patch.multiple(prepare,**config),self.assertRaisesRegex(ValueError,'没有可处理场景'):
                 prepare.main()
@@ -176,6 +181,44 @@ class PrepareWaterDataTests(unittest.TestCase):
             self.assertFalse((config['OUTPUT_DIR']/'split_manifest.csv').exists())
             self.assertTrue((config['OUTPUT_DIR']/'split_manifest.csv.partial').exists())
 
+
+    def test_resume_skips_completed_scene_and_retries_missing_field(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.sources(root, 'SAMPLE_A')
+            self.sources(root, 'SAMPLE_B')
+            split = root/'split.csv'
+            with split.open('w', encoding='utf-8-sig', newline='') as stream:
+                writer = csv.writer(stream)
+                writer.writerow(['影像编号', '数据划分', '场景', '是否采用'])
+                writer.writerows([['SAMPLE_A', 'train', 'G_a', '已确认'], ['SAMPLE_B', 'val', 'G_b', '已确认']])
+            config = dict(MODE='prepare', SPLIT_CSV=split, IMAGE_ROOT=root/'source_images',
+                          LABEL_ROOT=root/'source_labels', OUTPUT_DIR=root/'prepared', CACHE_DIR=root/'cache',
+                          READ_WINDOW_SIZE=4, CLASS_FIELD='kind', CLASS_MAP={0:0, 1:1},
+                          SCENE_CLASS_RULES={'SAMPLE_B': {'field':'missing', 'map':{0:0,1:1}}})
+            with patch.multiple(prepare, **config), redirect_stdout(StringIO()):
+                prepare.main()
+            partial = config['OUTPUT_DIR']/'split_manifest.csv.partial'
+            with partial.open(encoding='utf-8-sig') as stream:
+                before = list(csv.DictReader(stream))
+            self.assertEqual({r['scene_id'] for r in before}, {'SAMPLE_A'})
+            self.assertTrue((config['OUTPUT_DIR']/'skipped_scenes.csv').exists())
+            # 字段存在但全是其他数值，也应跳过且不进入影像切块。
+            config['SCENE_CLASS_RULES'] = {'SAMPLE_B': {'field':'kind', 'map':{99:1}}}
+            with patch.multiple(prepare, **config), redirect_stdout(StringIO()), \
+                 patch.object(prepare, 'prepare_scene', side_effect=AssertionError('不得解压切块')):
+                prepare.main()
+            self.assertIn('没有可映射类别', (config['OUTPUT_DIR']/'skipped_scenes.csv').read_text(encoding='utf-8-sig'))
+            config['SCENE_CLASS_RULES'] = {}
+            with patch.multiple(prepare, **config), redirect_stdout(StringIO()), \
+                 patch.object(prepare, 'prepare_scene', wraps=prepare.prepare_scene) as run:
+                prepare.main()
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_args.args[0]['scene_id'], 'SAMPLE_B')
+            with (config['OUTPUT_DIR']/'split_manifest.csv').open(encoding='utf-8-sig') as stream:
+                after = list(csv.DictReader(stream))
+            self.assertEqual([r for r in after if r['scene_id']=='SAMPLE_A'], before)
+            self.assertEqual(len({r['name'] for r in after}), len(after))
 
     def test_split_only_does_not_read_images_or_geometry(self):
         with TemporaryDirectory() as temp:

@@ -1,7 +1,8 @@
-"""固定模型与传统阈值的同范围对比：python scripts/compare_threshold.py。"""
+"""固定模型与传统阈值的同范围对比：python src/compare_threshold.py。"""
 from datetime import datetime
 from pathlib import Path
 import gc
+import ast
 import hashlib
 import sys
 
@@ -14,7 +15,7 @@ ROOT = Path("E:/Code_projects/sar_water_extraction")
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
-from supervised.datasets.water_dataset import WaterDataset, resolve_sample_path
+from datasets.s1_dataset import WaterDataset, resolve_sample_path
 from supervised.evaluation.boundary_eval import BoundaryEvaluator, confusion_counts, save_boundary_figure
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.postprocess import WaterEnsemble
@@ -52,7 +53,7 @@ THRESHOLD_OPTIONS = dict(
 BATCH_SIZE = 2
 USE_AMP = True
 SAVE_MASKS = True
-MAX_VISUALIZATIONS = 10  # 0 关闭；None 保存全部最终对照图，不输出中间特征。
+MAX_VISUALIZATIONS = None  # 0 关闭；None 保存全部最终对照图，不输出中间特征。
 OUTPUT_DIR = None  # outputs/threshold_comparison/quality/时间戳
 
 # ---------- 场景分组和局部边界指标 ----------
@@ -118,6 +119,55 @@ def read_prediction_mask(directory, name, images, image_valid):
     return (mask.data == 1) & image_valid
 
 
+def complete_saved_figures(result_dir):
+    """按原运行协议补齐PNG；只读取已保存的掩膜和指标，不重算预测或覆盖统计。"""
+    from supervised.evaluation.boundary_eval import boundary_regions, sample_region
+
+    result_dir = Path(result_dir)
+    protocol = read_csv(result_dir/'protocol.csv')[0]
+    bands = ast.literal_eval(protocol['common_bands'])
+    display_bands = ast.literal_eval(protocol['threshold_bands'])
+    radii = ast.literal_eval(protocol['boundary_radii_px'])
+    seed, point_count = int(protocol['boundary_seed']), int(protocol['boundary_points_per_region'])
+    samples = read_csv(result_dir/'samples.csv')
+    saved_rows = {}
+    for row in read_csv(result_dir/'per_image.csv'):
+        values = {key: float(row[key]) for key in ('f1', 'iou', 'precision', 'recall')}
+        values.update({key: int(row[key]) for key in ('tp', 'fp', 'fn', 'tn')})
+        saved_rows.setdefault(row['name'], {})[row['method']] = dict(name=row['name'], **values)
+    dataset = WaterDataset(Path(protocol['image_dir']), Path(protocol['label_dir']), bands)
+    dataset.select_files([row['name'] for row in samples])
+    added = 0
+    for index in range(len(dataset)):
+        name = samples[index]['name']
+        figure_path = result_dir/'figures'/Path(name).with_suffix('.png')
+        boundary_path = result_dir/'boundary/figures'/Path(name).with_suffix('.png')
+        if figure_path.exists() and boundary_path.exists():
+            continue
+        sample = dataset[index]
+        name = sample['name']
+        image = np.asarray(sample['image'])
+        label = np.asarray(sample['label'])
+        image_valid = np.asarray(sample['valid_mask'], dtype=bool)
+        valid = image_valid & np.isin(label, (0, 1))
+        if not figure_path.exists():
+            current = saved_rows[name]
+            predictions = {method: read_prediction_mask(result_dir/'masks'/method, name,
+                           Path(protocol['image_dir']), image_valid) for method in current}
+            display = {caption: image[bands.index(band)] for caption, band in display_bands.items()}
+            save_comparison_figure(np.asarray(list(display.values())), display, image_valid,
+                                   label, valid, predictions, current, figure_path)
+        if not boundary_path.exists():
+            regions = boundary_regions(label, valid, radii)
+            points = {radius: {region: sample_region(mask, name, radius, region, seed, point_count)
+                      for region, mask in areas.items()} for radius, areas in regions.items()}
+            save_boundary_figure(label, valid, regions, points, boundary_path)
+        added += 1
+        if added % 20 == 0:
+            print(f"补图：已补{added}个样本；进度{index+1}/{len(dataset)}", flush=True)
+    print(f"补图完成：{len(dataset)}个样本，本次补齐{added}组", flush=True)
+
+
 def run_comparison(checkpoint_path=CHECKPOINT, image_dir=None, label_dir=None,
                    use_saved_val=USE_SAVED_VAL, output_dir=OUTPUT_DIR,
                    threshold_bands=THRESHOLD_BANDS, threshold_options=THRESHOLD_OPTIONS,
@@ -151,6 +201,8 @@ def run_comparison(checkpoint_path=CHECKPOINT, image_dir=None, label_dir=None,
         active = [r for r in split_rows if int(r["active"]) == 1]
         expected_train = {r["name"] for r in active if r["split"] == "train"}
         expected_val = {r["name"] for r in active if r["split"] == "val"}
+        inactive_val = sum(r['split'] == 'val' and int(r['active']) == 0 for r in split_rows)
+        print(f"验证清单：采用{len(expected_val)}幅，停用{inactive_val}幅（按active字段）", flush=True)
         if (not use_saved_val or checkpoint.get("split_manifest_sha256") != split_sha256
                 or set(checkpoint["train_files"]) != expected_train
                 or set(checkpoint["val_files"]) != expected_val
@@ -162,6 +214,7 @@ def run_comparison(checkpoint_path=CHECKPOINT, image_dir=None, label_dir=None,
         labels = labels / "val" if (labels / "val").is_dir() else labels
     manifest = build_manifest(checkpoint, images, labels, use_saved_val,
                               scene_csv if use_saved_val else None)
+    print(f"评价样本：{len(manifest)}幅；输出图数量：{'全部' if max_visualizations is None else max_visualizations}", flush=True)
     epoch = checkpoint["epoch"]
     model_bands = tuple(checkpoint["bands"])
     del checkpoint

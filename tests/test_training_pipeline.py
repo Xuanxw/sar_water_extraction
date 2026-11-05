@@ -26,7 +26,7 @@ class TrainingPipelineTests(unittest.TestCase):
                 self.assertTrue(options["use_saved_val"] and options["with_labels"])
                 self.assertIsNone(options["output_dir"])
                 return {"done": True}
-            with patch.object(train, "RUN_MODE", "train_postprocess"), \
+            with patch.object(train, "DATA_LAYOUT", "patch"), patch.object(train, "RUN_MODE", "train_postprocess"), \
                  patch.object(train, "POSTPROCESS_CHECKPOINTS", ["old_run/best.pth"]), \
                  patch.object(train, "create_trainer", return_value=trainer), \
                  patch.object(postprocess, "run_postprocess", side_effect=process), \
@@ -35,7 +35,7 @@ class TrainingPipelineTests(unittest.TestCase):
 
     def test_postprocess_only_never_starts_training(self):
         options = dict(use_saved_val=False, with_labels=False, image_dir="test_images")
-        with patch.object(train, "RUN_MODE", "postprocess"), \
+        with patch.object(train, "DATA_LAYOUT", "patch"), patch.object(train, "RUN_MODE", "postprocess"), \
              patch.object(train, "POSTPROCESS_CHECKPOINTS", ["existing/best_f1.pth"]), \
              patch.object(train, "POSTPROCESS_OPTIONS", options), \
              patch.object(train, "create_trainer") as create, \
@@ -48,15 +48,15 @@ class TrainingPipelineTests(unittest.TestCase):
         trainer = Mock(run_dir=Path("run"))
         with patch.object(train, "create_trainer", return_value=trainer), \
              patch.object(postprocess, "run_postprocess") as process:
-            with patch.object(train, "RUN_MODE", "train"):
+            with patch.object(train, "DATA_LAYOUT", "patch"), patch.object(train, "RUN_MODE", "train"):
                 self.assertEqual(train.main(), Path("run"))
             trainer.train.side_effect = RuntimeError("training failed")
-            with patch.object(train, "RUN_MODE", "train_postprocess"), self.assertRaises(RuntimeError):
+            with patch.object(train, "DATA_LAYOUT", "patch"), patch.object(train, "RUN_MODE", "train_postprocess"), self.assertRaises(RuntimeError):
                 train.main()
             process.assert_not_called()
 
     def test_missing_postprocess_paths_do_not_fall_back_to_old_experiment(self):
-        with patch.object(train, "RUN_MODE", "postprocess"), \
+        with patch.object(train, "DATA_LAYOUT", "patch"), patch.object(train, "RUN_MODE", "postprocess"), \
              patch.object(train, "POSTPROCESS_CHECKPOINTS", []), \
              patch.object(train, "create_trainer") as create, self.assertRaises(ValueError):
             train.main()

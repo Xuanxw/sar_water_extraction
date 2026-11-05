@@ -7,14 +7,12 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, Q
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QIcon
 from thres_segmentation.gis_worker import SARWorker
-from thres_segmentation.esa_worker import ESAWaterWorker
 
 class SARWaterExtractApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("TY-SARWater Extraction")
         self.worker = None
-        self.esa_worker = None  # 👈 初始化ESA worker引用
         #  设置窗口图标（放在 __init__ 开头）
         if os.path.exists("favicon.ico"):
             self.setWindowIcon(QIcon("favicon.ico"))
@@ -27,7 +25,7 @@ class SARWaterExtractApp(QMainWindow):
         self.resize(950, 750)
         self.setStyleSheet(self.get_qss_style())
         self.init_ui()
-        
+
     def get_qss_style(self):
         return """
             QMainWindow { background-color: #f0f2f5; }
@@ -49,7 +47,7 @@ class SARWaterExtractApp(QMainWindow):
             QProgressBar { border: 1px solid #dcdfe6; border-radius: 4px; text-align: center; background: #ebeef5; }
             QProgressBar::chunk { background-color: #409eff; border-radius: 3px; }
         """
-        
+
     def init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -64,9 +62,9 @@ class SARWaterExtractApp(QMainWindow):
         main_layout.addWidget(self.tabs)
         self.create_data_tab()
         self.create_param_tab()
-        self.create_historical_water_tab()  #  新增：历史水体下载标签页
+        self.create_analysis_tab()
         self.create_run_tab()
-        
+
     def create_data_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -80,30 +78,18 @@ class SARWaterExtractApp(QMainWindow):
         form.addRow("SAR 影像文件夹:", h1)
 
         self.terrain_source_group = QButtonGroup(self)
-        self.rb_dem_download = QRadioButton("自动下载 Copernicus GLO-30 并计算（推荐）")
         self.rb_local_layers = QRadioButton("采用本地坡度/坡向数据")
         self.rb_local_dem = QRadioButton("采用本地DEM并计算坡度/坡向")
-        self.rb_dem_download.setChecked(True)
-        self.terrain_source_group.addButton(self.rb_dem_download)
+        self.rb_local_dem.setChecked(True)
         self.terrain_source_group.addButton(self.rb_local_layers)
         self.terrain_source_group.addButton(self.rb_local_dem)
         source_layout = QVBoxLayout()
         source_layout.setContentsMargins(0, 0, 0, 0)
-        source_layout.addWidget(self.rb_dem_download)
         source_layout.addWidget(self.rb_local_layers)
         source_layout.addWidget(self.rb_local_dem)
         form.addRow("地形数据来源:", source_layout)
 
-        h2 = QHBoxLayout()
-        self.dem_cache_folder = QLineEdit()
-        self.dem_cache_folder.setPlaceholderText("留空则使用 SAR文件夹/dem_cache")
-        self.dem_cache_folder.setToolTip(
-            "首次下载的Copernicus 1°瓦片会保存在这里；以后覆盖相同区域时直接复用，"
-            "不需要重新下载，也不要求预先准备椭球高数据。")
-        self.btn_dem_cache = QPushButton("浏览..."); self.btn_dem_cache.setObjectName("btn_browse")
-        self.btn_dem_cache.clicked.connect(lambda: self.browse_folder(self.dem_cache_folder))
-        h2.addWidget(self.dem_cache_folder); h2.addWidget(self.btn_dem_cache)
-        form.addRow("Copernicus DEM缓存目录:", h2)
+        form.addRow(QLabel('辅助数据请通过 main.py 准备；此界面只选择本地数据并运行处理。'))
 
         h3 = QHBoxLayout()
         self.dem_folder = QLineEdit()
@@ -136,14 +122,14 @@ class SARWaterExtractApp(QMainWindow):
         btn_parse.setStyleSheet("background-color: #909399; margin-top: 10px;")
         btn_parse.clicked.connect(self.auto_parse_xml)
         form.addRow("", btn_parse)
-        for button in (self.rb_dem_download, self.rb_local_layers, self.rb_local_dem):
+        for button in (self.rb_local_layers, self.rb_local_dem):
             button.toggled.connect(self.update_terrain_source_controls)
         self.update_terrain_source_controls()
         group.setLayout(form)
         layout.addWidget(group)
         layout.addStretch()
         self.tabs.addTab(tab, "📁 数据与路径")
-        
+
     def create_param_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -175,7 +161,7 @@ class SARWaterExtractApp(QMainWindow):
         self.smooth_vector.setChecked(True)
         self.smooth_vector.setToolTip(
             "栅格转矢量后先按半个像元简化，再执行2轮Chaikin平滑；不改变水体栅格。")
-        
+
         # 🔑 新增：高反射强度水体提取模式选择
         self.extraction_mode_group = QButtonGroup()
         self.rb_bottom = QRadioButton("正向提取 (低反射水体，默认)")
@@ -183,7 +169,7 @@ class SARWaterExtractApp(QMainWindow):
         self.rb_bottom.setChecked(True)  # 默认底部提取
         self.extraction_mode_group.addButton(self.rb_bottom)
         self.extraction_mode_group.addButton(self.rb_top)
-        
+
         f2.addRow("水体阈值百分比 (%):", self.water_pct)
         f2.addRow("最终最小连通域面积 (像素):", self.min_area)
         f2.addRow("", self.enable_morph)
@@ -192,7 +178,7 @@ class SARWaterExtractApp(QMainWindow):
         f2.addRow("", self.smooth_vector)
         f2.addRow("提取模式:", self.rb_bottom)  # 添加单选按钮组
         f2.addRow("", self.rb_top)
-        
+
         g2.setLayout(f2)
         layout.addWidget(g2)
         g3 = QGroupBox("🏔️ 地形畸变与高坡度滤除")
@@ -211,192 +197,58 @@ class SARWaterExtractApp(QMainWindow):
         self.enable_terrain.toggled.connect(self.update_terrain_source_controls)
         g3.setLayout(f3)
         layout.addWidget(g3)
-        g4 = QGroupBox("🏙️ 道路、建筑与农田误检掩膜")
-        f4 = QFormLayout()
-        self.enable_building_mask = QCheckBox("开启建筑掩膜（按 SAR 有效范围自动分块下载）")
-        self.enable_building_mask.setChecked(False)
-        self.enable_road_mask = QCheckBox("开启道路掩膜（谨慎：会删除道路积水）")
-        self.enable_road_mask.setChecked(False)
-        self.road_width = QDoubleSpinBox()
-        self.road_width.setRange(1.0, 50.0); self.road_width.setDecimals(1)
-        self.road_width.setValue(15.0); self.road_width.setSuffix(" m")
-        self.enable_farmland_mask = QCheckBox(
-            "开启 ESA WorldCover 农田掩膜（10米，2021）")
-        self.enable_farmland_mask.setChecked(False)
-        self.farmland_mode = QComboBox()
-        self.farmland_mode.addItem("保守：仅删除农田小斑块（推荐）", "conservative")
-        self.farmland_mode.addItem("严格：删除全部农田内水体", "all")
-        self.farmland_small_area = QSpinBox()
-        self.farmland_small_area.setRange(10, 100000)
-        self.farmland_small_area.setValue(1000)
-        self.farmland_small_area.setSuffix(" 像素")
-        self.farmland_small_area.setToolTip(
-            "保守模式下，仅删除面积不超过该值且至少50%落入农田的水体斑块。")
-        self.protect_historical_water = QCheckBox("保护 WorldCover 历史水体及1像元邻域")
-        self.protect_historical_water.setChecked(True)
-        self.protect_historical_water.setToolTip(
-            "农田类别与WorldCover水体类别冲突时优先保留历史水体，降低河岸和塘岸误删。")
-        farmland_controls = (
-            self.farmland_mode, self.farmland_small_area,
-            self.protect_historical_water)
-        for control in farmland_controls:
-            control.setEnabled(False)
-        def update_farmland_controls():
-            enabled = self.enable_farmland_mask.isChecked()
-            self.farmland_mode.setEnabled(enabled)
-            self.protect_historical_water.setEnabled(enabled)
-            self.farmland_small_area.setEnabled(
-                enabled and self.farmland_mode.currentData() == "conservative")
-        self.enable_farmland_mask.toggled.connect(update_farmland_controls)
-        self.farmland_mode.currentIndexChanged.connect(update_farmland_controls)
-        f4.addRow("", self.enable_building_mask)
-        f4.addRow("", self.enable_road_mask)
-        f4.addRow("道路掩膜总宽度:", self.road_width)
-        f4.addRow("", self.enable_farmland_mask)
-        f4.addRow("农田掩膜模式:", self.farmland_mode)
-        f4.addRow("农田小斑块阈值:", self.farmland_small_area)
-        f4.addRow("", self.protect_historical_water)
-        g4.setLayout(f4)
-        layout.addWidget(g4)
         layout.addStretch()
         self.tabs.addTab(tab, "⚙️ 参数设置")
-        
-    def create_historical_water_tab(self):
-        """🔑 新增：历史水体下载标签页"""
+
+    def create_analysis_tab(self):
         tab = QWidget()
-        layout = QVBoxLayout(tab)
-        # 模式选择组
-        mode_group = QGroupBox("📍 范围定义模式")
-        mode_layout = QHBoxLayout()
-        self.bbox_radio = QRadioButton("✏️ 手动输入经纬度范围")
-        self.sar_radio = QRadioButton("🎯 自动使用 SAR 影像边界")
-        self.sar_radio.setChecked(True)  #默认SAR边界
-        mode_layout.addWidget(self.bbox_radio)
-        mode_layout.addWidget(self.sar_radio)
-        mode_group.setLayout(mode_layout)
-        layout.addWidget(mode_group)
-        # 经纬度输入组
-        self.bbox_group = QGroupBox("🌐 经纬度范围 (WGS84)")
-        bbox_form = QFormLayout()
-        h_tl = QHBoxLayout()
-        self.lon_tl = QDoubleSpinBox()
-        self.lon_tl.setRange(-180, 180); self.lon_tl.setDecimals(6); self.lon_tl.setValue(117.166190)
-        self.lat_tl = QDoubleSpinBox()
-        self.lat_tl.setRange(-90, 90); self.lat_tl.setDecimals(6); self.lat_tl.setValue(31.806559)
-        h_tl.addWidget(QLabel("左上角 经度:")); h_tl.addWidget(self.lon_tl)
-        h_tl.addWidget(QLabel("纬度:")); h_tl.addWidget(self.lat_tl)
-        bbox_form.addRow("", h_tl)
-        h_br = QHBoxLayout()
-        self.lon_br = QDoubleSpinBox()
-        self.lon_br.setRange(-180, 180); self.lon_br.setDecimals(6); self.lon_br.setValue(117.854024)
-        self.lat_br = QDoubleSpinBox()
-        self.lat_br.setRange(-90, 90); self.lat_br.setDecimals(6); self.lat_br.setValue(31.319571)
-        h_br.addWidget(QLabel("右下角 经度:")); h_br.addWidget(self.lon_br)
-        h_br.addWidget(QLabel("纬度:")); h_br.addWidget(self.lat_br)
-        bbox_form.addRow("", h_br)
-        self.bbox_group.setLayout(bbox_form)
-        layout.addWidget(self.bbox_group)
-        # 输出配置
-        out_group = QGroupBox("💾 输出配置")
-        out_form = QFormLayout()
-        h_out = QHBoxLayout()
-        self.esa_output_folder = QLineEdit()
-        btn_out = QPushButton("浏览..."); btn_out.setObjectName("btn_browse")
-        btn_out.clicked.connect(lambda: self.browse_folder(self.esa_output_folder))
-        h_out.addWidget(self.esa_output_folder); h_out.addWidget(btn_out)
-        out_form.addRow("输出目录:", h_out)
-        out_group.setLayout(out_form)
-        layout.addWidget(out_group)
-        # 高级设置
-        adv_group = QGroupBox("️ 高级设置")
-        adv_form = QFormLayout()
-        self.min_water_area = QSpinBox()
-        self.min_water_area.setRange(0, 1000); self.min_water_area.setValue(5)
-        self.min_water_area.setToolTip("最小水体斑块像素数，小于此值的碎屑多边形将被过滤")
-        adv_form.addRow("最小水体面积 (像素):", self.min_water_area)
-        adv_group.setLayout(adv_form)
-        layout.addWidget(adv_group)
-        # 下载按钮
-        self.btn_download_esa = QPushButton("🌊 下载 ESA 历史水体数据")
-        self.btn_download_esa.setObjectName("btn_start")
-        self.btn_download_esa.clicked.connect(self.download_historical_water)
-        layout.addWidget(self.btn_download_esa)
-        layout.addStretch()
-        self.tabs.addTab(tab, "🌊 历史水体下载")
-        # 连接信号以切换模式
-        self.bbox_radio.toggled.connect(self.toggle_bbox_mode)
-        
-    def toggle_bbox_mode(self, checked):
-        """切换经纬度输入框的启用状态"""
-        self.bbox_group.setEnabled(checked)
-        
-    def download_historical_water(self):
-        """ 下载历史水体数据"""
-        # 🔑 中断逻辑：如果正在运行，则停止
-        if hasattr(self, 'esa_worker') and self.esa_worker and self.esa_worker.isRunning():
-            self.log_text.append("⛔ 正在请求停止 ESA 下载任务...")
-            self.esa_worker.requestInterruption()
-            self.esa_worker.wait()
-            self.btn_download_esa.setText("🌊 下载 ESA 历史水体数据")
-            self.btn_download_esa.setStyleSheet("background-color: #67c23a; font-size: 16px; padding: 12px;")
-            self.log_text.append("✅ ESA 下载任务已停止。")
-            return
-        # 检查输出目录
-        if not self.esa_output_folder.text():
-            QMessageBox.warning(self, "提示", "请先选择输出目录！")
-            return
-        if self.worker and self.worker.isRunning():
-            QMessageBox.warning(self, "提示", "SAR处理任务正在运行，请等待其完成或停止！")
-            return
-        self.btn_download_esa.setText("⛔ 停止下载")
-        self.btn_download_esa.setStyleSheet("background-color: #f56c6c; font-size: 16px; padding: 12px;")
-        self.tabs.setCurrentIndex(self.tabs.count() - 1)
-        os.makedirs(self.esa_output_folder.text(), exist_ok=True)
-        # 👇 清空日志
-        self.log_text.clear()
-        self.log_text.append(f"========== ESA历史水体下载任务开始 ==========")
-        # 创建配置
-        config = {
-            'output_dir': self.esa_output_folder.text(),
-            'min_water_area': self.min_water_area.value()
-        }
-        # 确定范围
-        if self.bbox_radio.isChecked():
-            # 使用手动输入的经纬度
-            lon_min = min(self.lon_tl.value(), self.lon_br.value())
-            lon_max = max(self.lon_tl.value(), self.lon_br.value())
-            lat_min = min(self.lat_tl.value(), self.lat_br.value())
-            lat_max = max(self.lat_tl.value(), self.lat_br.value())
-            config['bounds'] = (lon_min, lat_min, lon_max, lat_max)
-            config['use_sar_bounds'] = False
-            self.log_text.append(f"📍 使用手动经纬度范围: Lon[{lon_min:.4f}, {lon_max:.4f}], Lat[{lat_min:.4f}, {lat_max:.4f}]")
-        else:
-            # 使用 SAR 影像边界
-            if not self.input_folder.text():
-                QMessageBox.warning(self, "提示", "请先在'数据与路径'标签页中选择 SAR 影像文件夹！")
-                return
-            config['use_sar_bounds'] = True
-            config['sar_folder'] = self.input_folder.text()
-            self.log_text.append("🎯 将使用 SAR 影像边界范围")
-        # 创建 ESA 下载工作线程
-        self.esa_worker = ESAWaterWorker(config)
-        self.esa_worker.log_signal.connect(self.append_log)
-        self.esa_worker.finished_signal.connect(self.on_esa_finished)
-        self.esa_worker.start()
-        
-    def on_esa_finished(self, success, msg):
-        """ESA 下载完成回调"""
-        self.btn_download_esa.setEnabled(True)
-        self.btn_download_esa.setText("🌊 下载 ESA 历史水体数据")
-        self.btn_download_esa.setStyleSheet("background-color: #67c23a; font-size: 16px; padding: 12px;")
-        if success:
-            QMessageBox.information(self, "成功", msg)
-        else:
-            if "停止" in msg or "中断" in msg:
-                pass
-            else:
-                QMessageBox.critical(self, "失败", msg)
-                
+        form = QFormLayout(tab)
+        note = QLabel('始终统计当前水体面积。选择历史数据后计算新增、消退及持续水体；水深为岸线高程约束的几何估算。')
+        note.setWordWrap(True)
+        form.addRow(note)
+
+        def path_field(title, filters):
+            field = QLineEdit()
+            button = QPushButton('浏览...')
+            def browse():
+                filename, _ = QFileDialog.getOpenFileName(self, title, '', filters)
+                if filename:
+                    field.setText(filename)
+            button.clicked.connect(browse)
+            row = QHBoxLayout(); row.addWidget(field); row.addWidget(button)
+            form.addRow(title, row)
+            return field
+
+        self.analysis_reference = path_field('历史水体栅格/矢量', 'Water (*.tif *.tiff *.shp *.gpkg *.geojson)')
+        self.analysis_encoding = QComboBox()
+        self.analysis_encoding.addItem('提取结果或main下载：1水体 / 0非水体', ((1,), (0,)))
+        self.analysis_encoding.addItem('旧GUI的ESA结果：0水体 / 1非水体', ((0,), (1,)))
+        self.analysis_encoding.addItem('原始WorldCover：80水体', ((80,), (10,20,30,40,50,60,70,90,95,100)))
+        form.addRow('历史栅格编码', self.analysis_encoding)
+        self.analysis_coverage = path_field('历史有效覆盖面（可选）', 'Polygons (*.shp *.gpkg *.geojson)')
+        self.analysis_complete = QCheckBox('确认水体矢量完整覆盖当前影像，矢量外可视为非水体')
+        form.addRow(self.analysis_complete)
+        self.enable_depth = QCheckBox('计算水深估算')
+        form.addRow(self.enable_depth)
+        self.analysis_elevation = path_field('DEM/DSM高程栅格', 'Elevation (*.tif *.tiff)')
+        self.analysis_elevation.setPlaceholderText('留空可复用本次地形处理的DEM/DSM，不能使用坡度/坡向')
+        self.analysis_elevation_kind = QComboBox()
+        self.analysis_elevation_kind.addItems(['DEM', 'DSM'])
+        form.addRow('高程类型', self.analysis_elevation_kind)
+        self.analysis_scale = QDoubleSpinBox(); self.analysis_scale.setDecimals(6)
+        self.analysis_scale.setRange(0.000001, 10000); self.analysis_scale.setValue(1)
+        form.addRow('高程转米系数', self.analysis_scale)
+        self.analysis_scope = QComboBox()
+        self.analysis_scope.addItem('仅新增水体（需要历史数据）', 'new_water')
+        self.analysis_scope.addItem('全部水体（需确认水下地形适用性）', 'all_water')
+        form.addRow('水深计算范围', self.analysis_scope)
+        self.analysis_distance = QDoubleSpinBox(); self.analysis_distance.setRange(1, 100000)
+        self.analysis_distance.setValue(5000); self.analysis_distance.setSuffix(' m')
+        form.addRow('最大岸线插值距离', self.analysis_distance)
+        note = QLabel('DSM含建筑/植被表面；普通DEM/DSM通常不含永久水体水底。水深输出含质量标记，不能视为实测精度。默认最多2500万像元进行整景水深计算。')
+        note.setWordWrap(True); form.addRow(note)
+        self.tabs.addTab(tab, '面积、变化与水深')
+
     def create_run_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -415,7 +267,7 @@ class SARWaterExtractApp(QMainWindow):
         log_group.setLayout(log_layout)
         layout.addWidget(log_group)
         self.tabs.addTab(tab, "▶️ 运行与监控")
-        
+
     def browse_folder(self, line_edit):
         folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
         if folder:
@@ -426,11 +278,6 @@ class SARWaterExtractApp(QMainWindow):
                 # 更新水体提取结果输出路径
                 if not self.output_folder.text() or "Extraction" in self.output_folder.text():
                     self.output_folder.setText(extraction_path)
-                # 更新历史水体下载输出路径
-                if not self.esa_output_folder.text() or "Extraction" in self.esa_output_folder.text():
-                    self.esa_output_folder.setText(extraction_path)
-                if not self.dem_cache_folder.text() or "dem_cache" in self.dem_cache_folder.text():
-                    self.dem_cache_folder.setText(os.path.join(folder, "dem_cache"))
 
     def browse_raster_file(self, line_edit):
         path, _ = QFileDialog.getOpenFileName(
@@ -441,11 +288,8 @@ class SARWaterExtractApp(QMainWindow):
     def update_terrain_source_controls(self):
         terrain_enabled = (self.enable_terrain.isChecked()
                            if hasattr(self, "enable_terrain") else True)
-        use_download = terrain_enabled and self.rb_dem_download.isChecked()
         use_layers = terrain_enabled and self.rb_local_layers.isChecked()
         use_local_dem = terrain_enabled and self.rb_local_dem.isChecked()
-        self.dem_cache_folder.setEnabled(use_download)
-        self.btn_dem_cache.setEnabled(use_download)
         self.dem_folder.setEnabled(use_layers)
         self.btn_slope_aspect.setEnabled(use_layers)
         self.local_dem_path.setEnabled(use_local_dem)
@@ -453,8 +297,8 @@ class SARWaterExtractApp(QMainWindow):
         self.btn_local_dem_folder.setEnabled(use_local_dem)
         if hasattr(self, "dem_resolution"):
             self.dem_resolution.setEnabled(
-                terrain_enabled and (use_download or use_local_dem))
-                    
+                terrain_enabled and use_local_dem)
+
     def auto_parse_xml(self):
         folder = self.input_folder.text()
         if not folder or not os.path.exists(folder):
@@ -470,7 +314,7 @@ class SARWaterExtractApp(QMainWindow):
             self.log_text.append(f"✅ 成功解析 XML 参数并填充至界面。")
         except Exception as e:
             QMessageBox.critical(self, "解析失败", f"XML 解析出错: {str(e)}")
-            
+
     def start_processing(self):
         # 🔑 中断逻辑：如果正在运行，则停止
         if self.worker and self.worker.isRunning():
@@ -483,6 +327,20 @@ class SARWaterExtractApp(QMainWindow):
             return
         if not self.input_folder.text():
             QMessageBox.warning(self, "提示", "请先配置 SAR 影像文件夹！"); return
+        reference = self.analysis_reference.text().strip() or None
+        coverage = self.analysis_coverage.text().strip() or None
+        elevation = self.analysis_elevation.text().strip() or None
+        for filename in (reference, coverage, elevation if self.enable_depth.isChecked() else None):
+            if filename and not os.path.isfile(filename):
+                QMessageBox.warning(self, '提示', f'分析输入文件不存在：{filename}'); return
+        if reference and os.path.splitext(reference)[1].lower() in ('.shp','.gpkg','.geojson'):
+            if not coverage and not self.analysis_complete.isChecked():
+                QMessageBox.warning(self, '提示', '水体矢量需要有效覆盖面，或明确确认完整覆盖当前影像。'); return
+        if self.enable_depth.isChecked():
+            if self.analysis_scope.currentData() == 'new_water' and not reference:
+                QMessageBox.warning(self, '提示', '新增水体水深需要历史数据。'); return
+            if not elevation and (not self.enable_terrain.isChecked() or self.rb_local_layers.isChecked()):
+                QMessageBox.warning(self, '提示', '请提供DEM/DSM高程，或启用DEM地形处理以复用其高程。'); return
         if self.enable_terrain.isChecked():
             if self.rb_local_layers.isChecked():
                 local_layers = self.dem_folder.text().strip()
@@ -496,26 +354,32 @@ class SARWaterExtractApp(QMainWindow):
                     QMessageBox.warning(
                         self, "提示", "请选择有效的本地DEM GeoTIFF或DEM分幅文件夹！")
                     return
-        if hasattr(self, 'esa_worker') and self.esa_worker and self.esa_worker.isRunning():
-            QMessageBox.warning(self, "提示", "ESA下载任务正在运行，请等待其完成或停止！")
-            return
         self.btn_start.setText("⛔ 停止任务")
         self.btn_start.setStyleSheet("background-color: #f56c6c; font-size: 16px; padding: 12px;")
         self.log_text.clear(); self.progress_bar.setValue(0)
-        
+
         # 🔑 新增：判断提取模式
         extraction_mode = 'top' if self.rb_top.isChecked() else 'bottom'
-        if self.rb_dem_download.isChecked():
-            terrain_source_mode = "download"
-        elif self.rb_local_dem.isChecked():
+        if self.rb_local_dem.isChecked():
             terrain_source_mode = "local_dem"
         else:
             terrain_source_mode = "local_layers"
-        
+
         config = {
             "folder_path": self.input_folder.text(),
+            "enable_depth": self.enable_depth.isChecked(),
+            "analysis_options": dict(
+                reference_path=reference,
+                reference_water_values=self.analysis_encoding.currentData()[0],
+                reference_dry_values=self.analysis_encoding.currentData()[1],
+                reference_coverage_path=coverage,
+                vector_assume_complete=self.analysis_complete.isChecked(),
+                elevation_path=elevation if self.enable_depth.isChecked() else None,
+                elevation_kind=self.analysis_elevation_kind.currentText(),
+                elevation_scale=self.analysis_scale.value(),
+                depth_scope=self.analysis_scope.currentData(),
+                depth_max_distance_m=self.analysis_distance.value()),
             "terrain_source_mode": terrain_source_mode,
-            "dem_cache_dir": self.dem_cache_folder.text().strip(),
             "dem_folder": self.dem_folder.text().strip(),
             "local_dem_path": self.local_dem_path.text().strip(),
             "dem_buffer_m": 1000.0,
@@ -526,14 +390,9 @@ class SARWaterExtractApp(QMainWindow):
             "water_pct": self.water_pct.value(), "min_area": self.min_area.value(), "enable_morphology": self.enable_morph.isChecked(),
             "morph_kernel_size": 3, "lee_win": 5, "noise_ratio": 0.12, "p_low": 1.0, "p_high": 99.0,
             "enable_terrain": self.enable_terrain.isChecked(), "slope_thresh": self.slope_thresh.value(),
-            "enable_building_mask": self.enable_building_mask.isChecked(),
-            "enable_road_mask": self.enable_road_mask.isChecked(),
-            "road_width": self.road_width.value(),
-            "enable_farmland_mask": self.enable_farmland_mask.isChecked(),
-            "farmland_mode": self.farmland_mode.currentData(),
-            "farmland_small_area": self.farmland_small_area.value(),
-            "farmland_overlap_ratio": 0.5,
-            "protect_historical_water": self.protect_historical_water.isChecked(),
+            "enable_building_mask": False,
+            "enable_road_mask": False,
+            "enable_farmland_mask": False,
             "fill_holes": self.fill_holes.isChecked(),  # 新增
             "hole_thresh": self.hole_thresh.value(),  # 新增
             "smooth_vector": self.smooth_vector.isChecked(),
@@ -545,18 +404,18 @@ class SARWaterExtractApp(QMainWindow):
         self.worker.progress_signal.connect(self.progress_bar.setValue)
         self.worker.finished_signal.connect(self.on_finished)
         self.worker.start()
-        
+
     def append_log(self, msg):
         self.log_text.append(msg)
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
-        
+
     def on_finished(self, success, msg):
         self.btn_start.setEnabled(True)
         self.btn_start.setText("🚀 开始处理")
         self.btn_start.setStyleSheet("background-color: #67c23a; font-size: 16px; padding: 12px;")
-        if success: 
+        if success:
             QMessageBox.information(self, "成功", msg)
-        else: 
+        else:
             if "停止" in msg or "中断" in msg:
                 pass
             else:

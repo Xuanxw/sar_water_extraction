@@ -15,7 +15,7 @@ from termcolor import cprint
 # 支持按文件路径直接运行，也支持包导入。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from supervised.datasets.water_dataset import WaterDataset, resolve_sample_path, sample_name
+from datasets.s1_dataset import WaterDataset, resolve_sample_path, sample_name
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.postprocess import run_postprocess
 

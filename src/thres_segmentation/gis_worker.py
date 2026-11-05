@@ -324,6 +324,7 @@ class SARWorker(QThread):
         os.makedirs(terrain_dir, exist_ok=True)
         prefix = f"{source_name}_{cache_key}"
         projected_dem_path = os.path.join(terrain_dir, f"{prefix}_dem_projected.tif")
+        self.analysis_elevation_path = projected_dem_path
         slope_path = os.path.join(terrain_dir, f"{prefix}_slope.tif")
         aspect_path = os.path.join(terrain_dir, f"{prefix}_aspect.tif")
 
@@ -953,7 +954,7 @@ class SARWorker(QThread):
             if self.isInterruptionRequested():
                 self.finished_signal.emit(False, "任务已手动停止")
                 return
-            # --- Step 0: 文件识别与参数解析 ---
+            # --- 1. 数据准备：文件识别、参数解析、SAR与本地辅助数据对齐 ---
             self.log_signal.emit("🔍 正在自动扫描文件...")
             tiff_files = glob.glob(os.path.join(cfg['folder_path'], "*.tiff")) + glob.glob(os.path.join(cfg['folder_path'], "*.tif"))
             xml_files = glob.glob(os.path.join(cfg['folder_path'], "*.xml"))
@@ -977,7 +978,7 @@ class SARWorker(QThread):
             if self.isInterruptionRequested():
                 self.finished_signal.emit(False, "任务已手动停止")
                 return
-            # --- Step 1: 读取 SAR 影像 ---
+            # 1.1 读取SAR影像及有效范围。
             self.log_signal.emit("\n📥 正在读取 SAR 影像作为空间基准...")
             with rasterio.open(sar_tif) as src:
                 raw = src.read(1).astype(np.float32)
@@ -1068,7 +1069,7 @@ class SARWorker(QThread):
             if self.isInterruptionRequested():
                 self.finished_signal.emit(False, "任务已手动停止")
                 return
-            # --- Step 2 & 3: 高分辨率地形掩膜与高坡度滤除 ---
+            # 1.2 准备与SAR网格对齐的地形排除掩膜，阶段3再应用。
             exclude_mask = None
             aligned_cls = None
             if cfg['enable_terrain']:
@@ -1173,7 +1174,7 @@ class SARWorker(QThread):
             if self.isInterruptionRequested():
                 self.finished_signal.emit(False, "任务已手动停止")
                 return
-            # --- Step 4: 水体预处理 ---
+            # --- 2. 基础预测：Lee滤波、百分位归一化、阈值分割（不等于辐射校正） ---
             self.log_signal.emit("\n💧 执行 Lee 滤波去斑...")
             fill_val = neutral_value
             temp = raw_work.copy(); temp[~valid] = fill_val
@@ -1195,7 +1196,7 @@ class SARWorker(QThread):
             if self.isInterruptionRequested():
                 self.finished_signal.emit(False, "任务已手动停止")
                 return
-            # --- Step 5: 标签生成 ---
+            # 2.1 生成原始水体标签；此时尚未施加辅助排除与形态学。
             # 🔑 新增：高反射强度水体提取模式判断
             extraction_mode = cfg.get('extraction_mode', 'bottom')  # 'bottom' 或 'top'
             water_pct = cfg['water_pct']
@@ -1231,7 +1232,11 @@ class SARWorker(QThread):
             if self.isInterruptionRequested():
                 self.finished_signal.emit(False, "任务已手动停止")
                 return
-            # --- Step 5.5: 内部孔洞填充（严格沿用 optimized.py 的 NoData 语义）---
+            # --- 3. 后处理：填孔 → 辅助排除 → 形态学并重施掩膜 → 连通域筛选 ---
+            # 辅助数据用途：DEM/DSM→坡度/坡向，结合航向/入射角/视向构造地形排除候选；
+            # OSM建筑面/道路缓冲→建筑与道路排除；WorldCover 40类→农田排除，80类→历史水体保护。
+            # 水深另需DEM/DSM高程本身，不能以坡度/坡向文件代替；在成果分析时执行。
+            # 后处理1：仅填有效区内小孔；NoData、影像边界与排除区不能当作孔洞补回。
             fill_holes_enabled = cfg.get('fill_holes', False) and cfg.get('hole_thresh', 100) > 0
             if fill_holes_enabled:
                 hole_start = time.perf_counter()
@@ -1274,6 +1279,7 @@ class SARWorker(QThread):
                          nodata_neighbors, nodata_touch_ids, fill_pixels,
                          roi_analysis_valid)
 
+            # 后处理2：应用建筑、道路、地形与可选农田排除。
             if cfg.get('enable_building_mask', False):
                 before = int(np.count_nonzero((label == 1) & (building_mask == 1)))
                 label[building_mask == 1] = 0
@@ -1293,7 +1299,7 @@ class SARWorker(QThread):
                 label[farmland_mask == 1] = 0
                 self.log_signal.emit(f"🌾 全量农田掩膜：删除 {before} 个水体像素。")
 
-            # 形态学必须放在所有强制排除掩膜之后，才能清除掩膜边缘的毛刺和窄小残片。
+            # 后处理3：形态学必须放在所有强制排除掩膜之后，才能清除掩膜边缘的毛刺和窄小残片。
             # 但闭运算可能跨越道路等窄带重新连接水体，所以运算后必须再次施加全部掩膜。
             if cfg['enable_morphology']:
                 morph_start = time.perf_counter()
@@ -1322,7 +1328,7 @@ class SARWorker(QThread):
             if farmland_mask is not None and farmland_mode == 'all':
                 label[farmland_mask == 1] = 0
 
-            # 最小连通面积筛选必须是矢量化之前的最后一道水体清理：道路/建筑/地形
+            # 后处理4：最小连通面积筛选必须是矢量化之前的最后一道水体清理：道路/建筑/地形
             # 掩膜切割后新产生的小碎片也会在这里被删除。
             if cfg['min_area'] > 0 or (farmland_mask is not None and
                                       farmland_mode == 'conservative'):
@@ -1392,7 +1398,7 @@ class SARWorker(QThread):
             if self.isInterruptionRequested():
                 self.finished_signal.emit(False, "任务已手动停止")
                 return
-            # --- Step 6 & 7: GDAL C层窗口化矢量化 ---
+            # --- 4. 成果输出：最终掩膜/矢量、面积/历史变化/几何水深、地图 ---
             os.makedirs(cfg['output_dir'], exist_ok=True)
             out_label = os.path.join(cfg['output_dir'], "SARWater.tif")
             label_meta = sar_profile.copy()
@@ -1424,14 +1430,32 @@ class SARWorker(QThread):
                 self.log_signal.emit(
                     f"〰️ 矢量边界平滑完成：{smoothed_count} 个曲线化，"
                     f"{smooth_fallback_count} 个因几何有效性回退为拓扑简化边界。")
+            from thres_segmentation.water_analysis import analyze_water
+            analysis_options = dict(cfg.get('analysis_options') or {})
+            if cfg.get('enable_depth') and not analysis_options.get('elevation_path'):
+                analysis_options['elevation_path'] = getattr(self, 'analysis_elevation_path', None)
+                if not analysis_options['elevation_path']:
+                    raise ValueError('水深分析需要DEM/DSM高程，不能使用坡度/坡向代替')
+                if cfg.get('terrain_source_mode') == 'download':
+                    analysis_options['elevation_kind'] = 'DSM'
+            from datetime import datetime
+            analysis_dir = os.path.join(cfg['output_dir'], 'analysis_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+            self.log_signal.emit('正在统计面积、历史变化和可选水深...')
+            result = analyze_water(out_label, analysis_dir, cancel=self.isInterruptionRequested, **analysis_options)
+            if result['current_water']:
+                self.log_signal.emit(f"当前水体面积：{result['current_water']['km2']:.6f} km²")
+            if 'change' in result:
+                self.log_signal.emit(f"新增：{result['change']['new_water']['km2']:.6f} km²；"
+                                     f"消退：{result['change']['lost_water']['km2']:.6f} km²（共同有效覆盖内）")
+            self.log_signal.emit(f'分析输出：{analysis_dir}')
             self.progress_signal.emit(95)
             # 🔑 中断检查点 8
             if self.isInterruptionRequested():
                 self.finished_signal.emit(False, "任务已手动停止")
                 return
-            # --- Step 8: 真实执行专业级制图 ---
+            # 4.1 基于最终掩膜制图；面积/变化以分析栅格为准，不以平滑矢量为准。
             self.log_signal.emit("\n🎨 正在生成专业级汇报地图 (1.2倍视角 + SAR背景)...")
-            # 🔑 核心优化：利用 Step 4 生成的 norm 数据作为背景图
+            # 利用阶段2生成的norm数据作为背景图。
             # norm 范围 0-1，NaN 为无效区。转换为 0-255 的 uint8 灰度图
             # np.nan_to_num 将 NaN 转为 0 (黑色)，后续绘图时通过 mask 排除
             bg_image = (np.nan_to_num(norm, nan=0.0) * 255).astype(np.uint8)
