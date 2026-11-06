@@ -13,7 +13,7 @@ import torch
 from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'src'))
-from datasets.sar_scene_dataset import SARSceneDataset
+from supervised.load.sar_scene_dataset import SARSceneDataset
 from supervised.train import WaterSegmentationTrainer
 
 
@@ -66,7 +66,7 @@ class SceneDatasetTests(unittest.TestCase):
             mean,std,ids=ds.normalization(ds.train_ids)
             self.assertLess(mean[0],3)  # val=1000未进入统计。
             self.assertTrue(set(ids)<=set(ds.train_ids)); self.assertTrue(np.isfinite(std).all())
-            with patch('datasets.sar_scene_dataset.rasterio.open',side_effect=AssertionError('应复用缓存')):
+            with patch('supervised.load.sar_scene_dataset.rasterio.open',side_effect=AssertionError('应复用缓存')):
                 cached=SARSceneDataset(root,root/'cache',window_size=32,halo=8,normalization_windows=100)
                 np.testing.assert_array_equal(cached.windows,ds.windows)
                 np.testing.assert_array_equal(cached.normalization(cached.train_ids)[0],mean)

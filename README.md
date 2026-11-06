@@ -74,7 +74,7 @@ DFC 影像按 `POLARIZATION_BANDS={"VV":1,"VH":2}` 读取；BC 默认使用 `{"V
 运行独立准备入口，配置均在脚本顶部：
 
 ```powershell
-python E:\Code_projects\sar_water_extraction\src\datasets\prepare_bc_data.py
+python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py
 ```
 
 默认 `MODE="labels"` 仅重建已有标签；首次导入SAR时显式设置 `MODE="prepare"`，按整景输出，不裁剪、不缩放、不生成512×512小切片。`MODE="split"` 仅显示划分；`MODE="inspect"` 显示少量源文件的格式。输入清单为 `I:\水体数据\水体数据_train_val划分_已确认.csv`，沿用地理组及train/val归属。
@@ -112,21 +112,21 @@ prepared_scenes/
 
 ### 原位重建已经准备好的整景标签
 
-`prepare_bc_data.py` 现在默认 `MODE="labels"`，调用同一标签重建入口，输出根目录统一为 `I:\水体数据\prepared_scenes`；不会再写入 `prepared_scenes_new`。只有首次导入原始SAR时才使用 `MODE="prepare"`。
+`image_process.py` 的 `MODE="labels"`，执行原位标签重建，输出根目录统一为 `I:\水体数据\prepared_scenes`；不会再写入 `prepared_scenes_new`。只有首次导入原始SAR时才使用 `MODE="prepare"`。
 
 停止读取此数据的训练/评价后，运行：
 
 ```powershell
-python E:\Code_projects\sar_water_extraction\src\datasets\prepare_bc3.py
+python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py
 ```
 
 该入口读取 `I:\水体数据\prepared_scenes\split_manifest.csv` 中的原始SHP路径，按照对应SAR网格重新栅格化，直接替换 `prepared_scenes\labels\train` 和 `labels\val` 中的GeoTIFF。水体面内为1、面外为0，无效SAR位置为255（忽略）。色带0白、1黑，显示颜色不能用来判断像素值；不要对旧标签直接做 `1-label`。保留原SAR、原SHP、景号与train/val地理分组，不创建VRT或新版本数据目录。
 
-顶部 `DATA_DIR` 指定原位替换目录，`READ_WINDOW_SIZE` 控制内部读写内存。每景先写临时标签，完整关闭后替换原文件；全部完成后同步 `split_manifest.csv` 像素统计、`label_statistics.json` 和 `revision_settings.json`。中断后重新运行会从第一景重建；`.labels_rebuilding` 存在时训练读取器拒绝使用尚未完成的数据。
+顶部 `OUTPUT_DIR` 指定原位替换目录，`READ_WINDOW_SIZE` 控制内部读写内存。每景先写临时标签，完整关闭后替换原文件；全部完成后同步 `split_manifest.csv` 像素统计、`label_statistics.json` 和 `revision_settings.json`。中断后重新运行会从第一景重建；`.labels_rebuilding` 存在时训练读取器拒绝使用尚未完成的数据。
 
-标签替换后，训练读取器按文件变化自动重建窗口索引、训练归一化统计和类别权重，无须手动删除缓存。重新开始训练，不续训旧标签下的水体模型。`revise_bc_labels.py` 是此前建立独立V2的入口，本次不使用。
+标签替换后，先运行image_process.py的preprocess模式，重建对应处理成果、窗口索引和训练统计，无须手动删除缓存；训练读取已完成缓存并计算类别权重。重新开始训练，不续训旧标签下的水体模型。旧BC/V2入口已合并移除。
 
-**整景训练使用 `src/datasets/sar_scene_dataset.py`**，整景模式不使用S1读取器。`src/supervised/train.py` 默认读取 `I:\水体数据\prepared_scenes\images` 和 `labels`，使用单VV PVT＋DeepLabv3+风格模型、BCE、batch size 2。旧DFC实验只有显式选择`DATA_LAYOUT="patch"`并恢复数据路径/波段配置才使用旧读取器。
+**整景训练使用 `src/supervised/load/sar_scene_dataset.py`**，整景模式不使用S1读取器。`src/supervised/train.py` 默认读取 `I:\水体数据\processed_scenes\normalized\images` 和 `labels`，使用单VV PVT＋DeepLabv3+风格模型、BCE、batch size 2。旧DFC实验只有显式选择`DATA_LAYOUT="patch"`并恢复数据路径/波段配置才使用旧读取器。
 
 整景读取参数位于`SCENE_OPTIONS`：
 
@@ -138,7 +138,7 @@ python E:\Code_projects\sar_water_extraction\src\datasets\prepare_bc3.py
 | `num_workers` / `max_open_scenes` | 2 / 4；每worker独立有限文件缓存、2批预取、64MiB GDAL缓存，GPU使用锁页内存 |
 | `cache_dir` | `E:\Code_projects\sar_water_extraction\data_cache\bc_scenes`，保存小型窗口索引及归一化缓存，不保存小影像切片 |
 
-首次索引用连续标签条带扫描，不加载整景数组；源文件尺寸/修改时间、VRT引用的SAR、采用清单或窗口配置变化会改变缓存键。后续复用索引。归一化是固定训练窗口的**抽样估计**，不是全景逐像素统计，参数和抽样索引保存在检查点中；推理必须复用这些参数。
+首次索引用连续标签条带扫描，不加载整景数组；源文件尺寸/修改时间、VRT引用的SAR、采用清单或窗口配置变化会改变缓存键。后续复用索引。离线归一化使用固定训练窗口的**抽样估计**；原参数和抽样索引保存在preprocessing.json和检查点中，预测新数据须沿用相同协议。
 
 训练每轮是窗口抽样轮次，不等于遍历全部原始场景。验证遍历全部有0/1标签的核心窗口，不受训练抽样上限限制；核心互不重叠，每个已标注像素仅统计一次。输出常规`metrics.csv`、最佳/最后检查点及每轮`val_scenes_epoch_*.csv`。后者用于检查各景结果，不能将未知区域算成非水体。
 
@@ -158,8 +158,9 @@ python E:\Code_projects\sar_water_extraction\src\datasets\prepare_bc3.py
 |---|---|---|
 | 执行方式 | `METHOD`、`RUN_MODE` | 选择模型及训练/质量输出流程 |
 | 数据 | `IMAGE_DIR`、`LABEL_DIR`、`POLARIZATIONS`、`POLARIZATION_BANDS` | 数据路径、极化与文件波段映射 |
-| 斑点滤波 | `SPECKLE_FILTER`、`SPECKLE_INPUT_DOMAIN`、`SPECKLE_WINDOW_SIZE`、`SPECKLE_ENL` | 标准化前的在线 Lee 滤波，默认关闭 |
-| 输出 | `OUTPUT_ROOT`、`OUTPUT_DIR` | 新实验创建时间戳目录；续跑沿用检查点所在实验目录 |
+| 斑点滤波 | `image_process.py`中的`FILTER_INPUT_STAGE`、`FILTER_WINDOW`、`ENL` | 正式训练SPECKLE_FILTER固定none，实际滤波在离线模式完成 |
+| 输出 | `OUTPUT_ROOT`、`OUTPUT_DIR`、`RESULT_FILES` | 最终实验目录及模型/指标/日志名称；运行只加时间戳，续跑沿用原目录 |
+| 缓存与质量路径 | `WINDOW_CACHE_DIR`、`SNAP_GPT_PATH`、`SNAP_CACHE_DIR`、`QUALITY_CHECKPOINT`、`QUALITY_OUTPUT_DIR`、`AUXILIARY_CACHE_DIR` | 所有可配置位置集中在顶部 |
 | 训练 | `RESUME_CHECKPOINT`、`PRETRAINED`、`BATCH_SIZE`、`EPOCHS`、`LEARNING_RATE`、`SEED` | 续跑/初始化、批次、总目标轮数、学习率和随机种子 |
 | 优化 | `OPTIMIZER_NAME`、`WEIGHT_DECAY`、`COSINE_SCHEDULE`、`TRAIN_AUGMENTATION` | 单通道水体方法的优化与增强设置 |
 | 损失 | `LOSS_NAME`、`CLASS_WEIGHT_MODE`、`BCE_WEIGHT`、`DICE_WEIGHT` | 选择损失及BCE类别权重；后两项仅 BCE+Dice 使用 |
@@ -170,21 +171,35 @@ python E:\Code_projects\sar_water_extraction\src\datasets\prepare_bc3.py
 
 默认 `METHOD="deeplabv3"` 使用 PVT-v2-B2 编码器、ASPP 和浅层跳连，单头 BCE，解码通道256、浅层投影48、空洞率 `(3,6,9)`。输入512×512时，深层16×16特征经过ASPP，与128×128浅层特征融合，最后恢复到512×512。它是输出步长32、普通卷积的 DeepLabv3+ 风格适配，不是原论文完整配置。
 
-斑点滤波位于 `src/datasets/speckle.py`。开启一个新的滤波训练时设置：
+图像预处理统一通过 `src/datasets/image_process.py` 手动运行。正式训练读取
+`I:\水体数据\processed_scenes\normalized\images` 与 `labels`；不执行校正、滤波或标准化。
+原始SAR仍保存在 `I:\水体数据\prepared_scenes`，所有处理阶段保持原始尺寸、坐标系、仿射网格与train/val划分。
 
 ```python
-RESUME_CHECKPOINT = None
-SPECKLE_FILTER = "lee"
-SPECKLE_INPUT_DOMAIN = "amplitude"  # 仅在确认是线性幅度时使用；功率填 intensity。
-SPECKLE_WINDOW_SIZE = 3
-SPECKLE_ENL = 1.0
+# image_process.py
+MODE = "preprocess"
+ENABLE_CALIBRATION = False  # 当前BC缺少校正系数，保持关闭。
+ENABLE_FILTER = True
+FILTER_INPUT_STAGE = "org"
+NORMALIZE_INPUT_STAGE = "filtered"
 ```
 
-`none` 保留未滤波路径；`lee` 使用普通 Lee 自适应滤波，依据 SNAP S1TBX 的局部统计公式以 NumPy/SciPy 独立实现，不需要启动 SNAP/GAMMA。幅度输入先平方为功率，滤波后开方恢复幅度；功率输入保持功率，不接受 dB。ENL 是可调的功率域等效视数参数，不是本数据已测定的属性；数值越大平滑越弱。此前 ORG 文件检查未能确认幅度/功率，配置本身不会自动判别单位，也不代表已完成辐射校正。
+默认链路为ORG幅度→SNAP功率域Lee→恢复幅度→使用train统计做z-score→保存浮点GeoTIFF。
+SNAP GPT、缓存目录、窗口索引缓存、读写窗口和训练统计抽样参数均在image_process.py顶部配置。
+每景输出与完成记录匹配时复用；失败景重做，已完成景不重复执行。处理未完成时目录保留
+`.preprocessing_incomplete`，正式训练拒绝读取；全部成功后发布 `preprocessing.json` 和窗口索引。
+归一化只从train固定抽样估计均值/标准差，对train和val使用相同参数；有限0值参与统计，
+无效区域保存为NaN，标准化后的负值仍是有效数据。训练直接读取浮点值，窗口外无效填充仍置0。
+重新生成正在使用的阶段前先停止读取该成果的训练。每个阶段的整景Float32影像需额外磁盘空间，未压缩约4字节×波段数×像素数，实际使用压缩。
 
-滤波只作用于读取的影像，不修改源 TIFF、标签或有效掩膜。整景读取在窗口外增加滤波半径，再裁回模型输入，减少块边缘接缝；零值仍可有效，无效像素不进入邻域统计。开启后新实验目录附加 `_lee`，重新统计滤波后的训练均值/标准差，单独缓存；标签窗口索引继续复用。
+```powershell
+python src/datasets/image_process.py
+python src/supervised/train.py
+```
 
-滤波配置随检查点保存，模型评价和质量输出按检查点恢复，旧检查点默认关闭。启用/关闭或修改滤波参数不能作为同一次训练续跑；应将 `RESUME_CHECKPOINT=None` 开始独立实验，之后续跑该实验时保持同一滤波配置。训练、验证与预测均执行相同预处理。
+检查点保存 `inputs_normalized` 和完整 `input_preprocessing`，包括原train均值、标准差、阶段参数和上游记录。
+训练、验证、BN校准和质量输出会检查输入状态并跳过重复标准化。改变处理协议后应从头训练，
+不能把旧原幅度模型直接续跑到新的离线标准化数据上。保留旧检查点的原始输入路径供历史复评。
 
 其他方法可这样选择：
 
@@ -418,13 +433,54 @@ BN诊断使用 `scripts/calibrate_bn.py`：在顶部设置 `RUN_DIR`、`CHECKPOI
 同一完整val比较前后结果。校准结果另存 `bn_calibration/`，属于推理对照，不可当作原训练续跑检查点。
 Lee滤波保持独立实验；需要确认幅度/功率表达，不能代替辐射校正。
 
-逐景数值审查入口：
+逐景数值审查：将统一入口顶部设为 `MODE="radiometry"` 后运行：
 
 ```powershell
-python E:\Code_projects\sar_water_extraction\src\datasets\inspect_radiometry.py
+python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py
 ```
 
 默认每景3×3内部网格中心、256×256原分辨率抽样，输出到 `codex_analysis/radiometry_audit/`。
 `scene_statistics.csv`包含原始数值分位数、零值/负值比例、标签两类数值分布和元数据；
 `review_scenes.csv`列出待审查项。参考范围使用训练景的正值条件中位数，优先同传感器/像元间距。正值条件统计不改变有效像素定义，包含零值的统计同时保留。
 异常标记不等于错误数据，不自动删除或加权；此统计也无法单独确定DN是幅度还是功率。
+
+
+### 统一的图像处理入口
+
+修改 `src/datasets/image_process.py` 顶部 `MODE` 后手动运行同一脚本：
+
+| MODE | 功能 |
+|---|---|
+| `prepare` | 首次组织完整SAR与SHP标签，支持未完成目录续跑 |
+| `labels` | 原位重建标签；运行前停止读取这套标签的训练 |
+| `split` | 检查清单划分、重复景号和地理组隔离 |
+| `inspect` | 抽查原始影像与矢量字段 |
+| `radiometry` | 抽样统计数值分布，按train参考范围列出待检查场景 |
+| `calibrate` | 执行已配置的厂商/GAMMA外部命令，或登记、检查已有校正GeoTIFF |
+| `filter` | 对FILTER_INPUT_STAGE指定的线性域输入执行SNAP Lee |
+| `normalize` | 对NORMALIZE_INPUT_STAGE输入估计train统计并生成浮点标准化整景 |
+| `preprocess` | 按ENABLE_CALIBRATION/ENABLE_FILTER开关依次完成处理，最后归一化 |
+| `quicklook` | 显示ORG、校正后、滤波后、标准化后的四阶段概览，不启动这些处理 |
+
+辐射校正必须先明确 `CALIBRATION_QUANTITY`（sigma0/beta0/gamma0）、输出域和
+`CALIBRATION_REFERENCE`（系数、LUT、算法与匹配依据），然后配置：
+
+- `CALIBRATION_PRODUCTS_DIR`：已校正GeoTIFF，按train/val和原文件名组织。
+- 或 `CALIBRATION_COMMAND`：可执行参数列表，支持 `{input}`、`{output}`、`{scene_id}`
+  和WSL的 `{input_wsl}`、`{output_wsl}` 占位符。不经shell拼接；外部流程必须输出同网格GeoTIFF。
+
+当前BC ORG只有幅度，缺少可核验校正参数。未配置时calibrate明确停止，不产生伪校正影像。
+幅度平方只转换到功率，不是辐射校正；当前默认关闭校正。
+开启完整校正链时设置 `ENABLE_CALIBRATION=True`、`FILTER_INPUT_STAGE="calibrated"`。
+
+阶段目录集中在顶部：`CALIBRATED_ROOT`、`FILTERED_ROOT`、`NORMALIZED_ROOT`。
+分别包含images、labels、划分清单及处理记录。滤波输出使用独立GeoTIFF，后续不依赖SNAP缓存长期保留。
+`WINDOW_SIZE/HALO`应与train.py一致，正式训练只读取已建索引。
+
+快视图设置 `MODE="quicklook"`、`QUICKLOOK_LOOKS=8`、`QUICKLOOK_MAX_SIDE=1600`。
+输出 `quicklooks/景号.quick_overview.png`，2×2依次为原图、校正、滤波、归一化；
+缺少成果或阶段未完成时明确标记Not generated，不用原图代替。
+概览按有效像素均值降采样，0参与平均、无效值不参与，保留边缘余块。
+ORG幅度固定0..255直接量化，不自动拉伸；有明确后向散射物理量的阶段用固定dB范围显示，
+归一化阶段直接用已保存z值、固定范围显示，不再计算一次标准化。显示变换不修改训练影像。
+快视图无需检查点；参数或源成果改变时重新生成，匹配时复用。

@@ -10,9 +10,9 @@ import numpy as np
 import torch
 import rasterio
 sys.path[:0]=[str(Path(__file__).resolve().parents[1]/'src'),str(Path(__file__).resolve().parent)]
-from datasets.scene_windows import SceneWindows
-from datasets.sar_scene_dataset import SARSceneDataset
-from datasets.inspect_radiometry import inspect_scene
+from supervised.load.scene_windows import SceneWindows
+from supervised.load.sar_scene_dataset import SARSceneDataset
+from datasets.image_process import inspect_scene
 from supervised.evaluation.scene_quality import run_scene_quality, clean_mask
 from supervised.evaluation.boundary_eval import boundary_regions, confusion_counts
 import test_sar_scene_dataset as fixtures

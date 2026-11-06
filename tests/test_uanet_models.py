@@ -88,7 +88,7 @@ class UANetTests(unittest.TestCase):
                  patch.object(train, "LABEL_DIR", Path(folder) / "labels"), \
                  patch.object(train, "OUTPUT_DIR", Path(folder)), \
                  patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 1), \
-                 patch("datasets.s1_dataset.WaterDataset", TinyDataset), \
+                 patch("datasets.dfc_sample.s1_dataset.WaterDataset", TinyDataset), \
                  patch.object(torch.cuda, "is_available", return_value=False):
                 trainer = train.create_trainer()
                 trainer.train()

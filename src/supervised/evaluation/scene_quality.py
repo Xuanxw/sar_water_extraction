@@ -3,6 +3,8 @@
 不将整幅影像送入网络或内存。标签只用于计量，不参与修正或阈值生成。
 每景完成后保存计数，可使用同一 output_dir 续跑；已完成景不会重新推理。
 """
+from supervised.load.sar_scene_dataset import check_preprocessed_input
+
 import csv
 import hashlib
 import json
@@ -19,7 +21,7 @@ from scipy import ndimage
 import torch
 from torch.utils.data import DataLoader
 
-from datasets.scene_windows import SceneWindows
+from supervised.load.scene_windows import SceneWindows
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.boundary_eval import boundary_regions, confusion_counts, BoundaryPointReservoir
 from supervised.evaluation.metrics import metrics_from_counts
@@ -200,6 +202,7 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
         raise ValueError('此入口只接受整景检查点；旧DFC切片请使用原postprocess')
     image_dir = Path(image_dir or c['image_dir'])
     label_dir = Path(label_dir or c['label_dir'])
+    check_preprocessed_input(image_dir,c)
     manifest = image_dir.parent/'split_manifest.csv'
     if hashlib.sha256(manifest.read_bytes()).hexdigest() != c['split_manifest_sha256']:
         raise ValueError('划分清单与训练不一致')
@@ -285,7 +288,9 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
                                               source_checkpoint=str(checkpoint_path),epoch=c['epoch'])
                 for step,batch in enumerate(loader,1):
                     valid=batch['valid_mask'].to(device)
-                    image=(batch['image'].to(device)-mean)/std
+                    image=batch['image'].to(device)
+                    if not c.get('inputs_normalized',False):
+                        image=(image-mean)/std
                     image=image.masked_fill(~valid[:,None],0)
                     with torch.autocast(device_type=device.type,enabled=amp):
                         prediction=model(image)

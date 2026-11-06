@@ -70,6 +70,9 @@ class BCTrainingWeightTests(unittest.TestCase):
         self.assertTrue(config["model_kwargs"]["pretrained"])
         self.assertEqual(config["model_kwargs"]["in_channels"], 1)
         self.assertIn("sqrt_weight_bce", config["output_dir"].name)
+        self.assertTrue(config["require_preprocessed"])
+        self.assertTrue(config["output_dir_is_final"])
+        self.assertEqual(config["output_dir"], train.OUTPUT_DIR)
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ class FeatureVisualizationTests(unittest.TestCase):
     def test_training_records_fixed_validation_sample_at_requested_epochs(self):
         with TemporaryDirectory() as folder:
             with patch.multiple(train, METHOD="uafnet", DATA_LAYOUT="patch", POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2}), \
-                 patch("datasets.s1_dataset.WaterDataset", TinyWaterDataset), \
+                 patch("datasets.dfc_sample.s1_dataset.WaterDataset", TinyWaterDataset), \
                  patch.object(train, "IMAGE_DIR", Path(folder) / "images"), \
                  patch.object(train, "LABEL_DIR", Path(folder) / "labels"), \
                  patch.object(train, "OUTPUT_DIR", Path(folder)), \

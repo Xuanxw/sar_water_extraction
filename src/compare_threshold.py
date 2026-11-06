@@ -15,7 +15,7 @@ ROOT = Path("E:/Code_projects/sar_water_extraction")
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
-from datasets.s1_dataset import WaterDataset, resolve_sample_path
+from datasets.dfc_sample.s1_dataset import WaterDataset, resolve_sample_path
 from supervised.evaluation.boundary_eval import BoundaryEvaluator, confusion_counts, save_boundary_figure
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.postprocess import WaterEnsemble

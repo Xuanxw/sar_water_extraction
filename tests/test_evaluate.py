@@ -71,7 +71,7 @@ class EvaluationTests(unittest.TestCase):
                                   mean=torch.zeros(1), std=torch.ones(1),
                                   model_kwargs=dict(num_classes=channels))
                 with patch.object(evaluate.torch, "load", return_value=checkpoint), \
-                     patch("datasets.s1_dataset.WaterDataset", Dataset), \
+                     patch("datasets.dfc_sample.s1_dataset.WaterDataset", Dataset), \
                      patch.object(evaluate, "load_model", return_value=Model(channels)), \
                      patch.object(torch.cuda, "is_available", return_value=False):
                     metrics = evaluate.evaluate("unused.pth")

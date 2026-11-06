@@ -20,8 +20,8 @@ from shapely.geometry import box, mapping, Polygon
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
                 str(Path(__file__).resolve().parents[1] / "scripts")]
-from datasets import prepare_bc_data as prepare
-from datasets.s1_dataset import WaterDataset
+from datasets import image_process as prepare
+from datasets.dfc_sample.s1_dataset import WaterDataset
 
 
 class PrepareWaterDataTests(unittest.TestCase):

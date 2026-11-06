@@ -4,6 +4,7 @@ torch
 timm==1.0.30
 matplotlib
 scipy
+filelock
 pyproj>=3.6,<4
 termcolor
 segmentation-models-pytorch==0.5.0

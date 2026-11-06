@@ -5,10 +5,9 @@ import numpy as np
 import rasterio
 import torch
 from torch.utils.data import DataLoader, Dataset
-if __package__:
-    from .speckle import SpeckleFilter
-else:
-    from speckle import SpeckleFilter  # 支持直接执行本数据读取脚本。
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from datasets.speckle import SpeckleFilter, read_filtered_window
 
 # 直接修改这里的变量，然后运行 python src/supervised/datasets/water_dataset.py。
 DATA_ROOT = Path("E:/Code_projects/sar_water_extraction/data")
@@ -82,13 +81,8 @@ class WaterDataset(Dataset):
         """读取一个样本；坏文件或缺失标签直接保留库的异常，方便定位。"""
         image_path = self.image_paths[index]
         with rasterio.open(image_path) as src:
-            data = src.read(indexes=self.bands, out_dtype="float32", masked=True)
-
-        # 只根据文件掩膜和 NaN/Inf 判断有效性，不把 0 或 -9999 自动当作无效值。
-        valid = np.isfinite(data.data).all(axis=0) & ~np.ma.getmaskarray(data).any(axis=0)
-        image = data.filled(0)
-        image[:, ~valid] = 0  # 无效位置占位为 0，有效性仍由 valid_mask 单独记录。
-        image = self.speckle_filter(image, valid)
+            from rasterio.windows import Window
+            image, valid = read_filtered_window(src, self.bands, Window(0, 0, src.width, src.height), self.speckle_filter)
         sample = {
             "image": torch.from_numpy(image),
             "valid_mask": torch.from_numpy(valid),

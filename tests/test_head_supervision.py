@@ -53,7 +53,7 @@ class HeadSupervisionTests(unittest.TestCase):
         torch.set_num_threads(2)
 
     def make_trainer(self, folder, weights):
-        with patch("datasets.s1_dataset.WaterDataset", TinyDataset), \
+        with patch("datasets.dfc_sample.s1_dataset.WaterDataset", TinyDataset), \
              patch.object(torch.cuda, "is_available", return_value=False):
             trainer = train.WaterSegmentationTrainer(
                 FourIndependentHeads, {}, {"model_name": "pvt_uafnet"},

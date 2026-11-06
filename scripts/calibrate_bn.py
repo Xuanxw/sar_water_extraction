@@ -1,4 +1,5 @@
 """只用训练影像逐层校准 BN，比较前后验证指标，不重新训练权重。"""
+
 import csv
 from datetime import datetime
 from pathlib import Path
@@ -11,9 +12,9 @@ from torch.utils.data import DataLoader, Subset
 # 支持按文件路径直接运行，也支持包导入。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from datasets.s1_dataset import WaterDataset, sample_name
+from datasets.dfc_sample.s1_dataset import WaterDataset, sample_name
 from supervised.models.checkpoint import load_model
-from datasets.sar_scene_dataset import SARSceneDataset
+from supervised.load.sar_scene_dataset import SARSceneDataset, check_preprocessed_input
 import numpy as np
 import hashlib
 
@@ -71,6 +72,7 @@ class BNCalibrator:
         # 完全使用检查点保存的划分；校准只需要训练影像，不读取它们的标签。
         if self.checkpoint.get('data_layout') == 'full_scene':
             root = Path(self.checkpoint['image_dir']).parent
+            check_preprocessed_input(root/'images',self.checkpoint)
             if hashlib.sha256((root/'split_manifest.csv').read_bytes()).hexdigest() != self.checkpoint['split_manifest_sha256']:
                 raise ValueError('BN校准清单与检查点不同')
             revision = root/'revision_settings.json'
@@ -111,7 +113,9 @@ class BNCalibrator:
         loss_sum, pixel_count = 0.0, 0
         with torch.no_grad():
             for batch in self.val_loader:
-                image = (batch["image"].to(self.device) - self.mean) / self.std
+                image = batch["image"].to(self.device)
+                if not self.checkpoint.get("inputs_normalized",False):
+                    image = (image - self.mean) / self.std
                 image = image.masked_fill(~batch["valid_mask"].to(self.device).unsqueeze(1), 0)
                 label = batch["label"].to(self.device)
                 valid = label != self.ignore_index
@@ -157,7 +161,9 @@ class BNCalibrator:
             try:
                 with torch.no_grad():
                     for batch in self.train_loader:
-                        image = (batch["image"].to(self.device) - self.mean) / self.std
+                        image = batch["image"].to(self.device)
+                        if not self.checkpoint.get("inputs_normalized",False):
+                            image = (image - self.mean) / self.std
                         image = image.masked_fill(~batch["valid_mask"].to(self.device).unsqueeze(1), 0)
                         self.model(image)
                     statistics.apply_to(layer)

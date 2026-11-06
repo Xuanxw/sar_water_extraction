@@ -17,7 +17,7 @@ from torch import nn
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
                 str(Path(__file__).resolve().parents[1] / "scripts")]
 from supervised import train
-from datasets.s1_dataset import WaterDataset, resolve_sample_path
+from datasets.dfc_sample.s1_dataset import WaterDataset, resolve_sample_path
 
 
 class TinyModel(nn.Module):

@@ -9,11 +9,13 @@
 WorldCover农田排除、填孔及连通域清理；这些步骤尚未接入本入口。
 本文件terrain_gradient仅供质量图显示，不参与水体掩膜修正。
 """
+from supervised.load.sar_scene_dataset import check_preprocessed_input
+
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.landcover import read_landcover, merge_landcover
 from supervised.evaluation.boundary_eval import BoundaryEvaluator, save_boundary_figure
-from datasets.s1_dataset import WaterDataset, resolve_sample_path, sample_name
+from datasets.dfc_sample.s1_dataset import WaterDataset, resolve_sample_path, sample_name
 from thres_segmentation.auxiliary_data import prepare_auxiliary_inputs
 from thres_segmentation.water_analysis import analyze_water, read_reference_water
 from datasets.speckle import SpeckleFilter
@@ -59,6 +61,8 @@ class WaterEnsemble:
                 image_dir=checkpoint["image_dir"], label_dir=checkpoint["label_dir"],
                 val_files=checkpoint["val_files"], ignore_index=checkpoint.get("ignore_index", -1),
                 speckle_filter=SpeckleFilter(checkpoint.get('speckle')),
+                inputs_normalized=checkpoint.get('inputs_normalized',False),
+                input_preprocessing=checkpoint.get('input_preprocessing',{}),
             ))
             print(f"集成成员：{path}；模型：{checkpoint['model_name']}；轮次：{checkpoint['epoch']}", flush=True)
         # 支持成员各自选择不同波段、重复波段；读取它们的并集，再分别重排和标准化。
@@ -78,7 +82,8 @@ class WaterEnsemble:
                 raw, masks = inputs.cpu().numpy(), valid_mask.cpu().numpy()
                 filtered = np.stack([filter_op(sample, mask) for sample, mask in zip(raw, masks)])
                 inputs = torch.from_numpy(filtered).to(self.device)
-            inputs = (inputs - member["mean"]) / member["std"]
+            if not member["inputs_normalized"]:
+                inputs = (inputs - member["mean"]) / member["std"]
             inputs = inputs.masked_fill(~valid_mask.unsqueeze(1), 0)
             with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
                 outputs = member["model"](inputs)
@@ -279,6 +284,8 @@ def run_postprocess(checkpoint_paths, image_dir=None, label_dir=None,
         raise ValueError("成员的验证划分不同，请用所有成员都未参与训练的独立有标签集合评价")
     image_dir = Path(first["image_dir"] if image_dir is None else image_dir)
     label_dir = Path(first["label_dir"] if label_dir is None else label_dir) if with_labels else None
+    for member in ensemble.members:
+        check_preprocessed_input(image_dir,member)
     dataset = WaterDataset(image_dir, label_dir, ensemble.bands)
     if use_saved_val:
         dataset.select_files(first["val_files"])

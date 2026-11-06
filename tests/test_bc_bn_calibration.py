@@ -10,7 +10,7 @@ from torch import nn
 sys.path[:0]=[str(Path(__file__).resolve().parents[1]/'src'),str(Path(__file__).resolve().parents[1]/'scripts'),str(Path(__file__).resolve().parent)]
 import calibrate_bn as bn
 import test_sar_scene_dataset as fixture
-from datasets.sar_scene_dataset import SARSceneDataset
+from supervised.load.sar_scene_dataset import SARSceneDataset
 
 class BNTests(unittest.TestCase):
     def test_scene_calibration_preserves_parameters_and_split(self):

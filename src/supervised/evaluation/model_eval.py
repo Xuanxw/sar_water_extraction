@@ -1,4 +1,5 @@
 """独立评价已训练模型；修改顶部变量后运行 python src/supervised/evaluation/model_eval.py。"""
+
 from math import log
 from pathlib import Path
 from datetime import datetime
@@ -13,13 +14,13 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
-from datasets.sar_scene_dataset import SARSceneDataset
+from supervised.load.sar_scene_dataset import SARSceneDataset, check_preprocessed_input
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.metrics import metrics_from_counts
 
 CHECKPOINT_PATH = Path(r"E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_balanced_bce_labels_corrected_bc_scenes\20261103_203233_244527\best_f1.pth")
-IMAGE_DIR = Path(r"I:\水体数据\prepared_scenes\images")
-LABEL_DIR = Path(r"I:\水体数据\prepared_scenes\labels")
+IMAGE_DIR = None  # 默认使用检查点保存的输入路径和处理协议。
+LABEL_DIR = None
 USE_SAVED_VAL = True
 BATCH_SIZE = None
 USE_AMP = None
@@ -68,6 +69,7 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
     ignore_index = checkpoint.get("ignore_index", -1)
     image_dir = Path(checkpoint["image_dir"] if image_dir is None else image_dir)
     label_dir = Path(checkpoint["label_dir"] if label_dir is None else label_dir)
+    check_preprocessed_input(image_dir, checkpoint)
     scene_dataset = None
     if checkpoint.get('data_layout') == 'full_scene':
         if not use_saved_val:
@@ -79,13 +81,15 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
             Path(r'E:\Code_projects\sar_water_extraction\data_cache\bc_scenes'), bands=bands,
             window_size=checkpoint['window_size'], halo=checkpoint['window_halo'],
             speckle=checkpoint.get('speckle'))
+        if scene_dataset.inputs_normalized != checkpoint.get('inputs_normalized', False):
+            raise ValueError('评价输入归一化状态与检查点不一致')
         positions = {name:i for i,name in enumerate(scene_dataset.names)}
         ids = [positions[name] for name in checkpoint['val_files']]
         if not set(ids) <= set(scene_dataset.val_ids):
             raise ValueError('验证名单包含训练窗口')
         dataset = Subset(scene_dataset, ids)
     else:
-        from datasets.s1_dataset import WaterDataset
+        from datasets.dfc_sample.s1_dataset import WaterDataset
         dataset = WaterDataset(image_dir, label_dir, bands, speckle=checkpoint.get('speckle'))
         if use_saved_val:
             dataset.select_files(checkpoint['val_files'])
@@ -118,7 +122,8 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
             ignored_pixels += label.numel() - count
             if count == 0:
                 continue
-            image = (image - mean) / std
+            if not checkpoint.get('inputs_normalized', False):
+                image = (image - mean) / std
             image = image.masked_fill(~batch["valid_mask"].to(device).unsqueeze(1), 0)
             with torch.autocast(device_type=device.type, enabled=use_amp):
                 outputs = model(image)

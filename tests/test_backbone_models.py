@@ -82,7 +82,7 @@ class BackboneTests(unittest.TestCase):
                      patch.object(train, "LOSS_NAME", "ce"), \
                      patch.object(train, "SAMPLING", "random"), \
                      patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 1), \
-                     patch("datasets.s1_dataset.WaterDataset", TinyDataset), \
+                     patch("datasets.dfc_sample.s1_dataset.WaterDataset", TinyDataset), \
                      patch.object(torch.cuda, "is_available", return_value=False):
                     trainer = train.create_trainer()
                     trainer.train()

@@ -16,13 +16,37 @@ from datasets.speckle import SpeckleFilter, read_filtered_window
 IGNORE_INDEX = -1
 
 
+def check_preprocessed_input(image_dir, checkpoint):
+    """校验输入阶段及归一化统计协议，防止漏做或重复做标准化。"""
+    folder = Path(image_dir).parent
+    path = folder / 'preprocessing.json'
+    record = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+    normalized = record.get('stage') == 'normalized'
+    if normalized != checkpoint.get('inputs_normalized', False):
+        raise ValueError('输入影像的归一化状态与检查点不一致')
+    if normalized and (not record.get('complete') or (folder/'.preprocessing_incomplete').exists()):
+        raise ValueError('离线归一化尚未完成')
+    if normalized and record != checkpoint.get('input_preprocessing'):
+        raise ValueError('输入影像的离线处理协议与检查点不一致')
+
+
 class SARSceneDataset(Dataset):
     """以不重叠核心划分整景；窗口四周提供上下文，标签只保留核心区。"""
 
     def __init__(self, root, cache_dir, bands=(1,), window_size=1024, halo=128,
                  normalization_windows=2, seed=42, max_open_scenes=4, scene_limit_per_split=None,
-                 speckle=None):
+                 speckle=None, require_prepared=False):
         self.root, self.cache_dir = Path(root), Path(cache_dir)
+        self.require_prepared = require_prepared
+        receipt = self.root / 'preprocessing.json'
+        self.input_preprocessing = json.loads(receipt.read_text(encoding='utf-8')) if receipt.exists() else {}
+        self.inputs_normalized = self.input_preprocessing.get('stage') == 'normalized'
+        if require_prepared and (self.root / '.preprocessing_incomplete').exists():
+            raise RuntimeError('离线影像处理尚未完成，请重新运行image_process.py')
+        if self.inputs_normalized and require_prepared and not self.input_preprocessing.get('complete'):
+            raise RuntimeError('归一化成果未完整发布')
+        if self.inputs_normalized and speckle is not None:
+            raise ValueError('输入已离线归一化，不能再次滤波')
         self.speckle_filter = SpeckleFilter(speckle)
         self.bands, self.window_size, self.halo = tuple(bands), window_size, halo
         self.core_size = window_size - 2 * halo
@@ -33,7 +57,7 @@ class SARSceneDataset(Dataset):
         self._handles = OrderedDict()
         self._env = None
         if (self.root / '.labels_rebuilding').exists():
-            raise RuntimeError('标签重建尚未完成，请先运行prepare_bc3.py完成全部标签替换')
+            raise RuntimeError('标签重建尚未完成，请先运行image_process.py（MODE=labels）完成全部标签替换')
         self.manifest_path = self.root/'split_manifest.csv'
         with self.manifest_path.open(encoding='utf-8-sig', newline='') as stream:
             self.scenes = [r for r in csv.DictReader(stream) if int(r['active']) == 1]
@@ -41,6 +65,10 @@ class SARSceneDataset(Dataset):
             # 仅供真实数据试跑；正式训练不设置此限制。
             self.scenes = [r for split in ('train', 'val')
                            for r in [x for x in self.scenes if x['split'] == split][:scene_limit_per_split]]
+        if self.speckle_filter.snap is not None:
+            for row in self.scenes:
+                self.speckle_filter.snap.prepare_file(
+                    self.root/'images'/row['split']/row['name'], self.bands, create=False)
         train_groups = {r['group_id'] for r in self.scenes if r['split'] == 'train'}
         val_groups = {r['group_id'] for r in self.scenes if r['split'] == 'val'}
         if not train_groups or not val_groups or train_groups & val_groups:
@@ -70,6 +98,8 @@ class SARSceneDataset(Dataset):
                 self.windows = data['windows']
             print(f'复用窗口索引：{len(self.windows)}个窗口', flush=True)
         else:
+            if require_prepared:
+                raise FileNotFoundError('缺少窗口索引，请先运行 python src/datasets/image_process.py')
             records = []
             for sid, r in enumerate(self.scenes):
                 with rasterio.open(self.root/'labels'/r['split']/r['label_name']) as src:
@@ -124,6 +154,8 @@ class SARSceneDataset(Dataset):
         self.__dict__.update(state)
         # 主进程可能在加入滤波前已创建数据集，Windows新worker会导入更新后的类。
         # 只兼容缺少字段的旧对象；新实验已有的滤波配置必须原样保留。
+        if 'require_prepared' not in state:
+            self.require_prepared = False
         if 'speckle_filter' not in state:
             self.speckle_filter = SpeckleFilter()
 
@@ -146,7 +178,7 @@ class SARSceneDataset(Dataset):
         x1, y1 = max(0, x0), max(0, y0)
         x2, y2 = min(image_src.width, x0+self.window_size), min(image_src.height, y0+self.window_size)
         win = Window(x1, y1, x2-x1, y2-y1)
-        # 在线滤波先于训练器标准化；多读少量邻域，不生成新的整景/切片文件。
+        # 离线归一化成果直接读取；原始输入模式可读取已准备的SNAP缓存。
         data, good = read_filtered_window(image_src, self.bands, win, self.speckle_filter)
         image = np.zeros((len(self.bands), self.window_size, self.window_size), dtype=np.float32)
         valid = np.zeros((self.window_size, self.window_size), dtype=bool)
@@ -164,6 +196,9 @@ class SARSceneDataset(Dataset):
 
     def normalization(self, train_ids):
         """训练景内固定抽取窗口估计均值/标准差；不读取val像素，结果缓存并随模型保存。"""
+        if self.inputs_normalized:
+            # 浮点影像已标准化；返回恒等参数，供检查点记录，训练不再变换。
+            return np.zeros(len(self.bands)), np.ones(len(self.bands)), self.input_preprocessing.get('statistics_window_indices', [])
         selected_ids = np.asarray(train_ids, dtype=np.int64)
         key = hashlib.sha256(selected_ids.tobytes()).hexdigest()[:12]
         # 标签窗口索引可以复用；滤波后的数值统计必须另存，不能沿用原始影像均值。
@@ -174,6 +209,8 @@ class SARSceneDataset(Dataset):
         if path.exists():
             with np.load(path) as saved:
                 return saved['mean'], saved['std'], saved['indices'].tolist()
+        if self.require_prepared:
+            raise FileNotFoundError('缺少匹配的训练集归一化统计，请先运行 python src/datasets/image_process.py')
         rng = np.random.default_rng(self.seed)
         selected = []
         for sid in np.unique(self.windows[selected_ids, 0]):

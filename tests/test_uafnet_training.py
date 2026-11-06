@@ -94,7 +94,7 @@ class UAFNetTrainingTests(unittest.TestCase):
                      patch.object(train, "OUTPUT_DIR", Path(folder)), \
                  patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 2), \
                  patch.object(train, "LEARNING_RATE", 1e-4), \
-                 patch("datasets.s1_dataset.WaterDataset", TinyWaterDataset), \
+                 patch("datasets.dfc_sample.s1_dataset.WaterDataset", TinyWaterDataset), \
                  patch.object(torch.cuda, "is_available", return_value=False):
                 trainer = train.create_trainer()
                 trainer.train()

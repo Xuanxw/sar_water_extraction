@@ -12,7 +12,7 @@ from rasterio.transform import from_origin
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
                 str(Path(__file__).resolve().parents[1] / "scripts")]
-from datasets.check_data import check_data
+from datasets.dfc_sample.check_data import check_data
 
 
 class CheckDataTests(unittest.TestCase):

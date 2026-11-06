@@ -11,9 +11,9 @@ import numpy as np
 import rasterio
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from datasets import prepare_bc3
-from datasets.sar_scene_dataset import SARSceneDataset
-import test_revise_bc_labels as fixtures
+from datasets import image_process
+from supervised.load.sar_scene_dataset import SARSceneDataset
+import label_fixtures as fixtures
 
 
 class InPlaceLabelTests(unittest.TestCase):
@@ -36,7 +36,7 @@ class InPlaceLabelTests(unittest.TestCase):
                 with rasterio.open(target, 'w', **profile) as dst:
                     dst.write(np.where(expected == 255, 255, 1 - expected).astype('uint8'), 1)
 
-            prepare_bc3.prepare_labels(root, read_window_size=16)
+            image_process.prepare_labels(root, read_window_size=16)
             with (root / 'split_manifest.csv').open(encoding='utf-8-sig') as stream:
                 after = list(csv.DictReader(stream))
             for old, new in zip(before, after):
@@ -55,7 +55,7 @@ class InPlaceLabelTests(unittest.TestCase):
             ds = SARSceneDataset(root, folder / 'cache', window_size=32, halo=8)
             previous_key = ds.cache_key
             ds.close()
-            prepare_bc3.prepare_labels(root, read_window_size=32)
+            image_process.prepare_labels(root, read_window_size=32)
             ds = SARSceneDataset(root, folder / 'cache', window_size=32, halo=8)
             self.assertNotEqual(ds.cache_key, previous_key)
             ds.close()
@@ -64,13 +64,13 @@ class InPlaceLabelTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             root, _ = fixtures.RevisionTests().prepare(Path(temp))
             manifest_before = (root / 'split_manifest.csv').read_bytes()
-            with patch.object(prepare_bc3, 'rebuild_scene', side_effect=RuntimeError('模拟中断')):
+            with patch.object(image_process, 'rebuild_scene', side_effect=RuntimeError('模拟中断')):
                 with self.assertRaisesRegex(RuntimeError, '模拟中断'):
-                    prepare_bc3.prepare_labels(root)
+                    image_process.prepare_labels(root)
             self.assertEqual((root / 'split_manifest.csv').read_bytes(), manifest_before)
             with self.assertRaisesRegex(RuntimeError, '标签重建尚未完成'):
                 SARSceneDataset(root, Path(temp) / 'cache')
-            prepare_bc3.prepare_labels(root)
+            image_process.prepare_labels(root)
             self.assertFalse((root / '.labels_rebuilding').exists())
 
 
