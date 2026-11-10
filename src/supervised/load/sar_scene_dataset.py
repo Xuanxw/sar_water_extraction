@@ -35,7 +35,7 @@ class SARSceneDataset(Dataset):
 
     def __init__(self, root, cache_dir, bands=(1,), window_size=1024, halo=128,
                  normalization_windows=2, seed=42, max_open_scenes=4, scene_limit_per_split=None,
-                 speckle=None, require_prepared=False):
+                 speckle=None, require_prepared=False, _prepared_windows=None):
         self.root, self.cache_dir = Path(root), Path(cache_dir)
         self.require_prepared = require_prepared
         receipt = self.root / 'preprocessing.json'
@@ -93,6 +93,12 @@ class SARSceneDataset(Dataset):
         self.cache_key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()[:20]
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         cache = self.cache_dir/f'windows_{self.cache_key}.npz'
+        if _prepared_windows is not None and not cache.exists():
+            # 合并已准备好的窗口索引，只调整景编号，不重新扫描整幅标签。
+            pending = cache.with_suffix('.partial')
+            with pending.open('wb') as stream:
+                np.savez_compressed(stream, windows=_prepared_windows)
+            pending.replace(cache)
         if cache.exists():
             with np.load(cache) as data:
                 self.windows = data['windows']
@@ -237,3 +243,78 @@ class SARSceneDataset(Dataset):
             np.savez(stream, mean=mean, std=std, indices=np.asarray(selected), pixels=count)
         path.with_suffix('.partial').replace(path)
         return mean, std, selected
+
+
+def merge_scene_manifests(manifest_paths, **dataset_options):
+    """合并多个整景目录的清单和窗口索引；影像不搬迁，预处理必须一致。"""
+    paths = [Path(p).resolve() for p in manifest_paths]
+    if not paths or len(set(paths)) != len(paths):
+        raise ValueError('manifest列表不能为空，也不能重复指定同一个文件')
+    if any(p.name != 'split_manifest.csv' for p in paths):
+        raise ValueError('每个目录需提供自己的split_manifest.csv')
+    if len(paths) == 1:
+        return paths[0].parent
+
+    # 忽略来源路径和采样索引，比较影响数值含义的处理步骤及归一化参数。
+    def protocol(record):
+        keys = ('stage', 'bands', 'input_domain', 'output_domain', 'quantity', 'filter',
+                'calibration_reference', 'mean', 'std')
+        result = {k: record.get(k) for k in keys}
+        if record.get('upstream'):
+            result['upstream'] = protocol(record['upstream'])
+        return result
+
+    merged, windows, sources, seen = [], [], [], set()
+    reference = None
+    for path in paths:
+        receipt = path.parent/'preprocessing.json'
+        record = json.loads(receipt.read_text(encoding='utf-8')) if receipt.exists() else {}
+        if record.get('stage') != 'normalized' or not record.get('complete'):
+            raise ValueError(f'多目录训练要求已完成离线归一化：{path.parent}')
+        if reference is None:
+            reference = record
+        elif protocol(record) != protocol(reference):
+            raise ValueError('多个目录的归一化mean/std或预处理方案不同；请先统一训练统计和处理方案，不能直接混合')
+        child = SARSceneDataset(path.parent, **dataset_options)
+        try:
+            offset = len(merged)
+            for row in child.scenes:
+                identifier = row['scene_id']
+                if identifier.casefold() in seen:
+                    raise ValueError(f'多个manifest存在重复景号：{identifier}；请移除重复来源')
+                seen.add(identifier.casefold())
+                # name使用绝对路径，现有训练/整景验证的Path拼接均会保留该绝对路径。
+                merged.append(dict(row, original_name=row['name'],
+                                   name=str((path.parent/'images'/row['split']/row['name']).resolve()),
+                                   label_name=str((path.parent/'labels'/row['split']/row['label_name']).resolve()),
+                                   manifest_source=str(path), dataset_root=str(path.parent)))
+            part = child.windows.copy()
+            part[:, 0] += offset
+            windows.append(part)
+        finally:
+            child.close()
+        sources.append(dict(manifest=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                            preprocessing=record))
+    train_groups = {r['group_id'] for r in merged if r['split'] == 'train'}
+    val_groups = {r['group_id'] for r in merged if r['split'] == 'val'}
+    if train_groups & val_groups:
+        raise ValueError(f'多个manifest的地理组跨train/val：{sorted(train_groups & val_groups)}')
+
+    # 小型合并目录供训练和后续验证共同读取，不创建SAR副本。
+    key = hashlib.sha256(json.dumps(dict(sources=sources, scenes=merged), sort_keys=True).encode()).hexdigest()[:20]
+    root = Path(dataset_options['cache_dir'])/'merged_manifests'/key
+    root.mkdir(parents=True, exist_ok=True)
+    fields = list(dict.fromkeys(k for row in merged for k in row))
+    pending = root/'split_manifest.csv.partial'
+    with pending.open('w', encoding='utf-8-sig', newline='') as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(merged)
+    pending.replace(root/'split_manifest.csv')
+    metadata = dict(reference, manifest_sources=sources)
+    (root/'preprocessing.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding='utf-8')
+    # 复用同一缓存签名逻辑，后续评估可以直接加载这个合并根目录。
+    combined = SARSceneDataset(root, _prepared_windows=np.concatenate(windows), **dataset_options)
+    combined.close()
+    print(f'合并{len(paths)}个manifest，共{len(merged)}景；来源影像不复制：{root}', flush=True)
+    return root

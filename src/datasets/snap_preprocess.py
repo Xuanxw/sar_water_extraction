@@ -9,25 +9,28 @@ from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 import hashlib
 import json
-import os
 import subprocess
+import shutil
+from time import perf_counter
 import xml.etree.ElementTree as ET
 
 from filelock import FileLock
 import numpy as np
 import rasterio
 
-# 环境变量允许换机器或试验目录；路径不属于模型的数值预处理参数。
-GPT_PATH = Path(os.environ.get('SNAP_GPT', r'D:\SNAP\esa-snap\bin\gpt.exe'))
-CACHE_DIR = Path(os.environ.get('SNAP_SPECKLE_CACHE', r'I:\水体数据\snap_lee_cache'))
+# 机器路径由image_process入口读取YAML后传入；底层没有隐式路径默认值。
+GPT_PATH = None
+CACHE_DIR = None
+WORK_DIR = None
 GPT_THREADS = 4
 GPT_TILE_CACHE = '512M'
 
 
-def configure_paths(gpt_path, cache_dir):
-    """两个入口显式设置工具和缓存位置，不执行任何影像处理。"""
-    global GPT_PATH, CACHE_DIR
-    GPT_PATH, CACHE_DIR = Path(gpt_path), Path(cache_dir)
+def configure_paths(gpt_path, cache_dir, work_dir, *, threads=4, tile_cache='512M'):
+    """只接收执行层的SNAP运行配置，不启动处理、不创建目录。"""
+    global GPT_PATH, CACHE_DIR, WORK_DIR, GPT_THREADS, GPT_TILE_CACHE
+    GPT_PATH, CACHE_DIR, WORK_DIR = Path(gpt_path), Path(cache_dir), Path(work_dir)
+    GPT_THREADS, GPT_TILE_CACHE = int(threads), str(tile_cache)
 
 
 @lru_cache(maxsize=4)
@@ -35,7 +38,7 @@ def snap_runtime(gpt_path):
     """记录实际计算模块的版本和指纹，升级SNAP后不复用旧统计量/滤波缓存。"""
     executable = Path(gpt_path)
     if not executable.is_file():
-        raise FileNotFoundError(f'未找到SNAP GPT：{executable}；请设置SNAP_GPT')
+        raise FileNotFoundError(f'未找到SNAP GPT：{executable}；请检查configs/image_process.yaml中的SNAP_GPT_PATH')
     home = executable.parent.parent
     modules = [home/'snap/modules/org-esa-snap-snap-core.jar',
                home/'microwavetbx/modules/eu-esa-microwavetbx-sar-op-sar-processing.jar']
@@ -99,10 +102,19 @@ class SnapSpeckleFilter:
                 # 发布新影像之前移除旧完成标记；失败时保留日志，下一次重新处理本景。
                 record.unlink(missing_ok=True)
                 with FileLock(str(CACHE_DIR/'gpt.lock')):
-                    with TemporaryDirectory(prefix='work_', dir=folder) as temporary:
+                    # 中间影像放SSD；完成后跨盘复制到I盘临时文件，再在同盘原子发布。
+                    # 工作目录不进入数值配置/缓存键，历史完成景仍可直接复用。
+                    WORK_DIR.mkdir(parents=True, exist_ok=True)
+                    with TemporaryDirectory(prefix='work_', dir=WORK_DIR) as temporary:
                         work = Path(temporary)
-                        self.run(source, bands, work/'filtered.tif', work, folder)
-                        (work/'filtered.tif').replace(output)
+                        timings = self.run(source, bands, work/'filtered.tif', work, folder) or {}
+                        started = perf_counter()
+                        pending_image = folder/'filtered.tif.partial'
+                        shutil.copyfile(work/'filtered.tif', pending_image)
+                        pending_image.replace(output)
+                        timings['cache_publish_seconds'] = round(perf_counter()-started, 3)
+                        (folder/'timings.json').write_text(json.dumps(timings, indent=2), encoding='utf-8')
+                        print(f'SNAP分阶段耗时（秒）：{timings}', flush=True)
                 pending = record.with_suffix('.json.partial')
                 pending.write_text(json.dumps(signature, ensure_ascii=False, indent=2), encoding='utf-8')
                 pending.replace(record)
@@ -111,6 +123,8 @@ class SnapSpeckleFilter:
 
     def run(self, source, bands, output, work, diagnostics):
         """分窗整理有效域→GPT计算→恢复原网格/有效域；只在磁盘临时文件间传数据。"""
+        timings = {}
+        started = perf_counter()
         adapted = work/'input.tif'
         with rasterio.open(source) as src:
             profile = dict(driver='GTiff', width=src.width, height=src.height, count=len(bands),
@@ -127,6 +141,7 @@ class SnapSpeckleFilter:
                         raise ValueError(f'输入值超出Float32功率范围：{source}')
                     dst.write(np.where(good[None], values.data, -9999).astype('float32'), window=window)
 
+        timings['input_preparation_seconds'] = round(perf_counter()-started, 3)
         graph_path, raw_output = diagnostics/'graph.xml', work/'snap_output.tif'
         self.write_graph(graph_path, adapted, raw_output, len(bands))
         userdir = CACHE_DIR/'snap_userdir'
@@ -135,13 +150,16 @@ class SnapSpeckleFilter:
                    '-Dsnap.userdir=' + str(userdir)]
         # 将Java输出写入日志，报错保留原始原因；不退回旧Lee继续训练。
         log = diagnostics/'gpt.log'
+        started = perf_counter()
         with log.open('w', encoding='utf-8') as stream:
             completed = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT,
                                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        timings['gpt_seconds'] = round(perf_counter()-started, 3)
         if completed.returncode:
             raise RuntimeError(f'SNAP GPT失败，退出码{completed.returncode}；查看 {log}')
 
         # SNAP可能改变NoData标记；用原有效域恢复，合法0值仍有效，标签网格不变。
+        started = perf_counter()
         with rasterio.open(adapted) as original, rasterio.open(raw_output) as filtered:
             if filtered.shape != original.shape or filtered.count != len(bands):
                 raise ValueError('SNAP输出尺寸/波段数与输入不一致')
@@ -160,6 +178,9 @@ class SnapSpeckleFilter:
                                 speckle='SNAP GPT Lee', source=str(source))
                 for b in range(1, len(bands)+1):
                     dst.set_band_unit(b, self.config['input_domain'])
+
+        timings['restore_mask_and_compress_seconds'] = round(perf_counter()-started, 3)
+        return timings
 
     def write_graph(self, path, source, output, count):
         """图中显式平方/开方；输入为功率时保持功率，不做dB或辐射校正。"""

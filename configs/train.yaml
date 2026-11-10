@@ -1,0 +1,144 @@
+# 本文件为唯一参数来源；修改后重新启动对应脚本。null表示关闭/未指定。
+# RESUME_CHECKPOINT保留当前续跑点；新实验设null，并设置独立OUTPUT_DIR。
+
+# 所有可修改的文件/目录路径；Windows路径不使用双引号，避免反斜杠转义。
+paths:
+  RESUME_CHECKPOINT: E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_bc_scenes\20261109_203148_859948\train_end.pth
+  IMAGE_DIR: I:\水体数据\processed_scenes\normalized\images
+  LABEL_DIR: I:\水体数据\processed_scenes\normalized\labels
+  # 多个目录依次添加；只有处理协议和归一化统计一致时才能合并。
+  MANIFEST_PATHS:
+  - I:\水体数据\processed_scenes\normalized\split_manifest.csv
+  OUTPUT_ROOT: E:\Code_projects\sar_water_extraction\outputs
+  OUTPUT_DIR: E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_bc_scenes_overlap
+  WINDOW_CACHE_DIR: E:\Code_projects\sar_water_extraction\data_cache\bc_scenes
+# 执行模式与批次/实验输出。
+run:
+  # deeplabv3、uafnet、uanet、unet、pvt、resnet50。
+  METHOD: deeplabv3
+  RUN_DIRECTORY_FORMAT: '%Y%m%d_%H%M%S_%f'
+  RESULT_FILES:
+    metrics: metrics.csv
+    sampling: sampling.csv
+    sampling_groups: sampling_groups.csv
+    split: split_manifest.csv
+    labels: label_revision.json
+    error: training_error.log
+    last: last.pth
+    train_end: train_end.pth
+    best: best.pth
+    best_f1: best_f1.pth
+    best_balanced: best_balanced_accuracy.pth
+    abnormal: abnormal.pth
+    features: features
+    val_scenes: val_scenes_epoch_{epoch:03d}.csv
+
+# 输入通道与整景窗口；不改变固定train/val划分。
+data:
+  # 单极化改为 ("VV",)，不会自动生成缺失极化。
+  POLARIZATIONS:
+  - VV
+  POLARIZATION_BANDS:
+    VV: 1
+  # 仅无固定清单的旧数据/合成测试使用。
+  VAL_RATIO: 0.2
+  # null 使用全部有效样本；小整数用于试跑。
+  MAX_SAMPLES: null
+  # 旧DFC实验可明确设为patch，才使用旧数据集。
+  DATA_LAYOUT: full_scene
+  SCENE_OPTIONS:
+    window_size: 1024
+    halo: 128
+    normalization_windows: 2
+    max_open_scenes: 4
+    windows_per_epoch: 4096
+    num_workers: 2
+
+# 网络结构；只使用选中METHOD的参数。
+model:
+  # 从本地缓存的ImageNet权重初始化编码器；解码器重新初始化。
+  PRETRAINED: true
+  DEEPLAB_BACKBONE: pvt_v2_b2.in1k
+  DEEPLAB_DECODER_CHANNELS: 256
+  DEEPLAB_LOW_LEVEL_CHANNELS: 48
+  # PVT 最深特征步长32；不是原论文步长16的配置。
+  DEEPLAB_ASPP_RATES:
+  - 3
+  - 6
+  - 9
+  DEEPLAB_DROPOUT: 0.1
+  # U-Net。
+  BASE_CHANNELS: 32
+  # PVT简单头、ResNet、UANet/UAFNet。
+  DECODER_CHANNELS: 32
+  # 仅 UANet 分阶段使用。
+  STAGE: uafm
+  UAFNET_BACKBONE: pvt_v2_b2.in1k
+  UAFNET_FINAL_RESIDUAL: true
+  # null：固定原空洞率。
+  UAFNET_MBDC_DILATIONS: null
+  UAFNET_HIGH_RESOLUTION_REFINEMENT: false
+  # uafm 或 unetpp。
+  UAFNET_REFINEMENT_DECODER: uafm
+
+# 损失、优化、采样与训练周期。
+training:
+  # 限制主进程CPU线程，避免模型初始化/小算子过度并行。
+  CPU_THREADS: 4
+  BATCH_SIZE: 2
+  EPOCHS: 20
+  LEARNING_RATE: 0.0001
+  SEED: 42
+  # deeplabv3/uafnet：bce 或 bce_dice；其余双类别方法用 ce。
+  LOSS_NAME: bce
+  # 以下两项仅 bce_dice 使用。
+  BCE_WEIGHT: 1.0
+  # LOSS_NAME="bce"时不参与损失。
+  DICE_WEIGHT: 1.0
+  # none、train_pixels（原基线）、train_pixels_sqrt（本次对照）。
+  CLASS_WEIGHT_MODE: train_pixels_sqrt
+  OPTIMIZER_NAME: adamw
+  WEIGHT_DECAY: 0.01
+  COSINE_SCHEDULE: true
+  # 随机90度旋转和水平翻转。
+  TRAIN_AUGMENTATION: true
+  # 仅用于日志提示，不参与损失或选模。
+  ABNORMAL_F1_THRESHOLD: 0.001
+  # 本轮用固定种子的随机窗口抽样，与类别权重配合；先关闭困难重采样。
+  SAMPLING: random
+  HARD_WARMUP_EPOCHS: 2
+  HARD_SAMPLE_RATIO: 0.5
+  HARD_POOL_RATIO: 0.25
+  # 仅 hybrid_hard：困难池中少水体样本的补充比例。
+  LOW_WATER_POOL_RATIO: 0.2
+  WATER_GROUP_NAMES:
+  - 无水体
+  - 水体≤1%
+  - 水体1%–10%
+  - 水体10%–50%
+  - 水体>50%
+  # UAFNet：粗预测、两级辅助、最终头。
+  HEAD_LOSS_WEIGHTS:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+
+# 质量评价、可视化与中间特征输出。
+quality:
+  # 直接复用本轮val预测，生成各景概览与训练曲线；不额外推理。
+  SAVE_VALIDATION_FIGURES: true
+  INTERVAL: 1  # 每几轮输出；第一轮和最后一轮也输出。
+  MAX_SCENES: null  # null输出全部验证景；仅限制图件，不限制精度统计。
+  PREVIEW_MAX_SIDE: 1200  # PNG概览最长边；标题指标仍按原分辨率统计。
+  SAVE_FEATURE_MAPS: false  # 与预测质量图不同，默认不输出中间网络特征。
+  FEATURE_MAP_INTERVAL: 5
+  FEATURE_MAP_SAMPLES: 2
+
+# 仅改变验证/推理，不改训练窗口、损失或优化器。旧检查点迁移到独立新目录。
+# 新目录中断后，将RESUME_CHECKPOINT指向新目录的train_end.pth或last.pth。
+# 1024输入、halo128、core768；stride384使core重叠50%，logits按Hann权重融合后只计分一次。
+validation_inference:
+  stride: 384
+  blend: hann
+  num_workers: 0

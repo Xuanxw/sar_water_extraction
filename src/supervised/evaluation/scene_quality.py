@@ -26,6 +26,30 @@ from supervised.models.checkpoint import load_model
 from supervised.evaluation.boundary_eval import boundary_regions, confusion_counts, BoundaryPointReservoir
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.model_eval import threshold_counts, precision_matches
+from supervised.evaluation.sliding_inference import iter_scene_predictions
+
+
+def legacy_scene_blocks(model, dataset, loader, mean, std, normalized, device, amp):
+    """旧中心区直拼协议，保留为同权重诊断对照；输出字段与融合协议相同。"""
+    halo = dataset.halo
+    for batch in loader:
+        valid = batch['valid_mask'].to(device)
+        image = batch['image'].to(device)
+        if not normalized:
+            image = (image-mean)/std
+        image = image.masked_fill(~valid[:, None], 0)
+        with torch.autocast(device_type=device.type, enabled=amp):
+            prediction = model(image)
+            logits = prediction[-1] if isinstance(prediction, (list, tuple)) else prediction
+        scores = logits[:, 0].float() if logits.shape[1] == 1 else logits[:, 1].float()-logits[:, 0].float()
+        if not torch.isfinite(scores).all():
+            raise FloatingPointError(f'非有限模型输出：{dataset.image_path}')
+        for index, (top, left, height, width) in enumerate(batch['window'].tolist()):
+            ys, xs = slice(halo, halo+height), slice(halo, halo+width)
+            label = batch['label'][index].numpy()
+            yield dict(window=(top, left, height, width), scores=scores[index, ys, xs].cpu().numpy(),
+                       label=label[ys, xs], valid_mask=batch['valid_mask'][index, ys, xs].numpy(),
+                       label_context=label, core_slices=(ys, xs))
 
 
 def write_rows(path, rows):
@@ -194,7 +218,7 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
                       save_probabilities=True, save_visuals=True, batch_size=None,
                       use_amp=None, opening_radius=0, closing_radius=0,
                       precision_targets=(.5,.7,.8,.9), recall_targets=(.8,.85,.9),
-                      scene_limit=None, num_workers=0, boundary_points=256):
+                      scene_limit=None, num_workers=0, boundary_points=256, inference_options=None):
     """使用保存的val景；扫描只改变判别阈值，模型、划分和归一化完全固定。"""
     checkpoint_path = Path(checkpoint_path)
     c = torch.load(checkpoint_path,map_location='cpu',weights_only=True,mmap=True)
@@ -223,6 +247,12 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
         raise ValueError('概率阈值必须在0和1之间')
     radii = tuple(boundary_radii)
     halo, size = c['window_halo'], c['window_size']
+    # 新检查点复用验证时的融合协议；传入空字典可显式做旧中心区直拼对照。
+    inference_options = dict(c.get('validation_inference') or {}) if inference_options is None else dict(inference_options)
+    use_blending = bool(inference_options)
+    if use_blending:
+        inference_options = dict(stride=int(inference_options.get('stride') or (size-2*halo)//2),
+                                 blend=inference_options.get('blend', 'gaussian'))
     if any(r<=0 or r>halo for r in radii) or min(opening_radius,closing_radius)<0 or 2*(opening_radius+closing_radius)>halo:
         raise ValueError('边界半径/形态学邻域不能超过上下文宽度')
     output = Path(output_dir) if output_dir else checkpoint_path.parent/'quality'/datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -240,6 +270,8 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
                 save_visuals=save_visuals,batch_size=batch_size or c['batch_size'],
                 use_amp=c.get('amp_enabled',False) if use_amp is None else use_amp,scene_limit=scene_limit,
                 window_size=size,halo=halo,boundary_points=boundary_points, version=2)
+    if use_blending:
+        config.update(inference_options=inference_options, inference_protocol='overlap_logit_blend_v1', version=3)
     encoded=json.dumps(config,ensure_ascii=False,indent=2)
     config_path=output/'configuration.json'
     if config_path.exists() and config_path.read_text(encoding='utf-8') != encoded:
@@ -253,8 +285,13 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
     std=c['std'].to(device).clamp_min(1e-6).view(1,-1,1,1)
     amp=config['use_amp'] and device.type=='cuda'
     batch_size=config['batch_size']
-    # 记录原验证计数，0.5的复评应与原轮次一致；差异不隐藏。
+    # 只有推理协议一致时，0.5复评才应与原轮次一致。
     expected=c.get('phase_metrics',{}).get('val',{})
+    checkpoint_options = c.get('validation_inference') or {}
+    if checkpoint_options:
+        checkpoint_options = dict(stride=int(checkpoint_options.get('stride') or (size-2*halo)//2),
+                                  blend=checkpoint_options.get('blend', 'gaussian'))
+    same_inference_protocol = checkpoint_options == inference_options
     for number,r in enumerate(scenes,1):
         name=r['scene_id']; marker=output/'counts'/(name+'.npz')
         if marker.exists():
@@ -272,7 +309,15 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
         post_bounds=np.zeros((len(radii),2,4),np.int64)
         reservoirs={(i,j):BoundaryPointReservoir(name,radius,region,boundary_points)
             for i,radius in enumerate(radii) for j,region in enumerate(('inner','outer'))}
-        loader=DataLoader(ds,batch_size=batch_size,shuffle=False,num_workers=num_workers,pin_memory=amp)
+        if use_blending:
+            blocks = iter_scene_predictions(model, ds.image_path, ds.label_path, bands=c['bands'],
+                window_size=size, halo=halo, mean=c['mean'], std=c['std'],
+                inputs_normalized=c.get('inputs_normalized',False), device=device, use_amp=amp,
+                batch_size=batch_size, num_workers=num_workers, speckle=c.get('speckle'), **inference_options)
+        else:
+            loader=DataLoader(ds,batch_size=batch_size,shuffle=False,num_workers=num_workers,pin_memory=amp,
+                              generator=torch.Generator().manual_seed(0))
+            blocks = legacy_scene_blocks(model, ds, loader, mean, std, c.get('inputs_normalized',False), device, amp)
         profile=ds.profile.copy()
         profile.update(driver='GTiff',count=1,tiled=True,blockxsize=256,blockysize=256,
                        compress='deflate',BIGTIFF='IF_SAFER')
@@ -286,51 +331,36 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
                     writers[kind]=stack.enter_context(rasterio.open(output/kind/(name+'.tif'),'w',**p))
                     writers[kind].update_tags(water_value=1,non_water_value=0,threshold=threshold,
                                               source_checkpoint=str(checkpoint_path),epoch=c['epoch'])
-                for step,batch in enumerate(loader,1):
-                    valid=batch['valid_mask'].to(device)
-                    image=batch['image'].to(device)
-                    if not c.get('inputs_normalized',False):
-                        image=(image-mean)/std
-                    image=image.masked_fill(~valid[:,None],0)
-                    with torch.autocast(device_type=device.type,enabled=amp):
-                        prediction=model(image)
-                        logits=prediction[-1] if isinstance(prediction,(list,tuple)) else prediction
-                    scores=logits[:,0].float() if logits.shape[1]==1 else logits[:,1].float()-logits[:,0].float()
-                    if not torch.isfinite(scores).all():
-                        raise FloatingPointError(f'非有限模型输出：{name}，batch={step}')
-                    for j,coords in enumerate(batch['window'].tolist()):
-                        top,left,h,w=coords
-                        ys,xs=slice(halo,halo+h),slice(halo,halo+w)
-                        y=batch['label'][j].numpy()
-                        good=batch['valid_mask'][j].numpy()
-                        label=torch.as_tensor(y[ys,xs].copy(),device=device)
-                        core_score=scores[j,ys,xs]
-                        counts+=threshold_counts(core_score,label,thresholds)
-                        score_array=scores[j].cpu().numpy()
-                        raw_full=(score_array>=float(np.log(threshold/(1-threshold)))) & good
-                        post_full=raw_full  # 需要形态学时，在raw全景写完后另做有邻域的分块修正。
-                        post_counts+=confusion_counts(y[ys,xs],post_full[ys,xs],y[ys,xs]>=0)
-                        # 纯单类别窗口不可能有水陆边界，跳过EDT与空GPU统计；整体指标仍完整累计。
-                        regions=boundary_regions(y,y>=0,radii) if radii and (y==1).any() and (y==0).any() else {}
-                        for ri,radius in (enumerate(radii) if regions else ()):
-                            for si,region in enumerate(('inner','outer')):
-                                mask=regions[radius][region][ys,xs]
-                                if not mask.any():
-                                    continue
-                                target=label.masked_fill(~torch.as_tensor(mask,device=device),-1)
-                                bounds[ri,si]+=threshold_counts(core_score,target,thresholds)
-                                post_bounds[ri,si]+=confusion_counts(y[ys,xs],post_full[ys,xs],mask)
-                                reservoirs[ri,si].update(mask,y[ys,xs],score_array[ys,xs],
-                                    raw_full[ys,xs],post_full[ys,xs],top,left)
-                        win=Window(left,top,w,h)
-                        for kind,mask in (('raw',raw_full),('postprocessed',post_full)):
-                            writers[kind].write(np.where(good[ys,xs],mask[ys,xs],255).astype('uint8'),1,window=win)
-                        if save_probabilities:
-                            prob=core_score.double().sigmoid().cpu().numpy().astype('float32')
-                            # 保存值仅有float32精度；扫描直接用logit，不受概率文件量化影响。
-                            writers['probability'].write(np.where(good[ys,xs],prob,-1).astype('float32'),1,window=win)
+                for step, block in enumerate(blocks, 1):
+                    top,left,h,w=block['window']
+                    ys,xs=block['core_slices']
+                    y=block['label_context']
+                    truth, good = block['label'], block['valid_mask']
+                    label=torch.as_tensor(truth.copy(),device=device)
+                    score_array=block['scores']
+                    core_score=torch.as_tensor(score_array,device=device)
+                    counts+=threshold_counts(core_score,label,thresholds)
+                    raw=(score_array>=float(np.log(threshold/(1-threshold)))) & good
+                    post_counts+=confusion_counts(truth,raw,truth>=0)
+                    # 融合后再计量，重叠输入不能重复增加分母；边界标签保留相邻块上下文。
+                    regions=boundary_regions(y,y>=0,radii) if radii and (y==1).any() and (y==0).any() else {}
+                    for ri,radius in (enumerate(radii) if regions else ()):
+                        for si,region in enumerate(('inner','outer')):
+                            mask=regions[radius][region][ys,xs]
+                            if not mask.any():
+                                continue
+                            target=label.masked_fill(~torch.as_tensor(mask,device=device),-1)
+                            bounds[ri,si]+=threshold_counts(core_score,target,thresholds)
+                            post_bounds[ri,si]+=confusion_counts(truth,raw,mask)
+                            reservoirs[ri,si].update(mask,truth,score_array,raw,raw,top,left)
+                    win=Window(left,top,w,h)
+                    for kind in ('raw','postprocessed'):
+                        writers[kind].write(np.where(good,raw,255).astype('uint8'),1,window=win)
+                    if save_probabilities:
+                        prob=core_score.double().sigmoid().cpu().numpy().astype('float32')
+                        writers['probability'].write(np.where(good,prob,-1).astype('float32'),1,window=win)
                     if step%50==0:
-                        print(f'  {name}：{step}/{len(loader)}批',flush=True)
+                        print(f'  {name}：已写入{step}个最终输出块',flush=True)
             if opening_radius or closing_radius:
                 post_counts,post_bounds=apply_scene_morphology(output/'raw'/(name+'.tif'),
                     ds.label_path,output/'postprocessed'/(name+'.tif'),ds.windows,radii,opening_radius,closing_radius)
@@ -359,15 +389,20 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
                                     post=post_counts,post_boundary=post_bounds,point_counts=point_counts,post_point_counts=post_point_counts)
             pending.replace(marker)  # 只有所有栅格与图像写完才标记完成。
         finally:
+            blocks.close()
             ds.close()
         overall=summarize(output,scenes,thresholds,radii,precision_targets,recall_targets)
         print(f'已保存 {name}；Post F1={metrics_from_counts(post_counts)["f1"]:.4f}',flush=True)
     overall=summarize(output,scenes,thresholds,radii,precision_targets,recall_targets)
     original=next((r for r in overall if r['threshold']==.5),None)
-    if original and expected and scene_limit is None:
+    if original and expected and scene_limit is None and same_inference_protocol:
         checks=[dict(metric=k,training=int(expected[k]),quality=int(original[k]),
                      delta=int(original[k])-int(expected[k])) for k in ('tn','fp','fn','tp')]
         write_rows(output/'training_parity.csv',checks)
         print('与原验证0.5计数差：',{r['metric']:r['delta'] for r in checks},flush=True)
+    elif expected and not same_inference_protocol:
+        (output/'training_parity_not_applicable.txt').write_text(
+            '推理协议与检查点验证不同，本结果不能要求与原验证计数一致。\n'
+            f'checkpoint: {checkpoint_options}\nquality: {inference_options}\n',encoding='utf-8')
     print(f'整景质量完成：{output}',flush=True)
     return output

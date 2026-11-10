@@ -93,7 +93,9 @@ class NestedDecoderTests(unittest.TestCase):
     def test_factory_changes_only_refinement_configuration(self):
         choices = []
         for decoder in ("uafm", "unetpp"):
-            with patch.object(train, "METHOD", "uafnet"), \
+            with patch.multiple(train, OUTPUT_DIR=None, SAMPLING="hard",
+                                POLARIZATIONS=("VV", "VH"), POLARIZATION_BANDS={"VV": 1, "VH": 2}), \
+                 patch.object(train, "METHOD", "uafnet"), \
                  patch.object(train, "UAFNET_REFINEMENT_DECODER", decoder), \
                  patch.object(train, "WaterSegmentationTrainer") as factory:
                 train.create_trainer()
@@ -135,11 +137,12 @@ class NestedDecoderTests(unittest.TestCase):
                 writer.writerows(rows)
             with patch.multiple(train, METHOD="uafnet", UAFNET_REFINEMENT_DECODER="unetpp", IMAGE_DIR=root / "data/images", LABEL_DIR=root / "data/labels",
                                 OUTPUT_DIR=root / "runs", EPOCHS=3, PRETRAINED=False,
-                                RUN_MODE="train_postprocess", POSTPROCESS_OPTIONS=dict(
-                                    threshold=.5, use_landcover=False, save_masks=True, save_visuals=False)), \
+                                RESUME_CHECKPOINT=None, DATA_LAYOUT="patch", CLASS_WEIGHT_MODE="none",
+                                POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2},
+                                VALIDATION_QUALITY_OPTIONS=dict(enabled=False)), \
                  patch.object(torch.cuda, "is_available", return_value=False):
                 train.main()
-            run = next((root / "runs_grouped").iterdir())
+            run = next((root / "runs").iterdir())
             checkpoint = torch.load(run / "best_f1.pth", weights_only=True)
             self.assertEqual(checkpoint["model_name"], "pvt_unetpp_refinement")
             self.assertEqual(checkpoint["model_kwargs"]["refinement_decoder"], "unetpp")
@@ -151,7 +154,11 @@ class NestedDecoderTests(unittest.TestCase):
                 metrics = list(csv.DictReader(stream))
             self.assertEqual(len(metrics), 6)
             self.assertTrue(all(float(row["ignored_pixels"]) > 0 for row in metrics))
-            quality = next((run / "quality").iterdir())
+            # 训练入口不隐式后处理；使用已保存最佳模型显式复评。
+            from supervised.evaluation.postprocess import run_postprocess
+            quality = run / "postprocess" / "test" / "quality"
+            run_postprocess([run / "best_f1.pth"],output_dir=quality,threshold=.5,
+                            use_landcover=False,save_masks=True,save_visuals=False)
             with (quality / "metrics.csv").open(encoding="utf-8-sig") as stream:
                 raw = next(row for row in csv.DictReader(stream) if row["result"] == "ensemble")
             for key in ("tn","fp","fn","tp"):

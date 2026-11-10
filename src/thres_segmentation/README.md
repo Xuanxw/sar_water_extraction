@@ -7,19 +7,32 @@
 ## 当前BC整景入口
 
 直接运行 `python E:\Code_projects\sar_water_extraction\src\thres_segmentation\main.py`。
-顶部默认`DATA_LAYOUT="full_scene"`，输入`I:\水体数据\prepared_scenes\images\val`及对应labels、split_manifest。只读取清单active=1的val，单VV band 1，关闭土地覆盖。`SCENE_PREFIX=None`包含BC2/BC3；只处理BC3可设`"BC3-"`。这会改变评价范围，模型对照时必须使用相同名单。
+顶部默认`DATA_LAYOUT="full_scene"`，从`configs/image_process.yaml`的`paths.NORMALIZED_ROOT`读取`images/val`及对应labels、split_manifest。只读取清单active=1的val，单VV band 1，关闭土地覆盖。`SCENE_PREFIX=None`包含BC2/BC3；只处理BC3可设`"BC3-"`。这会改变评价范围，模型对照时必须使用相同名单。
 
 `source_image`指向原始GeoTIFF或ZIP，`metadata.py`读取原始栅格头和严格同名XML。ZIP不整包解压；不猜用目录第一份XML。`metadata.csv`记录原始路径、原始CRS/变换/网格间距、标签字段的原文值及XML来源/哈希；`metadata/`保留XML副本。缺失角度保持空值，不补默认角度。XML中的pixelValue、雷达斜距/方位间距可能描述上游产品，不能覆盖当前GeoTIFF的实数类型和地理编码网格；不据此自动转dB或进行辐射校正。
 
 当前纯SAR阈值不使用航向角/入射角进行修正。读取这些字段是为保存准确的来源，**不代表已启用DEM雷达阴影/叠掩处理**。准备影像必须与原始GeoTIFF网格一致，标签也必须同网格。
 
-整景使用三遍有界窗口扫描：原始有效像素统计→带halo的Lee滤波及全景精确百分位→再次滤波并按同一阈值逐块写mask。`BLOCK_SIZE=1024`控制内存，不生成小切片；不会每块独立估计噪声、拉伸或阈值。有效0保留，未知标签255不参与精度，但影像有效的未知区域仍输出预测。
+BC整景直接复用image_process生成的成果：ORG幅度平方→SNAP Lee功率域滤波→恢复幅度→使用train统计做z-score。这里不再次滤波、转dB或做逐景P1/P99拉伸。阈值阶段两遍分块读取：汇集全景有效z-score求精确百分位→按统一阈值逐块写mask。`BLOCK_SIZE=1024`控制内存，不生成小切片；不会每块独立估计噪声、拉伸或阈值。负z-score及有效0保留，未知标签255不参与精度，但影像有效的未知区域仍输出预测。
 
 精确百分位通过临时磁盘映射缓冲原地选择，峰值磁盘约`8×单景有效像素数`字节（十亿像素约7.45GiB）；使用`CACHE_DIR`，正常完成或Python异常退出时清理。强制杀进程可能留下临时目录。此方案增加I/O以避免把多份整景浮点数组加载到内存；输出仍是原网格GeoTIFF，不缩放输入。当前按场景依次执行，默认全部val，不自动启动批处理。
 
 `figures/`是最长边`PREVIEW_SIZE=1200`的最近邻缩略图，小水域可能在预览中消失；图中文字、整体`metrics.csv`和逐景`per_image.csv`均来自全分辨率计数。无标签区域不作为非水体评价。`boundary/metrics.csv`与`boundary/per_image.csv`为原生像素1/3/5半径内的精确计数，窗口halo避免块边界伪岸线。整景模式暂不输出旧切片流程的定额采样点和边界PNG，避免把每窗口定额当成每整景定额；边界评价使用全区域计数。
 
-旧DFC使用`DATA_LAYOUT="patch"`，恢复DFC路径、VV/VH和需要的土地覆盖设置；下文DFC说明及历史记录仅适用于该模式。
+`main.py`的dataset入口统一要求已完成的离线归一化数据，patch分派也使用同一口径。下文旧DFC/GUI说明属于历史流程；历史算法通过`ThresholdSegmenter(preprocessing="legacy")`保留，不能用于已归一化输入。GUI仍为历史GIS流程，未接入新的BC离线链路。
+
+
+### 与训练共享预处理的执行顺序
+
+1. 在 `configs/image_process.yaml` 中设置 `run.MODE: preprocess`，当前未校正ORG使用 `ENABLE_CALIBRATION: false`、`ENABLE_FILTER: true`、`INPUT_DOMAIN: amplitude`、`FILTER_INPUT_STAGE: org`、`NORMALIZE_INPUT_STAGE: filtered`，手动运行 `image_process.py`。
+2. 全部完成后运行 `main.py`。如果离线成果已经完成，直接执行此步即可；阈值入口不启动SNAP，不重复生成成果。
+3. `WATER_PERCENT=10` 仍表示整景暗值侧第10百分位，不是0.1水体概率。阈值现在以z-score表示，可以为负数，不应限制到0～1。
+
+均值/标准差来自训练集，验证集只复用；分位阈值本身按当前影像的有效像素计算，这是传统算法的自适应决策，不是重新归一化。有限0和负值参与，nodata/NaN排除。只有`active=1`的val参与评价，标签不参与阈值计算。
+
+输出 `input_preprocessing.json` 备份实际成果的处理记录，`methods.csv`/`per_image.csv`明确阈值数值域；`source_image`仍用于寻找原始XML。PNG的P2/P98拉伸仅用于显示，不进入阈值计算。未完成归一化或错误地对已归一化数据使用legacy模式会报错。
+
+z-score在标准差为正时是单调线性变换，通常不会改变百分位排序；预期差异主要来自统一SNAP滤波及取消裁剪拉伸，不能仅凭换用归一化就认定精度提高。
 
 ## 1. 文件与调用关系
 
@@ -27,7 +40,7 @@
 src/thres_segmentation/main.py
   ├─ MODE="download" → auxiliary_data.py：辅助下载、缓存、逐景裁剪
   ├─ MODE="dataset" → 可选辅助准备 → scene_pipeline.py / pipeline.py：分割、分析、保存
-  │    ├─ threshold.py：Lee 近似滤波与百分位分割
+  │    ├─ threshold.py：离线z-score百分位分割；legacy保留旧Lee近似
   │    ├─ evaluation/landcover.py：可选土地覆盖补水
   │    ├─ evaluation/metrics.py：有标签时统计整体像素精度
   │    └─ evaluation/boundary_eval.py：有标签时统计缓冲带和固定点

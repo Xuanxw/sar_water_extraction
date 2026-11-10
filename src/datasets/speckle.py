@@ -19,6 +19,8 @@ class SpeckleFilter:
             raise ValueError('Lee 窗口应为不小于3的奇数，ENL应为正数')
         self.config = dict(method=method, input_domain=domain, window_size=size, enl=enl)
         from datasets.snap_preprocess import GPT_PATH, SnapSpeckleFilter, snap_runtime
+        if GPT_PATH is None:
+            raise ValueError("SNAP路径尚未配置；请通过image_process入口读取YAML后运行滤波")
         runtime = snap_runtime(str(GPT_PATH))
         if 'snap_runtime' in config and config['snap_runtime'] != runtime:
             raise ValueError('检查点的SNAP版本与本机不同，请使用原版本复评/续训')

@@ -24,7 +24,9 @@ class BCThresholdTests(unittest.TestCase):
         with patch("thres_segmentation.scene_pipeline.run_scene_segmentation", return_value={}) as run:
             main.main()
         self.assertEqual(run.call_args.kwargs['bands'], {'VV':1})
-        self.assertEqual(run.call_args.kwargs['threshold_options']['stretch'],(1,99))
+        self.assertEqual(run.call_args.kwargs['threshold_options']['preprocessing'],'offline_normalized')
+        self.assertNotIn('stretch',run.call_args.kwargs['threshold_options'])
+        self.assertEqual(main.IMAGE_DIR,main.PREPROCESSING['paths']['NORMALIZED_ROOT']/'images/val')
         self.assertEqual(run.call_args.kwargs['image_dir'], main.SPLIT_MANIFEST.parent/'images/val')
 
     def test_disk_percentiles_match_numpy_with_ties(self):

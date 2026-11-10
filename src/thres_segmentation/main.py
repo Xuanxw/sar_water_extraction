@@ -9,11 +9,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # ---------- 1. 运行模式与输入数据 ----------
 MODE = "dataset"  # dataset：准备辅助数据后处理；download：只准备辅助数据；gui：基础界面。
 DATA_LAYOUT = "full_scene"  # BC整景使用full_scene；旧DFC切片用patch。
-IMAGE_DIR = Path(r"I:\水体数据\prepared_scenes\images\val")
-LABEL_DIR = Path(r"I:\水体数据\prepared_scenes\labels\val")  # 无标签时设None。
-SPLIT_MANIFEST = Path(r"I:\水体数据\prepared_scenes\split_manifest.csv")
-# BC整景需要清单，仅处理active=1的val；旧patch模式的外部目录可设None。
-BANDS = {"VV": 1}  # 波段编号从1开始；BC单VV不读取或伪造VH。
+# 与image_process共用成果根目录，不在这里维护另一套滤波/归一化参数。
+from configuration import load_yaml
+PREPROCESS_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "image_process.yaml"
+PREPROCESSING = load_yaml(PREPROCESS_CONFIG)
+NORMALIZED_ROOT = PREPROCESSING["paths"]["NORMALIZED_ROOT"]
+IMAGE_DIR = NORMALIZED_ROOT / "images/val"
+LABEL_DIR = NORMALIZED_ROOT / "labels/val"  # 无标签时设None。
+SPLIT_MANIFEST = NORMALIZED_ROOT / "split_manifest.csv"
+BANDS = {"VV": 1}  # 离线成果中的波段编号；单VV是第1波段。
 
 # 整景模式从清单source_image读取原始GeoTIFF/ZIP和同名XML，不在prepared目录猜测meta。
 SCENE_PREFIX = None  # None处理全部BC验证景；只处理BC3时设"BC3-"。
@@ -39,11 +43,9 @@ AUXILIARY_CACHE_DIR = Path(r'E:\Code_projects\sar_water_extraction\data_cache\au
 # ---------- 2. 传统阈值与预处理 ----------
 WATER_PERCENT = 10  # 逐图取暗值侧10%分位阈值，不是模型概率，不根据标签自动调参。
 THRESHOLD_MODE = "bottom"  # bottom提取暗值侧；top提取亮值侧。
-LEE_WINDOW = 5  # Lee滤波窗口边长；1表示关闭滤波。
-NOISE_RATIO = 0.12  # 用全图方差的此比例估计噪声方差。
-STRETCH = (1, 99)  # 过滤后全景P1/P99拉伸；强度不是水体概率。
-POWER_TO_DB = False  # 仅已确认是线性功率时开启10*log10转换，已是dB时不要开启。
-# 当前方法是Lee滤波+百分位阈值，不是Otsu。
+# 预处理已由image_process完成：ORG幅度平方→SNAP Lee→恢复幅度→train统计z-score。
+# 此处不再次滤波/转dB/P1-P99拉伸；负z-score和合法0均保留。
+# WATER_PERCENT仍是整景暗/亮像元百分位，不是概率阈值；结果不保证等于真实水体占比。
 
 # ---------- 3. 辅助修正、面积、历史变化与几何水深 ----------
 USE_LANDCOVER = False  # BC只有VV，没有DFC第5波段；整景入口当前不做土地覆盖修正。
@@ -76,6 +78,7 @@ MAX_VISUALIZATIONS = None  # None全部出图；0不出图；整数只限制出�
 def main():
     """将顶部配置传入独立处理流程；标签仅用于评价，不参与阈值选择。"""
     if MODE == "gui":
+        print("GUI仍为历史独立GIS流程；与image_process统一的BC处理请使用MODE=dataset。", flush=True)
         from thres_segmentation.gui import run_gui
         return run_gui()
     if MODE not in ('dataset','download'):
@@ -98,8 +101,8 @@ def main():
 
     output_dir = OUTPUT_DIR if OUTPUT_DIR is not None else OUTPUT_ROOT / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     threshold_options = dict(water_percent=WATER_PERCENT, mode=THRESHOLD_MODE,
-                             lee_window=LEE_WINDOW, noise_ratio=NOISE_RATIO,
-                             stretch=STRETCH, power_to_db=POWER_TO_DB)
+                             preprocessing="offline_normalized")
+    print(f"预处理配置：{PREPROCESS_CONFIG}；直接复用离线归一化成果，不启动SNAP", flush=True)
     print(f"输入：{IMAGE_DIR}\n标签：{LABEL_DIR}\n输出：{output_dir}", flush=True)
     print(f"波段：{BANDS}；出图数量：{'全部' if MAX_VISUALIZATIONS is None else MAX_VISUALIZATIONS}", flush=True)
     if DATA_LAYOUT == "full_scene":

@@ -1,5 +1,6 @@
 """BC整景阈值：分块读写、整景统一百分位、原始元数据与稀疏标签评价。"""
 import csv
+import json
 from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,7 +13,7 @@ from scipy.ndimage import uniform_filter
 
 from thres_segmentation.metadata import read_source_metadata
 from thres_segmentation.pipeline import write_csv, save_figure
-from thres_segmentation.threshold import ThresholdSegmenter
+from thres_segmentation.threshold import ThresholdSegmenter, read_input_preprocessing
 from supervised.evaluation.boundary_eval import boundary_regions, confusion_counts
 from supervised.evaluation.metrics import metrics_from_counts
 
@@ -55,6 +56,7 @@ def disk_percentiles(path, count, percentages):
 
 def filtered_windows(source, band, size, segmenter, median, variance):
     """halo消除块边界滤波接缝，噪声方差和无效填充值使用全景统计量。"""
+    # 离线模式LEE_WINDOW=1，直接读取z-score，不进行任何数值变换。
     halo = segmenter.lee_window//2
     for core in windows(source, size):
         data, valid, crop, _ = read_window(source, band, core, halo)
@@ -75,6 +77,20 @@ def filtered_windows(source, band, size, segmenter, median, variance):
 def scene_threshold(source, band, size, segmenter, scratch):
     """两遍扫描：原始全景统计→Lee后全景分位数；临时值缓冲逐阶段复用。"""
     buffer = Path(scratch)/"valid_values.bin"
+    if segmenter.preprocessing == 'offline_normalized':
+        # 一遍写入有效z-score；全景只计算决策百分位，免去旧Lee的两遍统计。
+        count = 0
+        with buffer.open('wb') as stream:
+            for core in windows(source, size):
+                data, valid, _, _ = read_window(source, band, core)
+                values = data[valid]
+                values.tofile(stream)
+                count += len(values)
+        quantile = segmenter.water_percent if segmenter.mode == 'bottom' else 100-segmenter.water_percent
+        threshold = float(disk_percentiles(buffer, count, [quantile])[0][0])
+        buffer.unlink()
+        print(f"  有效SAR像素={count}；复用离线滤波/z-score，仅计算全景阈值", flush=True)
+        return 0., 0., None, None, threshold
     count, mean, m2 = 0, 0., 0.
     with buffer.open('wb') as stream:
         for core in windows(source, size):
@@ -128,16 +144,19 @@ def run_scene_segmentation(image_dir, label_dir, split_manifest, output_dir, ban
         raise ValueError("Lee窗口需为正奇数，读取窗口和预览边长需为正数")
     if segmenter.mode not in ('bottom','top') or not 0 <= segmenter.water_percent <= 100:
         raise ValueError("阈值模式为bottom/top，百分位比例为0～100")
-    if len(segmenter.stretch)!=2 or not 0 <= segmenter.stretch[0] < segmenter.stretch[1] <= 100:
+    if segmenter.stretch is not None and (len(segmenter.stretch)!=2 or not 0 <= segmenter.stretch[0] < segmenter.stretch[1] <= 100):
         raise ValueError("stretch应为0～100内递增的两个百分位")
     if any(radius <= 0 for radius in boundary_radii):
         raise ValueError("边界半径需要为正数")
+    preprocessing = read_input_preprocessing(split_manifest.parent, segmenter, list(bands.values()))
     output_dir.mkdir(parents=True,exist_ok=False)
+    if preprocessing:
+        (output_dir/"input_preprocessing.json").write_text(json.dumps(preprocessing, ensure_ascii=False, indent=2), encoding="utf-8")
     cache_dir = Path(cache_dir) if cache_dir else output_dir
     cache_dir.mkdir(parents=True,exist_ok=True)
     write_csv(output_dir/'files.csv',records)
     write_csv(output_dir/'methods.csv',[dict(method='threshold_'+name,band=band,parameters=str(vars(segmenter)),
-        input_domain='stored_values', threshold_scope='whole_scene_exact_percentile', block_size=block_size,
+        input_domain='z_score' if preprocessing else 'legacy_stretched_0_1', threshold_scope='whole_scene_exact_percentile', block_size=block_size,
         boundary_radii=str(boundary_radii), preview_size=preview_size, scene_prefix=scene_prefix) for name,band in bands.items()])
     all_counts, all_boundary, rows, boundary_rows, metadata_rows = {}, {}, [], [], []
     print(f"BC整景阈值：{len(records)}景；{bands}；meta沿source_image读取；不使用checkpoint",flush=True)
@@ -168,7 +187,7 @@ def run_scene_segmentation(image_dir, label_dir, split_manifest, output_dir, ban
                 show = max_visualizations is None or index < max_visualizations
                 preview_predictions, image_rows = {}, {}
                 for band_name, band in bands.items():
-                    # 2. 基础预测：全景统计统一阈值，带halo分块滤波/写mask；不按块重新阈值化。
+                    # 2. 基础预测：BC直接对离线z-score求全景阈值；legacy才在块内进行旧滤波。
                     method='threshold_'+band_name
                     # 不复制原始整景，只临时保存一列有效像素值供精确百分位选择；完成后自动清理。
                     scratch=stack.enter_context(TemporaryDirectory(prefix='bc_threshold_',dir=cache_dir))
@@ -182,7 +201,7 @@ def run_scene_segmentation(image_dir, label_dir, split_manifest, output_dir, ban
                     with rasterio.open(mask_path,'w',**profile) as target:
                         target.update_tags(source_image=meta['source_image'], source_xml=meta['source_xml'])
                         for core,data,valid in filtered_windows(source,band,block_size,segmenter,median,variance):
-                            score=np.clip((data-low)/(high-low+1e-6),0,1)
+                            score = data if segmenter.preprocessing == "offline_normalized" else np.clip((data-low)/(high-low+1e-6),0,1)
                             prediction=(score<threshold if segmenter.mode=='bottom' else score>=threshold)&valid
                             target.write(np.where(valid,prediction,255).astype('uint8'),1,window=core)
                             image_count+=int(valid.sum());water_count+=int(prediction.sum())
@@ -205,7 +224,7 @@ def run_scene_segmentation(image_dir, label_dir, split_manifest, output_dir, ban
                     analysis = analyze_water(mask_path, output_dir/'analysis'/method/Path(name).with_suffix(''),
                                              **scene_options)
                     # 4. 评价与输出：统计使用原生像元；阶段2同步累计标签计数以避免重复整景读取。
-                    row=dict(name=name,method=method,decision_threshold=threshold,stretch_low=low,stretch_high=high,
+                    row=dict(name=name,method=method,decision_threshold=threshold,threshold_domain="z_score" if preprocessing else "legacy_stretched_0_1",stretch_low=low,stretch_high=high,
                              image_valid_pixels=image_count,predicted_water_pixels=water_count)
                     row['water_area_m2'] = (analysis['current_water']['m2'] if analysis['current_water'] else None)
                     row['area_status'] = analysis['status']
@@ -229,7 +248,7 @@ def run_scene_segmentation(image_dir, label_dir, split_manifest, output_dir, ban
                         label_data=truth.read(1,out_shape=shape,masked=True,resampling=Resampling.nearest)
                         valid=image_valid & ~np.ma.getmaskarray(label_data)&np.isin(label_data.data,(0,1))
                         label=label_data.data
-                    save_figure(data.filled(0),bands,label,valid,preview_predictions,image_rows,
+                    save_figure(data.filled(0),[f"{b} z-score" if preprocessing else b for b in bands],label,valid,preview_predictions,image_rows,
                                 output_dir/'figures'/Path(name).with_suffix('.png'),image_valid=image_valid)
             write_csv(output_dir/'per_image.csv',rows)
             write_csv(output_dir/'metrics.csv',[dict(method=m,**metrics_from_counts(c)) for m,c in all_counts.items()])

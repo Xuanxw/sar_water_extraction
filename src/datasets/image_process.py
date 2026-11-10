@@ -21,6 +21,7 @@ import xml.etree.ElementTree as ET
 from rasterio.shutil import copy as raster_copy
 
 import fiona
+from filelock import FileLock, Timeout
 import numpy as np
 import rasterio
 from rasterio.enums import MaskFlags
@@ -39,85 +40,82 @@ from datasets import snap_preprocess
 from datasets.speckle import SpeckleFilter
 from supervised.load.sar_scene_dataset import SARSceneDataset
 
-# MODE选择一项任务；preprocess按开关串联校正、滤波与归一化。
-# 原始数据保持不变；训练直接读取NORMALIZED_ROOT下已完成的浮点成果。
+# 参数统一在YAML维护；以下只将配置绑定到现有函数使用的变量。
+from configuration import load_yaml
+CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "image_process.yaml"
+CONFIG = load_yaml(CONFIG_PATH)
 
-# ---------- 入口和绝对路径 ----------
-MODE = "quicklook"  # prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook
-SPLIT_CSV = Path(r"I:\水体数据\水体数据_train_val划分_已确认.csv")
-IMAGE_ROOT = Path(r"I:\水体数据\SAR影像_卫星环境应用中心")
-LABEL_ROOT = Path(r"I:\水体数据\水体提取结果_卫星环境应用中心")
-OUTPUT_DIR = Path(r"I:\水体数据\prepared_scenes")  # 当前整景数据根目录。
-CACHE_DIR = Path(r"I:\水体数据\prepare_cache")  # ZIP逐景展开，单景结束即清理临时影像。
-
-# ---------- 整景读写和输入有效域 ----------
-BANDS = (1,)  # 新数据单VV，文件波段编号从1开始。
-READ_WINDOW_SIZE = 1024  # 仅控制内部读写内存，不是训练窗口，也不会生成切片文件。
-INSPECT_SAMPLES = 3
-MAX_SCENES = None  # prepare试跑时可设小整数；正式运行用None。
-INPUT_NODATA_VALUE = None  # 只填写已确认的无效编码；不默认把0当作无效。
-VALID_MASK_DIR = None  # 可选：绝对目录，文件名为完整景号.tif/.tiff，1有效、0无效。
-ALLOW_ALL_VALID_SOURCE = True  # 按用户要求：未声明无效域时保留所有有限数值，包括0。
-
-# ---------- 标签类别：先确认含义，再填写，禁止自动猜测 ----------
-CLASS_FIELD = None
-CLASS_MAP = {None: 1}  # 用户重新确认：所有SHP面为水体，class字段不区分水陆。
-OUTSIDE_LABEL = 0  # 本批BC数据面外已确认为非水体；其他未完整标注的数据应设255。
-# 各景属性含义不同，可单独覆盖，例如："完整景号": {"field": "Value", "map": {0: 0, 255: 1}}
-# field=None、map={None: 1} 适用于所有面均为水体；面外由OUTSIDE_LABEL明确控制。
-SCENE_CLASS_RULES = {}
-# 同景有多个源文件时显式指定；不靠文件遍历顺序挑选版本。
-SOURCE_OVERRIDES = {}  # "完整景号": {"image": Path(r"绝对影像路径"), "label": Path(r"绝对SHP路径")}
+MODE = CONFIG["run"]["MODE"]
+SPLIT_CSV = CONFIG["paths"]["SPLIT_CSV"]
+PREPARE_BATCH = CONFIG["run"]["PREPARE_BATCH"]
+IMAGE_ROOT = CONFIG["paths"]["IMAGE_ROOT"]
+LABEL_ROOT = CONFIG["paths"]["LABEL_ROOT"]
+OUTPUT_DIR = CONFIG["paths"]["OUTPUT_DIR"]
+CACHE_DIR = CONFIG["paths"]["CACHE_DIR"]
+BANDS = tuple(CONFIG["input"]["BANDS"])
+READ_WINDOW_SIZE = CONFIG["input"]["READ_WINDOW_SIZE"]
+INSPECT_SAMPLES = CONFIG["input"]["INSPECT_SAMPLES"]
+MAX_SCENES = CONFIG["input"]["MAX_SCENES"]
+INPUT_NODATA_VALUE = CONFIG["input"]["INPUT_NODATA_VALUE"]
+VALID_MASK_DIR = CONFIG["paths"]["VALID_MASK_DIR"]
+ALLOW_ALL_VALID_SOURCE = CONFIG["input"]["ALLOW_ALL_VALID_SOURCE"]
+CLASS_FIELD = CONFIG["labels"]["CLASS_FIELD"]
+CLASS_MAP = CONFIG["labels"]["CLASS_MAP"]
+OUTSIDE_LABEL = CONFIG["labels"]["OUTSIDE_LABEL"]
+SCENE_CLASS_RULES = CONFIG["labels"]["SCENE_CLASS_RULES"]
+ACCEPT_REVIEWED_GEOMETRY = CONFIG["labels"]["ACCEPT_REVIEWED_GEOMETRY"]
+SOURCE_OVERRIDES = CONFIG["paths"]["SOURCE_OVERRIDES"]
+AUDIT_OUTPUT_ROOT = CONFIG["paths"]["AUDIT_OUTPUT_ROOT"]
+BAND = CONFIG["inspection"]["BAND"]
+RADIOMETRY_WINDOW_SIZE = CONFIG["inspection"]["RADIOMETRY_WINDOW_SIZE"]
+GRID_SIZE = CONFIG["inspection"]["GRID_SIZE"]
+QUICKLOOK_IMAGE_ROOT = CONFIG["paths"]["QUICKLOOK_IMAGE_ROOT"]
+SPLITS = tuple(CONFIG["inspection"]["SPLITS"])
+Z_DISPLAY_RANGE = tuple(CONFIG["inspection"]["Z_DISPLAY_RANGE"])
+QUICKLOOK_LOOKS = CONFIG["inspection"]["QUICKLOOK_LOOKS"]
+QUICKLOOK_MAX_SIDE = CONFIG["inspection"]["QUICKLOOK_MAX_SIDE"]
+STRIPE_ROWS = CONFIG["inspection"]["STRIPE_ROWS"]
+FONT_PATH = CONFIG["paths"]["FONT_PATH"]
+PNG_COMPRESSION = CONFIG["inspection"]["PNG_COMPRESSION"]
+LABEL_RULE = CONFIG["labels"]["LABEL_RULE"]
+CALIBRATED_ROOT = CONFIG["paths"]["CALIBRATED_ROOT"]
+FILTERED_ROOT = CONFIG["paths"]["FILTERED_ROOT"]
+NORMALIZED_ROOT = CONFIG["paths"]["NORMALIZED_ROOT"]
+NORMALIZATION_REFERENCE = CONFIG["paths"].get("NORMALIZATION_REFERENCE")
+WINDOW_CACHE_DIR = CONFIG["paths"]["WINDOW_CACHE_DIR"]
+SNAP_GPT_PATH = CONFIG["paths"]["SNAP_GPT_PATH"]
+SNAP_CACHE_DIR = CONFIG["paths"]["SNAP_CACHE_DIR"]
+CLEAN_SNAP_CACHE_ON_SUCCESS = CONFIG["snap"]["CLEAN_SNAP_CACHE_ON_SUCCESS"]
+SNAP_WORK_DIR = CONFIG["paths"]["SNAP_WORK_DIR"]
+NORMALIZE_WORK_DIR = CONFIG["paths"]["NORMALIZE_WORK_DIR"]
+NORMALIZE_READ_SIZE = CONFIG["processing"]["NORMALIZE_READ_SIZE"]
+NORMALIZE_THREADS = CONFIG["processing"]["NORMALIZE_THREADS"]
+NORMALIZE_COMPRESSION_LEVEL = CONFIG["processing"]["NORMALIZE_COMPRESSION_LEVEL"]
+ENABLE_CALIBRATION = CONFIG["processing"]["ENABLE_CALIBRATION"]
+ENABLE_FILTER = CONFIG["processing"]["ENABLE_FILTER"]
+INPUT_DOMAIN = CONFIG["processing"]["INPUT_DOMAIN"]
+FILTER_WINDOW = CONFIG["processing"]["FILTER_WINDOW"]
+ENL = CONFIG["processing"]["ENL"]
+FILTER_INPUT_STAGE = CONFIG["processing"]["FILTER_INPUT_STAGE"]
+NORMALIZE_INPUT_STAGE = CONFIG["processing"]["NORMALIZE_INPUT_STAGE"]
+WINDOW_SIZE = CONFIG["processing"]["WINDOW_SIZE"]
+HALO = CONFIG["processing"]["HALO"]
+NORMALIZATION_WINDOWS = CONFIG["processing"]["NORMALIZATION_WINDOWS"]
+SEED = CONFIG["processing"]["SEED"]
+CALIBRATION_QUANTITY = CONFIG["processing"]["CALIBRATION_QUANTITY"]
+CALIBRATION_OUTPUT_DOMAIN = CONFIG["processing"]["CALIBRATION_OUTPUT_DOMAIN"]
+CALIBRATION_REFERENCE = CONFIG["processing"]["CALIBRATION_REFERENCE"]
+CALIBRATION_PRODUCTS_DIR = CONFIG["paths"]["CALIBRATION_PRODUCTS_DIR"]
+CALIBRATION_COMMAND = CONFIG["processing"]["CALIBRATION_COMMAND"]
+QUICKLOOK_BACKSCATTER_DB_RANGE = tuple(CONFIG["inspection"]["QUICKLOOK_BACKSCATTER_DB_RANGE"])
+SNAP_THREADS = CONFIG["snap"]["SNAP_THREADS"]
+SNAP_TILE_CACHE = CONFIG["snap"]["SNAP_TILE_CACHE"]
 
 SCENE_PATTERN = re.compile(r"(BC\d+)[_-]([A-Z]+)[_-](ORG)[_-](?:2S)?(VV|VH|HH|HV)[_-](\d{8}T\d{6})[_-](\d+)", re.I)
 MANIFEST_FIELDS = ("name", "label_name", "split", "active", "group_id", "scene_id", "scene",
                    "source_image", "source_label", "row_off", "col_off", "source_height", "source_width",
                    "valid_pixels", "water_pixels", "background_pixels", "ignored_pixels", "pixel_x", "pixel_y")
 
-
-
-# ---------- 辐射分布审查与快视图 ----------
-AUDIT_OUTPUT_ROOT = Path(r"E:\Code_projects\sar_water_extraction\codex_analysis\radiometry_audit")
-BAND = 1
-RADIOMETRY_WINDOW_SIZE = 256
-GRID_SIZE = 3
-QUICKLOOK_IMAGE_ROOT = Path(r"I:\水体数据\prepared_scenes\images")
-SPLITS = ('val', 'train')
-Z_DISPLAY_RANGE = (-1.0, 3.0)
-QUICKLOOK_LOOKS = 8          # 显示时按8×8有效幅度取均值；不是功率域物理多视。
-QUICKLOOK_MAX_SIDE = 1600    # 单面板最长边；大景自动增大平均窗口。
-STRIPE_ROWS = 128           # 分条读取原SAR，控制内存。
-FONT_PATH = Path(r"C:\Windows\Fonts\arial.ttf")
-PNG_COMPRESSION = 3
-LABEL_RULE = "用户确认：所有SHP面为水体，面外为非水体；不使用class字段区分水陆"
-
-
-# ---------- 离线处理阶段：保留原始SAR，处理结果另存 ----------
-CALIBRATED_ROOT = Path(r"I:\水体数据\processed_scenes\calibrated")
-FILTERED_ROOT = Path(r"I:\水体数据\processed_scenes\filtered")
-NORMALIZED_ROOT = Path(r"I:\水体数据\processed_scenes\normalized")
-WINDOW_CACHE_DIR = Path(r"E:\Code_projects\sar_water_extraction\data_cache\bc_scenes")
-SNAP_GPT_PATH = Path(r"D:\SNAP\esa-snap\bin\gpt.exe")
-SNAP_CACHE_DIR = Path(r"I:\水体数据\snap_lee_cache")
-ENABLE_CALIBRATION = False  # 未取得BC校正系数/厂商流程，保持关闭。
-ENABLE_FILTER = True
-INPUT_DOMAIN = 'amplitude'  # 原始ORG已确认为幅度。
-FILTER_WINDOW = 3
-ENL = 1.0
-FILTER_INPUT_STAGE = 'org'  # org/calibrated；需与其数据域匹配。
-NORMALIZE_INPUT_STAGE = 'filtered'  # org/calibrated/filtered
-WINDOW_SIZE = 1024
-HALO = 128
-NORMALIZATION_WINDOWS = 2  # 每个训练景固定抽样；val不参与参数估计。
-SEED = 42
-# 校正需明确物理量和参数来源；不能仅凭ORG幅度推断校正系数。
-CALIBRATION_QUANTITY = None  # 已核实后填写sigma0/beta0/gamma0。
-CALIBRATION_OUTPUT_DOMAIN = 'intensity'
-CALIBRATION_REFERENCE = ''  # 校正LUT/系数/算法和网格匹配依据。
-CALIBRATION_PRODUCTS_DIR = None  # 已校正GeoTIFF根目录：train/val下同名文件。
-CALIBRATION_COMMAND = None  # 可选参数列表，如['wsl.exe','-d','Ubuntu-22.04','--','bash','...','{input_wsl}','{output_wsl}']。
-# 命令由用户填写厂商/GAMMA流程，输出必须是与原SAR严格同网格的GeoTIFF。
-QUICKLOOK_BACKSCATTER_DB_RANGE = (-35., 0.)  # 仅对已确认sigma0/beta0/gamma0成果显示dB。
 
 def scene_id(name):
     """统一2SVV包装名与VV景号；非BC数据使用不带扩展名的文件名。"""
@@ -191,12 +189,14 @@ def read_polygons(path, target_crs, field, class_map):
             if not feature["geometry"]:
                 raise ValueError(f"标签要素{feature.id}为空：{path}")
             geometry = shape(feature["geometry"])
-            if not geometry.is_valid or geometry.is_empty:
+            if geometry.is_empty or (not geometry.is_valid and not ACCEPT_REVIEWED_GEOMETRY):
                 raise ValueError(f"标签要素{feature.id}几何待修复：{explain_validity(geometry)}；{path}")
             if not same_crs:
                 geometry = shape(transform_geom(source.crs_wkt, target_crs, mapping(geometry)))
-            if geometry.geom_type not in ("Polygon", "MultiPolygon") or not geometry.is_valid:
+            if geometry.geom_type not in ("Polygon", "MultiPolygon") or geometry.is_empty or (not geometry.is_valid and not ACCEPT_REVIEWED_GEOMETRY):
                 raise ValueError(f"标签要素{feature.id}转换后不是有效面：{path}")
+            if not geometry.is_valid:
+                print(f"  已人工复核，原样栅格化：{path.name} 要素{feature.id}；{explain_validity(geometry)}", flush=True)
             geometries.append(geometry)
             classes.append(class_map[value])
     if skipped:
@@ -289,13 +289,25 @@ def prepare_scene(row, image_file, label_file, output, cache_root, *, bands, rea
                      pixel_x=source.res[0], pixel_y=source.res[1])]
 
 
-def prepare_dataset():
+def read_split_rows(path):
+    """CSV顶部可放多行说明；从“影像编号”表头开始读取场景记录。"""
+    with Path(path).open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.reader(stream)
+        for fields in reader:
+            if fields and fields[0].strip() == "影像编号":
+                break
+        else:
+            raise ValueError(f"分类CSV缺少影像编号表头：{path}")
+        return [dict(zip(fields, row)) for row in reader if row and row[0].strip()]
+
+
+def prepare_dataset(mode=None, reuse_complete=False):
     """检查或准备；只在全部选定场景成功后发布训练清单，失败时保留现场供检查。"""
-    if MODE not in ("split", "inspect", "prepare") or READ_WINDOW_SIZE < 1:
+    mode = MODE if mode is None else mode
+    if mode not in ("split", "inspect", "prepare") or READ_WINDOW_SIZE < 1:
         raise ValueError("MODE选labels/split/inspect/prepare，READ_WINDOW_SIZE应大于0")
-    with SPLIT_CSV.open(encoding="utf-8-sig", newline="") as stream:
-        rows = list(csv.DictReader(stream))
-    print(f"运行模式：{MODE}；输出目录：{OUTPUT_DIR}", flush=True)
+    rows = read_split_rows(SPLIT_CSV)
+    print(f"运行模式：{mode}；输出目录：{OUTPUT_DIR}", flush=True)
     print(f"景级状态：{dict(Counter(r['是否采用'] for r in rows))}")
     selected, group_splits, names = [], {}, set()
     for row in rows:
@@ -310,23 +322,24 @@ def prepare_dataset():
             raise ValueError(f"地理组跨train/val：{group}")
         group_splits[group] = split
         # 已确认表示按用户要求纳入，不等于地物类型或标签几何已验收。
-        allowed = ('是', '已确认', '待确认') if MODE == 'inspect' else ('是', '已确认')
-        if row['是否采用'] in allowed:
+        allowed = ('是', '已确认', '待确认') if mode == 'inspect' else ('是', '已确认')
+        in_batch = PREPARE_BATCH is None or row.get('准备批次') == PREPARE_BATCH
+        if in_batch and row['是否采用'] in allowed:
             selected.append(dict(scene_id=identifier,split=split,group_id=group,scene=row['场景']))
     if not selected:
         message = "没有可处理场景。prepare只接受是否采用=是或已确认；当前待确认记录不会自动启用。"
-        if MODE == 'prepare':
+        if mode == 'prepare':
             raise ValueError(message)
         print(message)
         return
-    if MODE == 'split':
+    if mode == 'split':
         print(f"采用场景的划分：{dict(Counter(row['split'] for row in selected))}")
         print(f"采用场景地理组数：{len({row['group_id'] for row in selected})}")
         print('分类沿用清单中的地理组、行政区、时间与传感器；不进行地物分类、几何分析或切块。')
         return
-    selected = selected[:INSPECT_SAMPLES] if MODE == 'inspect' else selected[:MAX_SCENES]
+    selected = selected[:INSPECT_SAMPLES] if mode == 'inspect' else selected[:MAX_SCENES]
     images, labels = index_sources(IMAGE_ROOT, LABEL_ROOT)
-    if MODE == 'inspect':
+    if mode == 'inspect':
         for row in selected:
             image, label = select_sources(row['scene_id'],images,labels,SOURCE_OVERRIDES)
             with rasterio.open(image_path(image)) as source, fiona.open(label) as vector:
@@ -349,13 +362,21 @@ def prepare_dataset():
             raise ValueError(f"{row['scene_id']}尚未配置标签映射。MODE=prepare已启用，但CLASS_MAP仍为空；需明确面属性的水体/非水体含义，不能用采用状态代替像素标签。")
     # 读取已完成景的记录。每景完整写入后才登记；不与旧切片清单混用。
     partial = OUTPUT_DIR/'split_manifest.csv.partial'
+    complete_manifest = OUTPUT_DIR/'split_manifest.csv'
     existing = []
     if OUTPUT_DIR.exists():
-        if (OUTPUT_DIR/'split_manifest.csv').exists() or not partial.exists():
+        if (complete_manifest.exists() and not reuse_complete) or (not complete_manifest.exists() and not partial.exists()):
             raise ValueError('prepare用于首次导入；此目录已完成或缺少续跑清单。仅重建已有标签请设置MODE="labels"')
-        if (OUTPUT_DIR/'scene_split.csv').read_bytes() != SPLIT_CSV.read_bytes():
-            raise ValueError("划分清单已改变，请使用新输出目录")
-        with partial.open(encoding='utf-8-sig', newline='') as stream:
+        # 说明和其他批次更新不影响续跑，仅比较本批的实际划分字段。
+        old_rows = read_split_rows(OUTPUT_DIR/'scene_split.csv')
+        keys = ('影像编号', '数据划分', '场景', '是否采用', '准备批次')
+        old_selection = sorted(tuple(r.get(k, '') for k in keys) for r in old_rows
+                               if PREPARE_BATCH is None or r.get('准备批次') == PREPARE_BATCH)
+        new_selection = sorted(tuple(r.get(k, '') for k in keys) for r in rows
+                               if PREPARE_BATCH is None or r.get('准备批次') == PREPARE_BATCH)
+        if old_selection != new_selection:
+            raise ValueError("本批划分清单已改变，请使用新输出目录")
+        with (complete_manifest if complete_manifest.exists() else partial).open(encoding='utf-8-sig', newline='') as stream:
             existing = list(csv.DictReader(stream))
         if any(tile['name'] != tile['scene_id'] + '.tif' for tile in existing):
             raise ValueError('这是旧切片目录，请使用新的整景输出目录')
@@ -368,7 +389,6 @@ def prepare_dataset():
     for kind in ('images','labels'):
         for split in ('train','val'):
             (OUTPUT_DIR/kind/split).mkdir(parents=True, exist_ok=True)
-    shutil.copy2(SPLIT_CSV, OUTPUT_DIR/'scene_split.csv')
     # 保存本次实际配置，避免之后修改脚本后无法追溯标签映射及有效域规则。
     settings = dict(layout="full_scene", bands=BANDS, read_window_size=READ_WINDOW_SIZE, class_field=CLASS_FIELD, class_map=CLASS_MAP,
                     scene_class_rules=SCENE_CLASS_RULES, input_nodata=INPUT_NODATA_VALUE,
@@ -376,6 +396,8 @@ def prepare_dataset():
                     source_overrides=SOURCE_OVERRIDES, values='raw stored values; no scale/offset or dB',
                     labels='0 background / 1 water / 255 unknown; conflicting classes ignored',
                     outside_label=OUTSIDE_LABEL)
+    if ACCEPT_REVIEWED_GEOMETRY:
+        settings["geometry_policy"] = "user_reviewed_original_polygons_no_repair"
     settings_path = OUTPUT_DIR/'preparation_settings.txt'
     if existing:
         previous = dict(line.split(' = ', 1) for line in settings_path.read_text(encoding='utf-8').splitlines())
@@ -387,6 +409,12 @@ def prepare_dataset():
                 same = previous.get(key) == repr(value)
             if not same:
                 raise ValueError(f"已完成场景的配置{key}已改变，请使用新输出目录")
+    if complete_manifest.exists():
+        if completed != {r['scene_id'] for r in selected}:
+            raise ValueError('已发布manifest与本批选择不一致，不能直接复用')
+        print(f'prepare已完成：复用{len(completed)}景整景影像和标签。', flush=True)
+        return
+    shutil.copy2(SPLIT_CSV, OUTPUT_DIR/'scene_split.csv')
     settings_path.write_text(
         '\n'.join(f"{key} = {value!r}" for key,value in settings.items()), encoding='utf-8')
     totals = Counter()
@@ -743,6 +771,81 @@ def stage_record(folder):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
 
 
+def write_normalized_scene(source, pending, bands, mean, std):
+    """分块标准化并在SSD完成压缩，再跨盘复制到目标临时文件；公式和有效域不变。"""
+    if NORMALIZE_READ_SIZE < 1 or NORMALIZE_THREADS < 1:
+        raise ValueError('归一化读取块和压缩线程数需为正整数')
+    NORMALIZE_WORK_DIR.mkdir(parents=True, exist_ok=True)
+    timings = dict(read_seconds=0., calculate_seconds=0., write_compress_seconds=0.)
+    # 均值/标准差使用原统计精度，完成运算后才转float32，与旧实现一致。
+    mean, std = np.asarray(mean)[:,None,None], np.asarray(std)[:,None,None]
+    with TemporaryDirectory(prefix='normalize_', dir=NORMALIZE_WORK_DIR) as temporary:
+        local = Path(temporary)/'normalized.tif'
+        with rasterio.open(source) as src:
+            profile = src.profile.copy()
+            profile.update(driver='GTiff', count=len(bands), dtype='float32', nodata=float('nan'),
+                           tiled=True, blockxsize=256, blockysize=256, compress='deflate', predictor=3,
+                           zlevel=NORMALIZE_COMPRESSION_LEVEL, num_threads=str(NORMALIZE_THREADS), BIGTIFF='IF_SAFER')
+            with rasterio.open(local,'w',**profile) as dst:
+                for top in range(0,src.height,NORMALIZE_READ_SIZE):
+                    for left in range(0,src.width,NORMALIZE_READ_SIZE):
+                        win=Window(left,top,min(NORMALIZE_READ_SIZE,src.width-left),min(NORMALIZE_READ_SIZE,src.height-top))
+                        started=time.perf_counter()
+                        raw=src.read(bands,window=win,masked=True,out_dtype='float32')
+                        timings['read_seconds']+=time.perf_counter()-started
+                        started=time.perf_counter()
+                        valid=~np.ma.getmaskarray(raw).any(axis=0)&np.isfinite(raw.data).all(axis=0)
+                        values=(raw.data-mean)/std
+                        values=np.where(valid[None],values,np.nan).astype('float32')
+                        timings['calculate_seconds']+=time.perf_counter()-started
+                        started=time.perf_counter()
+                        dst.write(values,window=win)
+                        timings['write_compress_seconds']+=time.perf_counter()-started
+                dst.update_tags(input_stage='normalized', statistics='train_only', source=str(source))
+                started=time.perf_counter()
+            # 多线程压缩剩余任务在关闭文件时完成，也计入写入时间。
+            timings['write_compress_seconds']+=time.perf_counter()-started
+        started=time.perf_counter()
+        shutil.copyfile(local,pending)
+        timings['publish_copy_seconds']=time.perf_counter()-started
+    return {key:round(value,3) for key,value in timings.items()}
+
+
+def cleanup_snap_cache(filtering, rows, source_root, source_bands, target):
+    """只清理全批成功后可丢弃的缓存TIFF；保留其他批次、日志和锁文件。"""
+    status = stage_record(target)
+    if not status.get('complete') or (target/'.preprocessing_incomplete').exists():
+        return
+    cache_root = SNAP_CACHE_DIR.resolve()
+    removed, freed = 0, 0
+    for row in rows:
+        source = source_root/'images'/row['split']/row['name']
+        try:
+            # create=False不会启动GPT；支持续跑时直接复用正式成果的场景。
+            cached = filtering.snap.prepare_file(source, source_bands, create=False).resolve()
+            if cached.parent.parent != cache_root or cached.name != 'filtered.tif':
+                raise ValueError(f'拒绝清理非指定缓存路径：{cached}')
+            # 缓存必须独立于源影像和正式成果，不能因路径配置错误删掉数据。
+            output = target/'images'/row['split']/row['name']
+            if cached == source.resolve() or cached == output.resolve() or not output.is_file():
+                raise ValueError(f'缓存不是可删除的独立副本：{cached}')
+            # 遇到其他进程正在准备该缓存时跳过，不阻塞或停止其他处理。
+            with FileLock(str(cached.parent/'prepare.lock'), timeout=0):
+                size = cached.stat().st_size
+                cached.unlink()
+                (cached.parent/'processing.json').unlink(missing_ok=True)
+                removed += 1
+                freed += size
+        except FileNotFoundError:
+            continue  # 已清理的缓存无需重新生成。
+        except (OSError, ValueError, Timeout) as error:
+            print(f'SNAP缓存保留：{row["scene_id"]}；{error}', flush=True)
+    filtering.snap._prepared.clear()
+    save_record(target/'cache_cleanup.json', dict(removed_images=removed, freed_bytes=freed,
+                cache_root=str(cache_root), scope='current_batch_completed_cache_images_only'))
+    print(f'SNAP缓存清理：删除{removed}个缓存影像，释放{freed/1024**3:.2f} GiB；日志和其他任务缓存保留。', flush=True)
+
+
 def process_stage(stage):
     """校正/滤波/归一化分别落盘；每景参数和源文件一致时复用，支持中断重跑。"""
     if stage == 'calibrated':
@@ -782,7 +885,8 @@ def process_stage(stage):
             raise ValueError('校正输出域需明确为amplitude或intensity')
         domain, quantity = CALIBRATION_OUTPUT_DOMAIN, CALIBRATION_QUANTITY
     if stage == 'filtered':
-        snap_preprocess.configure_paths(SNAP_GPT_PATH, SNAP_CACHE_DIR)
+        snap_preprocess.configure_paths(SNAP_GPT_PATH, SNAP_CACHE_DIR, SNAP_WORK_DIR,
+                                        threads=SNAP_THREADS, tile_cache=SNAP_TILE_CACHE)
         filtering = SpeckleFilter(dict(method='snap_lee', input_domain=domain, window_size=FILTER_WINDOW, enl=ENL))
     parameters = dict(stage=stage, bands=list(BANDS), input_domain=parent.get('output_domain', INPUT_DOMAIN),
                       output_domain='standardized' if stage == 'normalized' else domain, quantity=quantity,
@@ -791,13 +895,35 @@ def process_stage(stage):
                       calibration_reference=CALIBRATION_REFERENCE if stage == 'calibrated' else parent.get('calibration_reference',''),
                       calibration_command=CALIBRATION_COMMAND if stage == 'calibrated' else None)
     if stage == 'normalized':
-        ds = SARSceneDataset(source_root, WINDOW_CACHE_DIR, bands=source_bands, window_size=WINDOW_SIZE,
-                             halo=HALO, normalization_windows=NORMALIZATION_WINDOWS, seed=SEED)
-        try:
-            mean, std, indices = ds.normalization(ds.train_ids)
-        finally:
-            ds.close()
-        parameters.update(mean=mean.tolist(), std=std.tolist(), statistics_protocol='fixed_train_windows_only',
+        if NORMALIZATION_REFERENCE is not None:
+            reference_path = Path(NORMALIZATION_REFERENCE)
+            if reference_path.parent.resolve() == target.resolve():
+                raise ValueError('归一化参考不能指向本次输出目录')
+            reference = json.loads(reference_path.read_text(encoding='utf-8'))
+            if not reference.get('complete') or reference.get('stage') != 'normalized' or (reference_path.parent/'.preprocessing_incomplete').exists():
+                raise ValueError('参考归一化阶段尚未完整完成')
+            # 仅复用已完成训练统计；不同滤波/物理量不能混用同一标准化尺度。
+            keys = ('stage','bands','input_domain','output_domain','quantity','filter','calibration_reference')
+            reference_parent = reference.get('upstream',{})
+            if any(reference_parent.get(k) != parent.get(k) for k in keys) or reference.get('bands') != list(BANDS):
+                raise ValueError('参考归一化的上游处理或波段与本批不一致')
+            mean, std = np.asarray(reference['mean']), np.asarray(reference['std'])
+            if mean.shape != (len(BANDS),) or std.shape != mean.shape or not np.isfinite(mean).all() or not np.isfinite(std).all() or (std <= 0).any():
+                raise ValueError('参考均值/标准差无效')
+            indices = []
+            parameters.update(statistics_protocol='reference_train_statistics',
+                              statistics_reference=str(reference_path),
+                              statistics_reference_sha256=hashlib.sha256(reference_path.read_bytes()).hexdigest())
+            print(f'复用训练归一化统计：{reference_path}；mean={mean}；std={std}', flush=True)
+        else:
+            ds = SARSceneDataset(source_root, WINDOW_CACHE_DIR, bands=source_bands, window_size=WINDOW_SIZE,
+                                 halo=HALO, normalization_windows=NORMALIZATION_WINDOWS, seed=SEED)
+            try:
+                mean, std, indices = ds.normalization(ds.train_ids)
+            finally:
+                ds.close()
+            parameters['statistics_protocol'] = 'fixed_train_windows_only'
+        parameters.update(mean=mean.tolist(), std=std.tolist(),
                           statistics_window_indices=indices, window_size=WINDOW_SIZE, halo=HALO,
                           seed=SEED, normalization_windows=NORMALIZATION_WINDOWS, upstream=parent)
     target.mkdir(parents=True, exist_ok=True)
@@ -835,8 +961,12 @@ def process_stage(stage):
                 if stage == 'filtered':
                     cached = filtering.snap.prepare_file(source, source_bands, create=True)
                     # 使用GeoTIFF副本确保后续成果不依赖缓存被清理。
-                    raster_copy(str(cached), str(pending), driver='GTiff', compress='deflate', predictor=3,
-                                tiled=True, BIGTIFF='IF_SAFER')
+                    started = time.perf_counter()
+                    # 缓存已是符合要求的压缩GeoTIFF，直接复制，保持文件字节一致。
+                    shutil.copyfile(cached, pending)
+                    copy_seconds = round(time.perf_counter()-started, 3)
+                    save_record(output.with_suffix('.copy_timing.json'), dict(cache_copy_seconds=copy_seconds))
+                    print(f'  缓存直接复制：{copy_seconds}秒', flush=True)
                 elif stage == 'calibrated':
                     if imported is not None:
                         raster_copy(str(imported), str(pending), driver='GTiff', compress='deflate', tiled=True, BIGTIFF='IF_SAFER')
@@ -853,17 +983,9 @@ def process_stage(stage):
                             subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True,
                                            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 else:
-                    with rasterio.open(source) as src:
-                        profile = src.profile.copy()
-                        profile.update(driver='GTiff', count=len(BANDS), dtype='float32', nodata=float('nan'),
-                                       tiled=True, blockxsize=256, blockysize=256, compress='deflate', predictor=3, BIGTIFF='IF_SAFER')
-                        with rasterio.open(pending,'w',**profile) as dst:
-                            for _, win in dst.block_windows(1):
-                                raw = src.read(source_bands, window=win, masked=True, out_dtype='float32')
-                                valid = ~np.ma.getmaskarray(raw).any(axis=0) & np.isfinite(raw.data).all(axis=0)
-                                values = (raw.data - mean[:,None,None]) / std[:,None,None]
-                                dst.write(np.where(valid[None],values,np.nan).astype('float32'), window=win)
-                            dst.update_tags(input_stage='normalized', statistics='train_only', source=str(source))
+                    timings = write_normalized_scene(source, pending, source_bands, mean, std)
+                    save_record(output.with_suffix('.normalize_timing.json'), timings)
+                    print(f'  归一化耗时（秒）：{timings}', flush=True)
                 with rasterio.open(source) as src, rasterio.open(pending) as dst:
                     if src.shape != dst.shape or src.crs != dst.crs or src.transform != dst.transform or dst.count != len(BANDS):
                         raise ValueError(f'处理结果网格/波段改变，不能沿用原标签：{row["scene_id"]}')
@@ -895,6 +1017,8 @@ def process_stage(stage):
                     expected=len(rows), reused=reused, generated=generated))
         marker.unlink()
         print(f'{stage}全部完成：{target}', flush=True)
+        if stage == 'filtered' and CLEAN_SNAP_CACHE_ON_SUCCESS:
+            cleanup_snap_cache(filtering, rows, source_root, source_bands, target)
         return stage_record(target)
     except (Exception, KeyboardInterrupt) as error:
         save_record(target/'processing_error.json', dict(error=str(error) or '手动中断；重新运行可续接'))
@@ -991,7 +1115,8 @@ def export_quicklooks():
 
 
 def main():
-    """每次执行一个模式；preprocess按开关依次运行校正、滤波、归一化。"""
+    """all顺序完成准备、预处理、快视图；不调用检查或标签重建模式。"""
+    print(f"影像处理配置：{CONFIG_PATH}；模式：{MODE}", flush=True)
     if MODE == 'labels':
         prepare_labels(OUTPUT_DIR, READ_WINDOW_SIZE)
     elif MODE in ('prepare','split','inspect'):
@@ -1004,22 +1129,28 @@ def main():
         process_stage('filtered')
     elif MODE == 'normalize':
         process_stage('normalized')
-    elif MODE == 'preprocess':
+    elif MODE in ('all','preprocess'):
         expected_filter = 'calibrated' if ENABLE_CALIBRATION else 'org'
         expected_normalize = 'filtered' if ENABLE_FILTER else expected_filter
         if ENABLE_FILTER and FILTER_INPUT_STAGE != expected_filter:
             raise ValueError('FILTER_INPUT_STAGE与校正开关不一致')
         if NORMALIZE_INPUT_STAGE != expected_normalize:
             raise ValueError('NORMALIZE_INPUT_STAGE与校正/滤波开关不一致')
+        if MODE == 'all':
+            prepare_dataset(mode='prepare', reuse_complete=True)
+            if not (OUTPUT_DIR/'split_manifest.csv').is_file():
+                raise RuntimeError('prepare尚未全部完成，保留续跑记录；本次不执行预处理和快视图')
         if ENABLE_CALIBRATION:
             process_stage('calibrated')
         if ENABLE_FILTER:
             process_stage('filtered')
         process_stage('normalized')
+        if MODE == 'all':
+            export_quicklooks()
     elif MODE == 'quicklook':
         export_quicklooks()
     else:
-        raise ValueError('MODE选prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook')
+        raise ValueError('MODE选all/prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook')
 
 
 if __name__ == '__main__':

@@ -32,7 +32,7 @@ class TinySnapNet(torch.nn.Module):
         return self.conv(image)
 
 
-@unittest.skipUnless(snap_preprocess.GPT_PATH.is_file(), '本机没有SNAP GPT')
+@unittest.skipUnless(snap_preprocess.GPT_PATH is not None and snap_preprocess.GPT_PATH.is_file(), '未显式配置真实SNAP GPT')
 class SnapPreprocessTests(unittest.TestCase):
     def test_array_entry_and_amplitude_power_equivalence(self):
         with TemporaryDirectory() as temporary, patch.object(snap_preprocess, 'CACHE_DIR', Path(temporary)):

@@ -65,6 +65,38 @@ class QualityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'配置'):
                     run_scene_quality(ck,output_dir=output,thresholds=(.2,.5,.7),boundary_radii=(3,))
 
+    def test_blended_checkpoint_protocol_counts_boundaries_and_resume(self):
+        with TemporaryDirectory() as t, patch('torch.cuda.is_available',return_value=False):
+            root=Path(t); arrays=fixtures.SceneDatasetTests().prepare(root)
+            model=fixtures.TinySceneNet();model.conv.weight.data.zero_();model.conv.bias.data.fill_(.2)
+            gt=arrays['val'][1]
+            valid=np.isin(gt,(0,1))&np.isfinite(arrays['val'][0])
+            expected=confusion_counts(gt,np.ones(gt.shape,bool),valid)
+            c=dict(data_layout='full_scene',image_dir=str(root/'images'),label_dir=str(root/'labels'),
+                split_manifest_sha256=hashlib.sha256((root/'split_manifest.csv').read_bytes()).hexdigest(),
+                val_scene_files=['val.tif'],window_size=32,window_halo=8,bands=(1,),
+                batch_size=2,mean=torch.tensor([0.]),std=torch.tensor([1.]),epoch=18,amp_enabled=False,
+                evaluation_scope='all_active_labeled_scene_cores',
+                validation_inference=dict(stride=8,blend='gaussian'),
+                phase_metrics=dict(val=dict(zip(('tn','fp','fn','tp'),map(int,expected)))))
+            ck=root/'model.pth';torch.save(c,ck)
+            with patch('supervised.evaluation.scene_quality.load_model',return_value=model):
+                output=run_scene_quality(ck,output_dir=root/'blend',thresholds=(.5,),save_visuals=False,boundary_radii=(3,))
+                with np.load(output/'counts/val.npz') as d:
+                    np.testing.assert_array_equal(d['counts'][0],expected)
+                    regions=boundary_regions(gt,valid,(3,))
+                    for index, side in enumerate(('inner','outer')):
+                        reference=confusion_counts(gt,np.ones(gt.shape,bool),regions[3][side])
+                        np.testing.assert_array_equal(d['boundary'][0,index,0],reference)
+                self.assertTrue((output/'training_parity.csv').exists())
+                stamp=(output/'raw/val.tif').stat().st_mtime_ns
+                run_scene_quality(ck,output_dir=output,thresholds=(.5,),save_visuals=False,boundary_radii=(3,))
+                self.assertEqual(stamp,(output/'raw/val.tif').stat().st_mtime_ns)
+                legacy=run_scene_quality(ck,output_dir=root/'legacy',thresholds=(.5,),save_visuals=False,
+                    boundary_radii=(3,),inference_options={})
+                self.assertTrue((legacy/'training_parity_not_applicable.txt').exists())
+                self.assertFalse((legacy/'training_parity.csv').exists())
+
     def test_morphology_uses_stitched_neighbors_across_windows(self):
         from supervised.evaluation.scene_quality import apply_scene_morphology
         from rasterio.transform import from_origin

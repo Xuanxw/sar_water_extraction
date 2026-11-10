@@ -1,0 +1,77 @@
+# 独立后处理：python src/supervised/post_process.py；不会启动训练。
+# POSTPROCESS_CHECKPOINTS选择已保存模型；整景模式一次一个模型。
+# IMAGE_DIR/LABEL_DIR为null时沿用检查点，可兼容多个manifest的合并路径。
+# OUTPUT_DIR为null时创建 模型所在目录/postprocess/时间戳；结果和图件写入其quality下。
+# 整景中断续跑：OUTPUT_DIR填同一个postprocess/时间戳目录；配置与模型必须一致。
+# opening_radius/closing_radius默认0，即不修改掩膜；单纯评估不等于已启用修正。
+paths:
+  POSTPROCESS_CHECKPOINTS:
+  - E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_bc_scenes\20261109_203148_859948\best_f1.pth
+  IMAGE_DIR: null
+  LABEL_DIR: null
+  OUTPUT_DIR: null
+  AUXILIARY_CACHE_DIR: E:\Code_projects\sar_water_extraction\data_cache\auxiliary
+  REFERENCE_PATH: null
+  REFERENCE_COVERAGE_PATH: null
+  ELEVATION_PATH: null
+run:
+  DATA_LAYOUT: full_scene
+quality:
+  SCENE_QUALITY_OPTIONS:
+    # 旧模型也可用融合推理；配置/指标会明确区分旧hard-core协议。
+    inference_options:
+      stride: 384
+      blend: hann
+    thresholds: [ 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12,
+                  0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20, 0.21, 0.22, 0.23, 0.24,
+                  0.25, 0.26, 0.27, 0.28, 0.29, 0.30, 0.31, 0.32, 0.33, 0.34, 0.35, 0.36,
+                  0.37, 0.38, 0.39, 0.40, 0.41, 0.42, 0.43, 0.44, 0.45, 0.46, 0.47, 0.48,
+                  0.49, 0.50, 0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57, 0.58, 0.59, 0.60,
+                  0.61, 0.62, 0.63, 0.64, 0.65, 0.66, 0.67, 0.68, 0.69, 0.70, 0.71, 0.72,
+                  0.73, 0.74, 0.75, 0.76, 0.77, 0.78, 0.79, 0.80, 0.81, 0.82, 0.83, 0.84,
+                  0.85, 0.86, 0.87, 0.88, 0.89, 0.90, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96,
+                  0.97, 0.98, 0.99 ]
+    threshold: 0.5
+    boundary_radii:
+    - 1
+    - 3
+    - 5
+    save_probabilities: true
+    save_visuals: true
+    opening_radius: 0
+    closing_radius: 0
+    num_workers: 0
+    scene_limit: null
+  POSTPROCESS_OPTIONS:
+    use_saved_val: true
+    with_labels: true
+    auxiliary_options:
+      download_history: false
+      download_elevation: false
+      worldcover_year: 2021
+      buffer_m: 1000.0
+      max_tiles_per_scene: 64
+      max_mosaic_pixels: 100000000
+      timeout: 60
+      retries: 3
+    threshold: 0.5
+    use_landcover: false
+    landcover_band: 5
+    water_class: 80
+    use_external_water: false
+    analysis_options:
+      reference_water_values:
+      - 1
+      reference_dry_values:
+      - 0
+      vector_assume_complete: false
+      elevation_kind: DEM
+      elevation_scale: 1.0
+      depth_scope: new_water
+      depth_neighbors: 100
+      depth_min_boundary: 3
+      depth_max_distance_m: 5000.0
+      depth_max_pixels: 25000000
+    save_masks: true
+    save_visuals: true
+    max_visualizations: null

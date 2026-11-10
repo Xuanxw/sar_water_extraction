@@ -57,10 +57,12 @@ class DeepLabExperimentTests(unittest.TestCase):
             self.assertEqual(tuple(single(torch.randn(1, 1, 64, 64)).shape), (1, 1, 64, 64))
 
     def test_training_protocol_matches_control(self):
-        with patch.object(train, "WaterSegmentationTrainer") as base:
+        with patch.object(train, "OUTPUT_DIR", None), \
+             patch.object(train, "WaterSegmentationTrainer") as base:
             train.create_trainer("uafnet")
             reference = base.call_args.kwargs
-        with patch.object(train, "WaterSegmentationTrainer") as candidate:
+        with patch.object(train, "OUTPUT_DIR", None), \
+             patch.object(train, "WaterSegmentationTrainer") as candidate:
             train.create_trainer("deeplabv3")
             options = candidate.call_args.kwargs
         for key in ("image_dir", "label_dir", "bands", "batch_size", "epochs", "learning_rate",
@@ -110,13 +112,12 @@ class DeepLabExperimentTests(unittest.TestCase):
                  patch.object(train, "DEEPLAB_DECODER_CHANNELS", 32), \
                  patch.object(train, "DEEPLAB_LOW_LEVEL_CHANNELS", 16), \
                  patch.object(train, "EPOCHS", 3), \
-                 patch.multiple(train, POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2}, DATA_LAYOUT="patch", CLASS_WEIGHT_MODE="none", SAMPLING="hard"), patch.object(train, "RUN_MODE", "train_postprocess"), \
-                 patch.object(train, "POSTPROCESS_OPTIONS", dict(threshold=.5, use_landcover=False,
-                              save_masks=True, save_visuals=False)), \
+                 patch.multiple(train, POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2}, DATA_LAYOUT="patch", CLASS_WEIGHT_MODE="none", SAMPLING="hard"), patch.object(train, "RESUME_CHECKPOINT", None), \
+                 patch.object(train, "VALIDATION_QUALITY_OPTIONS", dict(enabled=False)), \
                  patch.object(torch.cuda, "is_available", return_value=False):
                 train.main("deeplabv3")
-                run = next((root / "runs_grouped").iterdir())
-            self.assertEqual(run.parent.name, "runs_grouped")
+                run = next((root / "runs").iterdir())
+            self.assertEqual(run.parent.name, "runs")
             checkpoint = torch.load(run / "best_f1.pth", weights_only=True)
             self.assertEqual(checkpoint["train_files"], ["a.tif", "b.tif"])
             self.assertEqual(checkpoint["val_files"], ["c.tif", "d.tif"])
@@ -130,7 +131,11 @@ class DeepLabExperimentTests(unittest.TestCase):
                 metrics = list(csv.DictReader(stream))
             self.assertEqual(len(metrics), 6)
             self.assertTrue(all(float(r["ignored_pixels"]) > 0 for r in metrics))
-            quality = next((run / "quality").iterdir())
+            # 训练入口不隐式后处理；使用已保存最佳模型显式复评。
+            from supervised.evaluation.postprocess import run_postprocess
+            quality = run / "postprocess" / "test" / "quality"
+            run_postprocess([run / "best_f1.pth"],output_dir=quality,threshold=.5,
+                            use_landcover=False,save_masks=True,save_visuals=False)
             with (quality / "metrics.csv").open(encoding="utf-8-sig") as stream:
                 raw = next(r for r in csv.DictReader(stream) if r["result"] == "ensemble")
             val = checkpoint["phase_metrics"]["val"]

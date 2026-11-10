@@ -1,59 +1,67 @@
-"""场景规则不把无水图、未知覆盖或永久水体误分为农田等陆地背景。"""
-from pathlib import Path
-import sys
+"""场景地物分类：合成栅格验证，不联网、不运行实际场景任务。"""
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 import numpy as np
-sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
-                str(Path(__file__).resolve().parents[1] / "scripts")]
-from classify_scenes import classify_arrays, describe_region
+import rasterio
+from rasterio.transform import from_origin
+from datasets import classify_scenes as module
 
 
 class SceneClassificationTests(unittest.TestCase):
-    def test_land_context_excludes_water_but_retains_counts(self):
-        cover = np.full((20, 20), 80)
-        cover[:5] = 40
-        region = np.ones_like(cover, dtype=bool)
-        tile = describe_region(cover, region, region)
-        land = describe_region(cover, region, region, land_only=True)
-        self.assertEqual(tile['primary'], '永久水体')
-        self.assertEqual(land['primary'], '农田')
-        self.assertEqual(land['counts'][80], 300)
-        self.assertEqual(land['shares'][40], 1)
+    def options(self):
+        return dict(module.OPTIONS)
 
-    def test_unknown_and_sparse_land_stay_unclassified(self):
-        cover = np.full((20, 20), 80)
-        region = np.ones_like(cover, dtype=bool)
-        valid = region.copy()
-        valid[:10] = False
-        self.assertEqual(describe_region(cover, valid, region)['primary'], '辅助数据不足')
-        self.assertEqual(describe_region(cover, region, region, land_only=True)['primary'], '陆地背景不足')
+    def test_rules_and_missing_coverage(self):
+        options=self.options();counts=np.zeros(11,dtype=np.int64)
+        counts[3]=60;counts[4]=40
+        row=module.summarize(counts,100,100,30,1500,options)
+        self.assertEqual(row['主导地物'],'农田')
+        self.assertEqual(row['较多地物'],'农田；建成区')
+        self.assertEqual(row['地形标签'],'山地/陡坡候选')
+        missing=module.summarize(counts,200,0,0,0,options)
+        self.assertIn('覆盖不足',missing['主导地物'])
+        self.assertEqual(missing['平均坡度_度'],'')
 
-    def test_no_water_has_no_artificial_buffer(self):
-        label = np.zeros((40, 40), dtype=np.uint8)
-        valid = np.ones_like(label, dtype=bool)
-        tile, inside, context = classify_arrays(np.full_like(label, 50), valid, label, valid)
-        self.assertEqual(tile['primary'], '建成区')
-        self.assertEqual(inside['total'], 0)
-        self.assertEqual(context['total'], 0)
-        self.assertEqual(context['primary'], '无标签水体')
+    def test_raster_counts_and_block_seam_slopes(self):
+        with TemporaryDirectory() as tmp:
+            root=Path(tmp);transform=from_origin(500000,3000000,30,30)
+            profile=dict(driver='GTiff',height=120,width=120,count=1,crs='EPSG:32648',transform=transform)
+            sar=np.ones((120,120),dtype='float32');sar[0,:]=-9999
+            cover=np.full(sar.shape,40,dtype='uint8');cover[:,60:]=50
+            dem=np.broadcast_to(np.arange(120,dtype='float32')*15,sar.shape).copy()
+            for name,array,nodata in [('sar',sar,-9999),('cover',cover,0),('dem',dem,-9999)]:
+                with rasterio.open(root/f'{name}.tif','w',**profile,dtype=array.dtype,nodata=nodata) as dst:
+                    dst.write(array,1)
+            options=self.options();options['BLOCK_SIZE']=32
+            with patch.object(module,'get_tiles',side_effect=lambda product,*args:[root/('cover.tif' if product=='worldcover' else 'dem.tif')]):
+                result=module.classify_scene(root/'sar.tif',root,options)
+            self.assertEqual(result['状态'],'完成')
+            self.assertEqual(result['SAR抽样有效像素'],119*120)
+            self.assertAlmostEqual(result['农田占比'],.5,places=5)
+            self.assertAlmostEqual(result['建成区占比'],.5,places=5)
+            self.assertAlmostEqual(result['平均坡度_度'],np.degrees(np.arctan(.5)),places=4)
+            self.assertEqual(result['陡坡占比'],1)
+            self.assertGreater(result['地形覆盖率'],.95)
 
-    def test_euclidean_ring_and_multiple_backgrounds(self):
-        label = np.zeros((40, 40), dtype=np.uint8)
-        label[15:25, 15:25] = 1
-        valid = np.ones_like(label, dtype=bool)
-        cover = np.full_like(label, 40)
-        cover[:, 20:] = 50
-        tile, inside, context = classify_arrays(cover, valid, label, valid)
-        self.assertEqual(inside['total'], 100)
-        self.assertEqual(set(context['tags']), {'农田', '建成区'})
-        # 距离角点超过5的(10,10)不应计入欧氏环带，区别于正方形膨胀。
-        cover[10, 10] = 10
-        changed = classify_arrays(cover, valid, label, valid)[2]
-        self.assertEqual(changed['counts'][10], 0)
-        valid[14, 20] = False
-        changed = classify_arrays(cover, valid, label, valid)[2]
-        self.assertEqual(changed['total'], context['total'] - 1)
+    def test_dedup_and_split_conflict(self):
+        with TemporaryDirectory() as tmp:
+            a=Path(tmp)/'a.csv';b=Path(tmp)/'b.csv'
+            header='scene_id,name,split,group_id,active\n'
+            a.write_text(header+'test,test.tif,train,G1,1\n')
+            b.write_text(a.read_text())
+            self.assertEqual(len(module.read_scenes([a,b])),1)
+            b.write_text(header+'test,test.tif,val,G1,1\n')
+            with self.assertRaisesRegex(ValueError,'冲突'):
+                module.read_scenes([a,b])
+
+    def test_missing_product_is_unknown(self):
+        options=self.options()
+        row=module.summarize(np.zeros(11,dtype=np.int64),100,0,0,0,options)
+        self.assertEqual(row['农田占比'],'')
+        self.assertIn('覆盖不足',row['地形标签'])
 
 
-if __name__ == '__main__':
+if __name__=='__main__':
     unittest.main()

@@ -1,5 +1,6 @@
 """1 数据准备 → 2 阈值预测 → 3 辅助修正/水体分析 → 4 独立评价与输出。"""
 import csv
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import rasterio
 from supervised.evaluation.boundary_eval import BoundaryEvaluator, confusion_counts, save_boundary_figure
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.landcover import read_landcover, merge_landcover
-from thres_segmentation.threshold import ThresholdSegmenter
+from thres_segmentation.threshold import ThresholdSegmenter, read_input_preprocessing
 
 EXTENSIONS = {".tif", ".tiff", ".img", ".vrt", ".png"}
 
@@ -95,8 +96,12 @@ def run_segmentation(image_dir, label_dir=None, bands=None, output_dir=None,
                        for p in label_dir.rglob("*") if p.is_file() and p.suffix.lower() in EXTENSIONS}
     output_dir = (Path(output_dir) if output_dir is not None else
                   Path(__file__).resolve().parents[2] / "outputs/thres_seg/quality" / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
-    output_dir.mkdir(parents=True, exist_ok=False)
     segmenter = ThresholdSegmenter(**(threshold_options or {}))
+    data_root = Path(split_manifest).parent if split_manifest is not None else image_dir.parent.parent
+    preprocessing = read_input_preprocessing(data_root, segmenter, list(bands.values()))
+    output_dir.mkdir(parents=True, exist_ok=False)
+    if preprocessing:
+        (output_dir / "input_preprocessing.json").write_text(json.dumps(preprocessing, ensure_ascii=False, indent=2), encoding="utf-8")
     methods = [dict(method=f"threshold_{name}", band=band, parameters=str(vars(segmenter)),
                     use_landcover=use_landcover, landcover_band=landcover_band)
                for name, band in bands.items()]
@@ -126,7 +131,7 @@ def run_segmentation(image_dir, label_dir=None, bands=None, output_dir=None,
                 valid = image_valid & ~np.ma.getmaskarray(truth) & np.isin(truth.data, (0, 1))
                 label = np.where(valid, truth.data, -1)
             predictions, thresholds = {}, {}
-            # 2. 基础预测：Lee滤波、可选功率转dB、百分位归一化与阈值；不是辐射校正。
+            # 2. 离线模式直接按z-score阈值预测；legacy保留旧滤波/逐图拉伸。
             for band_index, band_name in enumerate(bands):
                 method = f"threshold_{band_name}"
                 predictions[method], _, thresholds[method] = segmenter.predict(image[band_index], image_valid)
@@ -172,7 +177,7 @@ def run_segmentation(image_dir, label_dir=None, bands=None, output_dir=None,
             if boundary is not None:
                 regions, points = boundary.update(name, label, valid, predictions, thresholds=thresholds)
             if max_visualizations is None or index < max_visualizations:
-                save_figure(image, bands, label, valid, predictions, image_rows,
+                save_figure(image, [f"{b} z-score" if preprocessing else b for b in bands], label, valid, predictions, image_rows,
                             output_dir / "figures" / Path(name).with_suffix(".png"))
                 if boundary is not None:
                     save_boundary_figure(label, valid, regions, points,
