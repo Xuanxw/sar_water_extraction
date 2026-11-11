@@ -307,3 +307,22 @@ data_cache/auxiliary/
 某个瓦片404、访问失败或文件不完整时，准备任务报错，不将缺失瓦片默认为陆地或零高程，也不发布本次成功清单；此前成功的瓦片缓存仍可复用。没有断点续传，失败重试从该瓦片起点重新下载。跨180°经线场景需要先拆分；场景瓦片数和裁剪像元数有上限，避免错误范围触发大规模下载。缓存需预留原始瓦片与逐景辅助影像磁盘空间。
 
 验证入口：`python -m unittest discover -s tests -p test_auxiliary_data.py -v`。下载回归使用本地真实GeoTIFF内容和受控HTTP响应，覆盖缓存复用、错误页、截断、重试、取消、两期编码、拼接、逐景选择及 main 模式传递；实际下载仍依赖网络和服务端数据可用性。
+
+
+## 无真值的每景质量核查包
+
+`configs/threshold_quality.yaml` 控制质量输出，默认启用。BC整景命令行在mask保存后输出；旧GUI在后处理矢量输出后输出。本模块不修改提取结果，不计算没有参考标签支持的F1/IoU。
+
+命令行路径：`输出目录/quality_review/threshold_VV/影像编号/`。旧GUI路径：`输出目录/quality_review/时间戳/`。
+
+- `quality.json`：有效范围、水体面积、占比、抽样层规模、风险统计及尚未检查的项目。
+- `review.gpkg` 的 `verification_points`：水体内部、岸线内外缓冲带、其余非水体三层随机核验点，默认每层最多50点。
+- `review.gpkg` 的 `suspected_regions`：水体邻近未知区，以及有对应辅助输入时的历史差异、陡坡水体、后处理变化。风险面是定位提示，不是已确认错误；分块面不代表独立水体对象。
+
+QGIS中打开GeoPackage选择两个图层即可。人工填写点属性 `ref_class`：0非水体、1水体、-1无法判断；尚未检查保持NULL。`confidence`与`note`可记录判读把握和依据。保留`scene_id/stratum/row/col/population/sample_n/incl_prob/weight`，不要删除不确定点或自行改变点位。入样概率为每层实际点数/候选像元数，权重为其倒数；经纬度网格的面积推断还需像元面积加权。
+
+默认岸线缓冲为5个原始像元，三层互斥且覆盖全部已知0/1像元；NoData不抽样。相同栅格、分块大小及seed可复现点位。分块读取控制内存，结果统计保持原像元精度。抽样配置不是样本量充分性的保证。
+
+`quality_review.export_quality_review`接受已经对齐的`history_path`（0/1）、`slope_path`（度）、`raw_mask_path`（0/1）。缺失时对应检查写`not_available`和NULL，不写成零风险；不根据历史数据推断当期真值。当前两个入口默认只传最终mask，辅助输入尚需生产批处理逐景接入。
+
+当前覆盖统计针对输入mask的栅格范围，不等于密云行政区覆盖率。阈值敏感性、跨景重叠一致性、跨日期变化明确列入`not_evaluated`；它们需在多日期生产流程中补齐。当前新增的是质量核查模块，不代表ORG批处理、密云裁剪及按日期合并已经实现。

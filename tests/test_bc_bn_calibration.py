@@ -25,17 +25,27 @@ class BNTests(unittest.TestCase):
                 mean=torch.tensor([0.]),std=torch.tensor([1.]),batch_size=2,ignore_index=-1,val_loss=1.,epoch=20)
             ds.close();torch.save(c,root/'last.pth')
             params={k:v.clone() for k,v in model.named_parameters()}
-            with patch.object(bn,'RUN_DIR',root),patch.object(bn,'ROOT',root),patch.object(bn,'load_model',return_value=model):
+            with patch.object(bn,'RUN_DIR',root),patch.object(bn,'ROOT',root),patch.object(bn,'load_model',return_value=model),patch.object(bn,'CHECKPOINT_NAME','last.pth'),patch.object(bn,'EXPECTED_EPOCH',20),patch.object(bn,'CACHE_DIR',root/'cache'):
                 runner=bn.BNCalibrator()
                 self.assertTrue(set(runner.calibration_files)<=set(c['train_files']))
                 self.assertFalse(set(runner.calibration_files)&set(c['val_files']))
-                before=runner.evaluate();runner.calibrate_layers();after=runner.evaluate()
+                before=runner.evaluate()
+                # 校准对照必须能够恢复新Hann协议，不能继续使用旧的硬拼接计分。
+                runner.checkpoint['val_scene_files']=[r['name'] for r in runner.dataset.scenes if r['split']=='val']
+                runner.validation_inference=dict(stride=8,blend='hann',num_workers=0)
+                runner.checkpoint['validation_inference']=runner.validation_inference
+                fused=runner.evaluate()
+                self.assertEqual(before['valid_pixels'],fused['valid_pixels'])
+                self.assertTrue(runner.scene_metrics)
+                before=fused
+                runner.calibrate_layers();after=runner.evaluate()
                 self.assertEqual(before['valid_pixels'],after['valid_pixels'])
                 self.assertEqual(after['valid_pixels'],1147)
                 for k,v in model.named_parameters():torch.testing.assert_close(v,params[k])
                 runner.save_result(before,after)
                 saved=torch.load(next((root/'bn_calibration').rglob('calibrated.pth')),weights_only=True)
                 self.assertEqual(saved['resume_phase'],'bn_calibrated_inference_only')
+                self.assertEqual(saved['bn_calibration']['validation_inference'],runner.validation_inference)
                 runner.train_loader.dataset.dataset.close()
 
 if __name__=='__main__':unittest.main()

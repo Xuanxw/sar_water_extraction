@@ -1,6 +1,7 @@
 """从原 SAR GUI 脚本迁移，保留已有处理逻辑。"""
 from osgeo import gdal, ogr, osr
 import os
+from pathlib import Path
 import glob
 import time
 import json
@@ -1430,6 +1431,15 @@ class SARWorker(QThread):
                 self.log_signal.emit(
                     f"〰️ 矢量边界平滑完成：{smoothed_count} 个曲线化，"
                     f"{smooth_fallback_count} 个因几何有效性回退为拓扑简化边界。")
+            # 矢量输出后生成无真值核查包；沿用最终分类，不把外部参考当真值。
+            from thres_segmentation.quality_review import export_quality_review, load_review_options
+            review=dict(cfg.get('quality_review_options') or load_review_options())
+            if review.pop('enabled',False):
+                from datetime import datetime
+                review_dir=Path(cfg['output_dir'])/'quality_review'/datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                export_quality_review(out_label,review_dir,scene_id=Path(sar_tif).stem,
+                    metadata={'source_image':str(sar_tif),'water_vector':str(shp_path),
+                              'stage':'after_postprocessing'},log=self.log_signal.emit,**review)
             from thres_segmentation.water_analysis import analyze_water
             analysis_options = dict(cfg.get('analysis_options') or {})
             if cfg.get('enable_depth') and not analysis_options.get('elevation_path'):

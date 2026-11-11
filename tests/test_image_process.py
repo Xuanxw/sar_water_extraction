@@ -21,6 +21,29 @@ class ImageProcessTests(unittest.TestCase):
         cpu = patch.object(torch.cuda,'is_available',return_value=False)
         cpu.start();self.addCleanup(cpu.stop)
 
+    def test_zip_and_extracted_duplicate_selection(self):
+        from zipfile import ZipFile
+        with TemporaryDirectory() as temp:
+            root = Path(temp); archive = root/'scene.zip'; tiff = root/'scene.tiff'
+            tiff.write_bytes(b'original SAR bytes')
+            with ZipFile(archive, 'w') as stream:
+                stream.write(tiff, 'product/scene.tiff')
+            vector = MagicMock()
+            vector.__enter__.return_value.schema = {'geometry': 'Polygon'}
+            labels = {'SCENE': [root/'water.shp']}
+            images = {'SCENE': [tiff, archive]}
+            with patch.object(tools.fiona, 'open', return_value=vector):
+                self.assertEqual(tools.select_sources('SCENE', images, labels, {})[0], archive)
+                # 同尺寸但不同内容不能自动选择，显式覆盖仍由用户决定。
+                tiff.write_bytes(b'changed! SAR bytes')
+                with self.assertRaisesRegex(ValueError, '影像候选'):
+                    tools.select_sources('SCENE', images, labels, {})
+                chosen = tools.select_sources('SCENE', images, labels, {'SCENE': {'image': str(tiff)}})
+                self.assertEqual(chosen[0], tiff)
+                tiff.write_bytes(b'short')
+                with self.assertRaises(ValueError):
+                    tools.select_sources('SCENE', images, labels, {})
+
     def test_all_orders_stages_and_stops_if_prepare_incomplete(self):
         with TemporaryDirectory() as temp:
             root=Path(temp);calls=[]

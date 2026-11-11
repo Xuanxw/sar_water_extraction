@@ -11,6 +11,8 @@ MODE = "dataset"  # dataset：准备辅助数据后处理；download：只准备
 DATA_LAYOUT = "full_scene"  # BC整景使用full_scene；旧DFC切片用patch。
 # 与image_process共用成果根目录，不在这里维护另一套滤波/归一化参数。
 from configuration import load_yaml
+from thres_segmentation.quality_review import load_review_options
+QUALITY_REVIEW_OPTIONS = load_review_options()
 PREPROCESS_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "image_process.yaml"
 PREPROCESSING = load_yaml(PREPROCESS_CONFIG)
 NORMALIZED_ROOT = PREPROCESSING["paths"]["NORMALIZED_ROOT"]
@@ -115,7 +117,8 @@ def main():
             block_size=BLOCK_SIZE, cache_dir=CACHE_DIR, preview_size=PREVIEW_SIZE,
             save_masks=SAVE_MASKS, max_visualizations=MAX_VISUALIZATIONS,
             scene_prefix=SCENE_PREFIX, boundary_radii=BOUNDARY_RADII,
-            analysis_options=ANALYSIS_OPTIONS, scene_analysis_options=scene_analysis_options)
+            analysis_options=ANALYSIS_OPTIONS, scene_analysis_options=scene_analysis_options,
+            quality_review_options=QUALITY_REVIEW_OPTIONS)
     if DATA_LAYOUT != "patch":
         raise ValueError("DATA_LAYOUT使用full_scene或patch")
     return run_segmentation(

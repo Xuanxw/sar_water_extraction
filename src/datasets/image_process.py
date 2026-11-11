@@ -17,6 +17,7 @@ import shutil
 import time
 import sys
 import subprocess
+import zlib
 import xml.etree.ElementTree as ET
 from rasterio.shutil import copy as raster_copy
 
@@ -135,17 +136,34 @@ def index_sources(image_root, label_root):
 
 
 def select_sources(identifier, images, labels, overrides):
-    """按完整景号配对，排除评价点；版本不唯一时由SOURCE_OVERRIDES指定。"""
+    """按景号配对；核验ZIP与解压副本，真正不同的版本由SOURCE_OVERRIDES指定。"""
     override = overrides.get(identifier, {})
     image_paths = [Path(override["image"])] if "image" in override else images.get(identifier, [])
     label_paths = [Path(override["label"])] if "label" in override else labels.get(identifier, [])
+    # 原库可能同时保留ZIP和解压TIFF。只合并经大小和CRC32核验的副本，
+    # 继续读取ZIP保持原导入口径，避免解压目录的aux.xml改变读取结果。
+    if len(image_paths) == 2:
+        archives = [p for p in image_paths if p.suffix.lower() == ".zip"]
+        tiffs = [p for p in image_paths if p.suffix.lower() in (".tif", ".tiff")]
+        if len(archives) == 1 and len(tiffs) == 1:
+            with ZipFile(archives[0]) as archive:
+                members = [m for m in archive.infolist()
+                           if Path(m.filename).suffix.lower() in (".tif", ".tiff")]
+                if len(members) == 1 and members[0].file_size == tiffs[0].stat().st_size:
+                    checksum = 0
+                    with tiffs[0].open("rb") as stream:
+                        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                            checksum = zlib.crc32(block, checksum)
+                    if checksum == members[0].CRC:
+                        print(f"  ZIP与解压TIFF大小/CRC32一致，使用原压缩包：{archives[0]}", flush=True)
+                        image_paths = archives
     polygons = []
     for path in label_paths:
         with fiona.open(path) as source:
             if "Polygon" in source.schema["geometry"]:
                 polygons.append(path)
     if len(image_paths) != 1 or len(polygons) != 1:
-        raise ValueError(f"{identifier}：需要唯一影像和面标签，实际{len(image_paths)}/{len(polygons)}；请核对或配置SOURCE_OVERRIDES")
+        raise ValueError(f"{identifier}：需要唯一影像和面标签，实际{len(image_paths)}/{len(polygons)}；请核对或配置SOURCE_OVERRIDES\n影像候选：{image_paths}\n面标签候选：{polygons}")
     return image_paths[0], polygons[0]
 
 

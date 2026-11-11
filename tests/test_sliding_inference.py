@@ -132,6 +132,39 @@ class SlidingInferenceTests(unittest.TestCase):
             after = np.abs(blended[10, seams]-blended[10, seams-1]).mean()
             self.assertLess(after, before*.3)
 
+    def test_rolling_fusion_matches_full_canvas_with_context_model(self):
+        # 独立整幅累积作为参考，检查非局部预测、跨行batch、尾块和无效值。
+        class ContextModel(torch.nn.Module):
+            def forward(self, image):
+                position = WindowPositionModel()(image)
+                return image[:, :1] + 3*image.mean((1,2,3),keepdim=True) + position
+
+        for stride in (7,8,16):
+            with self.subTest(stride=stride), TemporaryDirectory() as temp:
+                root=Path(temp)
+                data,_=make_scene(root,(35,47))
+                ds=SceneWindows(root/'image.tif',window_size=32,halo=8,stride=stride,read_labels=False)
+                sums=np.zeros(data.shape,np.float64)
+                totals=np.zeros(data.shape,np.float64)
+                weight=blending_weights(16,'hann')
+                model=ContextModel().eval()
+                with torch.inference_mode():
+                    for item in ds:
+                        top,left,height,width=map(int,item['window'])
+                        image=item['image'].clone()
+                        image[:,~item['valid_mask']]=0
+                        scores=model(image[None])[0,0,8:8+height,8:8+width].numpy()
+                        w=weight[:height,:width]*item['valid_mask'][8:8+height,8:8+width].numpy()
+                        region=np.s_[top:top+height,left:left+width]
+                        sums[region]+=scores*w
+                        totals[region]+=w
+                ds.close()
+                reference=np.divide(sums,totals,out=np.zeros_like(sums),where=totals>0)
+                actual,_,_,valid,coverage,_=self.collect(root,model,data.shape,stride=stride,blend='hann')
+                np.testing.assert_allclose(actual,reference,rtol=5e-7,atol=5e-7)
+                np.testing.assert_array_equal(valid,np.isfinite(data))
+                self.assertTrue((coverage==1).all())
+
     def test_legacy_constant_matches_direct_input(self):
         with TemporaryDirectory() as temp:
             root = Path(temp)

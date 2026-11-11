@@ -1,0 +1,8 @@
+# 无真值质量检查。用于BC整景命令行、旧GUI输出；不改变提取结果。
+quality_review:
+  enabled: true
+  points_per_stratum: 50  # 每景每层最多50点；不足时取全部。0仅生成质量统计和风险面。
+  boundary_radius_px: 5  # 原始栅格像元，不是米；岸线内外各5像元。
+  seed: 42
+  block_size: 1024  # 控制读取内存；续现同一套点位时保持此值不变。
+  slope_threshold_deg: 15.0  # 有对齐坡度数据时用于风险提示，不直接删除水体。

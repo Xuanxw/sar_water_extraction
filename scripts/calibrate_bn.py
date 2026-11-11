@@ -1,6 +1,8 @@
 """只用训练影像逐层校准 BN，比较前后验证指标，不重新训练权重。"""
 
 import csv
+import json
+from time import perf_counter
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -14,15 +16,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from datasets.dfc_sample.s1_dataset import WaterDataset, sample_name
 from supervised.models.checkpoint import load_model
+from supervised.evaluation.sliding_inference import iter_scene_predictions
+from supervised.evaluation.metrics import metrics_from_counts
 from supervised.load.sar_scene_dataset import SARSceneDataset, check_preprocessed_input
 import numpy as np
 import hashlib
 
 ROOT = Path("E:/Code_projects/sar_water_extraction")
-EXPERIMENT_DIR = Path("E:/Code_projects/sar_water_extraction/outputs/unet_baseline")  # 其他模型/阶段改为其对应的实验目录。
-RUN_DIR = Path(r"E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_balanced_bce_labels_corrected_bc_scenes\20261103_203233_244527")
-CHECKPOINT_NAME = "last.pth"  # 默认恢复最后一轮；改为 best.pth 可单独校准最佳轮。
-CALIBRATION_SAMPLES = 128  # 整景：固定种子抽128个train窗口；旧切片：取前128幅。
+# 固定要诊断的源检查点；训练仍在运行时train_end可能被下一轮覆盖，请先停止或改用固定副本。
+RUN_DIR = ROOT / "outputs/pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_bc_scenes_overlap/20261110_221430_589086"
+CHECKPOINT_NAME = "train_end.pth"
+EXPECTED_EPOCH = 7  # 防止运行中的train_end更新后，误把其他轮当成第7轮；None不限定。
+CALIBRATION_SAMPLES = 128  # 固定种子抽取train窗口，不能按val表现挑选。
+CACHE_DIR = ROOT / "data_cache/bc_scenes"
+CPU_THREADS = 2
+# ()评价全部val；指定影像编号时仅做局部诊断，不代表完整验证集成绩。
+EVALUATION_SCENES = ()
+# 仅调整评价顺序，仍覆盖全部val，先检查用户报告的场景。
+PRIORITY_SCENE = "BC2-SM-ORG-VV-20221105T025841-003134"
+
 
 
 class ChannelStatistics:
@@ -54,14 +66,14 @@ class BNCalibrator:
     def __init__(self):
         """加载源模型、固定训练校准子集和完整验证集。"""
         self.run_dir = RUN_DIR
-        if self.run_dir is None:
-            self.run_dir = sorted(
-                path for path in EXPERIMENT_DIR.iterdir()
-                if path.is_dir() and (path / CHECKPOINT_NAME).is_file()
-            )[-1]
         self.run_dir = Path(self.run_dir)
         self.checkpoint_path = self.run_dir / CHECKPOINT_NAME
         self.checkpoint = torch.load(self.checkpoint_path, map_location="cpu", weights_only=True)
+        if EXPECTED_EPOCH is not None and self.checkpoint['epoch'] != EXPECTED_EPOCH:
+            raise ValueError(f"源检查点已变为第{self.checkpoint['epoch']}轮；预期第{EXPECTED_EPOCH}轮，请核对配置")
+        self.validation_inference = self.checkpoint.get('validation_inference', {})
+        self.output_dir = self.run_dir / "bn_calibration" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.output_dir.mkdir(parents=True, exist_ok=False)
         # 校准只能恢复统计量不匹配，不能修复已经变成 NaN/Inf 的模型参数。
         if not all(torch.isfinite(value).all().item() for value in self.checkpoint["model_state_dict"].values()):
             raise ValueError("模型包含 NaN/Inf，不能通过 BN 校准恢复，请选择有限权重的 BN 模型。")
@@ -78,7 +90,7 @@ class BNCalibrator:
             revision = root/'revision_settings.json'
             if self.checkpoint.get('label_revision_sha256') and hashlib.sha256(revision.read_bytes()).hexdigest() != self.checkpoint['label_revision_sha256']:
                 raise ValueError('BN校准标签版本与检查点不同')
-            train_data = val_data = SARSceneDataset(root, ROOT/'data_cache/bc_scenes',
+            train_data = val_data = SARSceneDataset(root, CACHE_DIR,
                 bands=self.checkpoint['bands'], window_size=self.checkpoint['window_size'],
                 halo=self.checkpoint['window_halo'], speckle=self.checkpoint.get('speckle'))
             file_indices = {name:i for i,name in enumerate(train_data.names)}
@@ -104,10 +116,58 @@ class BNCalibrator:
         self.mean = self.checkpoint["mean"].to(self.device).view(1, -1, 1, 1)
         self.std = self.checkpoint["std"].to(self.device).view(1, -1, 1, 1)
         self.ignore_index = self.checkpoint["ignore_index"]
+        self.dataset = val_data
         print(f"模型：{self.checkpoint_path}；设备：{self.device}；校准/验证：{len(train_ids)}/{len(val_ids)}", flush=True)
+
+    def evaluate_blended(self, scene_ids=None):
+        """沿用源检查点的融合协议；每个有效像素只计一次，并输出逐景指标。"""
+        self.model.eval()
+        config = self.validation_inference
+        names = set(self.checkpoint['val_scene_files'])
+        scenes = [row for row in self.dataset.scenes if row['split']=='val' and row['name'] in names]
+        selected = EVALUATION_SCENES if scene_ids is None else scene_ids
+        if selected:
+            scenes = [row for row in scenes if row['scene_id'] in selected]
+            if {r['scene_id'] for r in scenes} != set(selected):
+                raise ValueError('指定的评价景不在源检查点val划分中')
+        total=np.zeros(4,np.int64)
+        loss_sum=0.0
+        self.scene_metrics=[]
+        for number,row in enumerate(scenes,1):
+            counts=np.zeros(4,np.int64)
+            scene_loss=0.0
+            blocks=0
+            print(f"BN对照融合验证：{number}/{len(scenes)}景 {row['scene_id']}",flush=True)
+            for block in iter_scene_predictions(self.model,
+                    self.dataset.root/'images'/row['split']/row['name'],
+                    self.dataset.root/'labels'/row['split']/row['label_name'],
+                    bands=self.checkpoint['bands'],window_size=self.checkpoint['window_size'],
+                    halo=self.checkpoint['window_halo'],stride=config.get('stride'),blend=config['blend'],
+                    mean=self.mean.cpu().flatten().numpy(),std=self.std.cpu().flatten().numpy(),
+                    inputs_normalized=self.checkpoint.get('inputs_normalized',False),device=self.device,
+                    use_amp=self.device.type=='cuda' and self.checkpoint.get('amp_enabled',False),
+                    batch_size=self.checkpoint['batch_size'],num_workers=config.get('num_workers',0),
+                    speckle=self.checkpoint.get('speckle')):
+                valid=block['valid_mask'] & np.isin(block['label'],(0,1))
+                y=block['label'][valid].astype(np.uint8)
+                z=block['scores'][valid]
+                counts+=np.bincount(2*y+(z>=0).astype(np.uint8),minlength=4)
+                # 单logit BCE与双类别CE均可由二类logit差计算；不加训练类别权重。
+                scene_loss+=float(np.sum(np.logaddexp(0,z)-y*z,dtype=np.float64))
+                blocks+=1
+                if blocks%100==0:
+                    print(f"  {getattr(self,'phase','val')}：已输出{blocks}个融合块",flush=True)
+            total+=counts
+            loss_sum+=scene_loss
+            self.scene_metrics.append(dict(scene_id=row['scene_id'],loss=scene_loss/int(counts.sum()) if counts.sum() else float('nan'),**metrics_from_counts(counts)))
+        if total.sum()==0:
+            raise ValueError('没有可评价的val像素')
+        return dict(loss=float(loss_sum)/int(total.sum()),**metrics_from_counts(total))
 
     def evaluate(self):
         """用标准eval和检查点AMP配置，计算完整验证集指标。"""
+        if self.validation_inference:
+            return self.evaluate_blended()
         self.model.eval()
         confusion = torch.zeros(4, dtype=torch.int64, device=self.device)
         loss_sum, pixel_count = 0.0, 0
@@ -160,12 +220,14 @@ class BNCalibrator:
             handle = layer.register_forward_pre_hook(statistics)
             try:
                 with torch.no_grad():
-                    for batch in self.train_loader:
+                    for step,batch in enumerate(self.train_loader,1):
                         image = batch["image"].to(self.device)
                         if not self.checkpoint.get("inputs_normalized",False):
                             image = (image - self.mean) / self.std
                         image = image.masked_fill(~batch["valid_mask"].to(self.device).unsqueeze(1), 0)
                         self.model(image)
+                        if step%16==0:
+                            print(f"校准 {name}：{step}/{len(self.train_loader)}批",flush=True)
                     statistics.apply_to(layer)
             finally:
                 handle.remove()
@@ -174,48 +236,101 @@ class BNCalibrator:
     def save_result(self, before, after):
         """另存校准模型和前后指标，保留原始检查点。"""
         # 校准产物单独保存，不覆盖原始模型，不按验证成绩反复挑选校准样本。
-        output_dir = self.run_dir / "bn_calibration" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        output_dir.mkdir(parents=True, exist_ok=False)
+        output_dir = self.output_dir
         with (output_dir / "metrics.csv").open("w", newline="", encoding="utf-8-sig") as stream:
             writer = csv.DictWriter(stream, fieldnames=["phase", *before.keys()])
             writer.writeheader()
             writer.writerow(dict(phase="before", **before))
             writer.writerow(dict(phase="after", **after))
-        self.checkpoint["model_state_dict"] = {name: value.cpu() for name, value in self.model.state_dict().items()}
+        self.save_calibrated_model(before,after)
+
+    def save_calibrated_model(self, before=None, after=None):
+        """校准完成立即落盘；完整评价完成后才填入验证成绩。"""
+        output_dir=self.output_dir
+        checkpoint=dict(self.checkpoint)
+        checkpoint["model_state_dict"] = {name: value.cpu() for name, value in self.model.state_dict().items()}
         # 保留原归一化类型，PVT 同时包含 LayerNorm 和解码头的 BatchNorm。
-        self.checkpoint.setdefault("normalization", "BatchNorm")
-        self.checkpoint["source_val_loss"] = self.checkpoint["val_loss"]
-        self.checkpoint["source_phase_metrics"] = self.checkpoint.get("phase_metrics", {})
-        self.checkpoint["source_best_val_loss"] = self.checkpoint.pop("best_val_loss", None)
-        self.checkpoint["val_loss"] = after["loss"]
-        self.checkpoint["phase_metrics"] = {"val": after}
-        self.checkpoint["bn_calibration"] = {
+        checkpoint.setdefault("normalization", "BatchNorm")
+        checkpoint["source_val_loss"] = checkpoint.get("val_loss")
+        checkpoint["source_phase_metrics"] = checkpoint.get("phase_metrics", {})
+        checkpoint["source_best_val_loss"] = checkpoint.pop("best_val_loss", None)
+        checkpoint["val_loss"] = after["loss"] if after else None
+        checkpoint["phase_metrics"] = {"val": after} if after else {}
+        checkpoint["bn_calibration"] = {
             "method": "sequential_train_feature_moments", "source_checkpoint": str(self.checkpoint_path),
-            "train_files": self.calibration_files, "batch_size": self.checkpoint["batch_size"], "precision": "float32",
-            "before": before, "after": after,
+            "train_files": self.calibration_files, "batch_size": checkpoint["batch_size"], "precision": "float32",
+            "before": before, "after": after, "comparison_complete": after is not None,
+            "validation_inference": self.validation_inference,
+            "evaluation_scenes": list(EVALUATION_SCENES),
+            "evaluation_scope": 'selected_val_scenes' if EVALUATION_SCENES else 'all_val',
         }
         # BN已改变，这不是原实验的可续跑状态；只用于独立推理对照。
-        self.checkpoint['resume_phase'] = 'bn_calibrated_inference_only'
+        checkpoint['resume_phase'] = 'bn_calibrated_inference_only'
         for key in ('optimizer_state_dict','scheduler_state_dict','scaler_state_dict','rng_state',
                     'best_val_f1','best_val_balanced_accuracy'):
-            self.checkpoint.pop(key,None)
-        torch.save(self.checkpoint, output_dir / "calibrated.pth")
+            checkpoint.pop(key,None)
+        torch.save(checkpoint, output_dir / "calibrated.pth.partial")
+        (output_dir / "calibrated.pth.partial").replace(output_dir / "calibrated.pth")
         print(f"校准模型和前后指标：{output_dir}", flush=True)
 
     def run(self):
-        """校准前验证 → 逐层校准 → 校准后验证 → 保存。"""
-        before = self.evaluate()
-        print(f"校准前：{before}", flush=True)
+        """先校准并保存，再逐景成对评价；每景立即写CSV和进度。"""
+        print(f"输出目录：{self.output_dir}",flush=True)
+        started=perf_counter()
         self.calibrate_layers()
-        after = self.evaluate()
-        print(f"校准后：{after}", flush=True)
-        self.save_result(before, after)
+        calibrated={k:v.detach().cpu().clone() for k,v in self.model.state_dict().items()}
+        original=self.checkpoint['model_state_dict']
+        # 校准只允许改变BN运行统计；禁止意外改变学习参数。
+        for name,value in self.model.named_parameters():
+            if not torch.equal(value.detach().cpu(),original[name]):
+                raise RuntimeError(f'校准意外改变了学习参数：{name}')
+        self.save_calibrated_model()
+        if not self.validation_inference:
+            self.model.load_state_dict(original);before=self.evaluate()
+            self.model.load_state_dict(calibrated);after=self.evaluate()
+        else:
+            names=set(self.checkpoint['val_scene_files'])
+            scenes=[r['scene_id'] for r in self.dataset.scenes if r['split']=='val' and r['name'] in names]
+            if EVALUATION_SCENES:
+                if not set(EVALUATION_SCENES)<=set(scenes):
+                    raise ValueError('指定场景不在val中')
+                scenes=[n for n in scenes if n in EVALUATION_SCENES]
+            scenes.sort(key=lambda n:n!=PRIORITY_SCENE)
+            counts={p:np.zeros(4,np.int64) for p in ('before','after')}
+            losses=dict(before=0.0,after=0.0)
+            for i,scene in enumerate(scenes,1):
+                pair={}
+                for phase,state in (('before',original),('after',calibrated)):
+                    self.phase=phase
+                    print(f"对照 {i}/{len(scenes)}景 {phase}：{scene}",flush=True)
+                    self.model.load_state_dict(state)
+                    result=self.evaluate_blended((scene,))
+                    pair[phase]=result
+                    counts[phase]+=np.array([result[k] for k in ('tn','fp','fn','tp')],np.int64)
+                    losses[phase]+=result['loss']*result['valid_pixels']
+                    row=dict(scene_id=scene,**result)
+                    path=self.output_dir/f'{phase}_per_scene.csv'
+                    with path.open('a',encoding='utf-8-sig',newline='') as f:
+                        writer=csv.DictWriter(f,fieldnames=list(row))
+                        if i==1:writer.writeheader()
+                        writer.writerow(row)
+                if pair['before']['valid_pixels']!=pair['after']['valid_pixels']:
+                    raise RuntimeError('前后有效像素数不一致')
+                print(f"完成 {i}/{len(scenes)}景：F1 {pair['before']['f1']:.4f} → {pair['after']['f1']:.4f}；"
+                      f"P {pair['before']['precision']:.4f} → {pair['after']['precision']:.4f}；"
+                      f"R {pair['before']['recall']:.4f} → {pair['after']['recall']:.4f}",flush=True)
+                progress=dict(completed_scenes=i,total_scenes=len(scenes),last_scene=scene,
+                    complete=i==len(scenes),elapsed_seconds=perf_counter()-started)
+                (self.output_dir/'progress.json').write_text(json.dumps(progress,ensure_ascii=False,indent=2),encoding='utf-8')
+            before,after=[dict(loss=losses[p]/int(counts[p].sum()),**metrics_from_counts(counts[p])) for p in ('before','after')]
+        self.save_result(before,after)
+        print(f"校准前：{before}\n校准后：{after}",flush=True)
         for loader in (self.train_loader,self.val_loader):
             data=loader.dataset.dataset
-            if hasattr(data,"close"):
-                data.close()
+            if hasattr(data,'close'):data.close()
 
 
 if __name__ == "__main__":
+    torch.set_num_threads(CPU_THREADS)
     calibrator = BNCalibrator()
     calibrator.run()

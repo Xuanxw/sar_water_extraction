@@ -3,7 +3,7 @@
 
 # 所有可修改的文件/目录路径；Windows路径不使用双引号，避免反斜杠转义。
 paths:
-  RESUME_CHECKPOINT: E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_bc_scenes\20261109_203148_859948\train_end.pth
+  RESUME_CHECKPOINT: E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_bc_scenes_overlap\20261110_221430_589086\train_end.pth
   IMAGE_DIR: I:\水体数据\processed_scenes\normalized\images
   LABEL_DIR: I:\水体数据\processed_scenes\normalized\labels
   # 多个目录依次添加；只有处理协议和归一化统计一致时才能合并。

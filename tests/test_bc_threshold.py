@@ -67,7 +67,9 @@ class BCThresholdTests(unittest.TestCase):
                 dst.write(np.zeros(data.shape,dtype='uint8'),1)
             result=run_scene_segmentation(images,labels,manifest,root/'out',threshold_options=options,
                 block_size=13,cache_dir=root/'cache',preview_size=20,max_visualizations=1,
-                scene_analysis_options={name:dict(reference_path=history)})
+                scene_analysis_options={name:dict(reference_path=history)},
+                quality_review_options=dict(enabled=True,points_per_stratum=4,boundary_radius_px=2,block_size=13))
+            self.assertTrue((root/'out/quality_review/threshold_VV/BC3-test/quality.json').is_file())
             valid=np.isfinite(data)
             expected,_,threshold=ThresholdSegmenter(**options).predict(data,valid)
             with (root/'out/analysis/threshold_VV/BC3-test/areas.csv').open(encoding='utf-8-sig') as stream:

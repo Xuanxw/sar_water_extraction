@@ -124,7 +124,7 @@ def run_scene_segmentation(image_dir, label_dir, split_manifest, output_dir, ban
                            threshold_options=None, block_size=1024, cache_dir=None,
                            max_visualizations=None, preview_size=1200, save_masks=True,
                            scene_prefix=None, boundary_radii=(1,3,5), analysis_options=None,
-                           scene_analysis_options=None):
+                           scene_analysis_options=None, quality_review_options=None):
     """仅使用清单中的active val；原始路径仅提供meta，标签不参与分割阈值。"""
     # 1. 数据准备：锁定active val、原生网格和逐景辅助路径；下载由main统一完成。
     image_dir, output_dir, split_manifest = Path(image_dir), Path(output_dir), Path(split_manifest)
@@ -219,6 +219,14 @@ def run_scene_segmentation(image_dir, label_dir, split_manifest, output_dir, ban
                                     parts['boundary']=parts['inner']+parts['outer']
                                     for region,value in parts.items():
                                         key=(radius,region);scene_boundary[key]=scene_boundary.get(key,np.zeros(4,dtype='int64'))+value
+                    # 无标签质量检查与分层核验点，直接复用刚写好的最终mask。
+                    review=dict(quality_review_options or {})
+                    if review.pop('enabled',False):
+                        from thres_segmentation.quality_review import export_quality_review
+                        export_quality_review(mask_path,output_dir/'quality_review'/method/Path(name).with_suffix(''),
+                            scene_id=Path(name).stem,metadata={'source_image':meta['source_image'],
+                            'method':method,'threshold':float(threshold),'stage':'threshold_without_auxiliary_correction'},
+                            **review)
                     # 3. 辅助分析：外部历史水体只对比，不强制补入；DEM/DSM估计几何水深。
                     from thres_segmentation.water_analysis import analyze_water
                     analysis = analyze_water(mask_path, output_dir/'analysis'/method/Path(name).with_suffix(''),
