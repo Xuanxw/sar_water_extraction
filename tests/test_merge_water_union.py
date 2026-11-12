@@ -18,12 +18,12 @@ class MergeUnionTests(unittest.TestCase):
             geoms=[box(i,0,i+2,2) for i in range(6)]
             geoms.append(box(20,0,30,10).difference(box(22,2,28,8)))
             folder=source/'2026-11-12'/'scene';folder.mkdir(parents=True)
-            with fiona.open(folder/'water.shp','w',driver='ESRI Shapefile',crs='EPSG:32650',schema={'geometry':'Polygon','properties':{'id':'int'}}) as dst:
+            with fiona.open(folder/'water_polygon.shp','w',driver='ESRI Shapefile',crs='EPSG:32650',schema={'geometry':'Polygon','properties':{'id':'int'}}) as dst:
                 dst.writerecords([{'geometry':mapping(g),'properties':{'id':i}} for i,g in enumerate(geoms)])
             (folder/'scene.json').write_text(json.dumps({'date':'2026-11-12','status':'complete','scene_id':'scene'}))
             with patch.object(merge,'MERGE_BATCH_SIZE',2),patch.object(merge,'CONSOLE_COLOR',False):
                 merge.merge_results(source,output,'EPSG:32650',save_previews=False)
-                appended=output/'2026-11-12_water.shp'
+                appended=output/'2026-11-12_water_polygon.shp'
                 stamp=appended.stat().st_mtime_ns
                 original=merge.cached_union
                 def interrupt(gs,path,log,label):
@@ -37,7 +37,7 @@ class MergeUnionTests(unittest.TestCase):
                 merge.merge_results(source,output,'EPSG:32650',save_previews=False,dissolve=True)
                 self.assertTrue(all(p.stat().st_mtime_ns==t for p,t in leaves.items()))
                 self.assertEqual(appended.stat().st_mtime_ns,stamp)
-                with fiona.open(output/'2026-11-12_water_union.shp') as src:
+                with fiona.open(output/'2026-11-12_water_polygon_union.shp') as src:
                     parts=[shape(f['geometry']) for f in src]
                 expected=unary_union(geoms)
                 self.assertLess(unary_union(parts).symmetric_difference(expected).area,1e-9)
@@ -45,7 +45,7 @@ class MergeUnionTests(unittest.TestCase):
                 self.assertLess(len(parts),len(geoms))
                 with patch.object(merge,'merge_date',side_effect=AssertionError('must reuse completed date')):
                     merge.merge_results(source,output,'EPSG:32650',save_previews=False,dissolve=True)
-                summary=json.loads((output/'2026-11-12_union_sources.json').read_text(encoding='utf-8'))
+                summary=json.loads((output/'2026-11-12_polygon_union_sources.json').read_text(encoding='utf-8'))
                 self.assertEqual(summary['method'],'geometric_union')
                 self.assertEqual(summary['scene_ids'],['scene'])
 

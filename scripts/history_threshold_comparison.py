@@ -14,7 +14,8 @@ from shapely import transform as transform_geometry
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from configuration import load_yaml
 from thres_segmentation.org_pipeline import SceneProgress, statistics, segment
-from thres_segmentation.org_io import read_aoi, prepare_auxiliary, vectorize, windows, write_json
+from thres_segmentation.product_layout import scene_product
+from thres_segmentation.org_io import read_aoi, prepare_auxiliary, export_water_polygon, windows, write_json
 from thres_segmentation.run_log import RunLog
 
 CONFIG_PATH = Path(r'E:\Code_projects\sar_water_extraction\configs\北京密云区\history_threshold_comparison.yaml')
@@ -138,9 +139,10 @@ def main(config_path=None):
             for percentile in percentiles:
                 name = f'history_{percentile:g}'
                 folder = output / name / date / sid;folder.mkdir(parents=True, exist_ok=True)
+                if scene_product(original,'metadata.json').exists():write_json(folder/'metadata.json',json.loads(scene_product(original,'metadata.json').read_text(encoding='utf-8')))
                 progress = SceneProgress(cache / name, sid, folder, paths['SNAP_CACHE_DIR'], experiment['resume'])
                 with log.stage('03', f'{name}分割/矢量/质量记录', sid) as step:
-                    if progress.completed('complete'):
+                    if progress.completed('complete') and (folder/'water_polygon.shp').exists():
                         step['status'] = 'reused'
                     else:
                         trial = deepcopy(config)
@@ -152,10 +154,12 @@ def main(config_path=None):
                                    'base_percentile': 10, 'history_percentile': percentile,
                                    'postprocess': trial['org']['postprocess'], 'filtered_image': str(filtered)})
                         products = segment(filtered, scene_aoi, auxiliary, trial, folder, trial_stats, save_context=False)
-                        differences = compare_masks(folder / 'water.tif', original / 'water.tif', config['processing']['block_size'])
+                        differences = compare_masks(folder / 'water.tif', scene_product(original,'water.tif'), config['processing']['block_size'])
                         if percentile == 15 and differences['different_pixels']:
                             raise ValueError(f'{sid}：15%组与原结果有{differences["different_pixels"]}像元不同，请检查源缓存/辅助数据')
-                        vectorize(folder / 'water.tif', folder / 'water.shp', sid, date, record['sensor'], scene_aoi)
+                        export_water_polygon(folder / 'water.tif', options=config.get('polygon_output',{}),
+                                postprocess=trial['org']['postprocess'], cover_path=auxiliary.get('worldcover'),
+                                slope_path=auxiliary.get('slope'), clip_geometry=scene_aoi)
                         sample_fixed_points(original / 'review/review.gpkg', folder / 'water.tif',
                                             folder / 'fixed_points_predictions.csv', sid, percentile)
                         extraction = json.loads((folder / 'extraction.json').read_text(encoding='utf-8'))
@@ -166,7 +170,7 @@ def main(config_path=None):
                                                 'predictions': 'fixed_points_predictions.csv', 'resampled': False},
                                    'notes': ['新增/减少像元相对于Q15实验基线，不是相对历史水体的洪水变化。',
                                              '沿用原核验点；未生成新的风险图层，原风险面不代表本组已确认错误。']})
-                        progress.mark('complete', products + list(folder.glob('water.*')) +
+                        progress.mark('complete', products + list(folder.glob('water_polygon.*')) +
                                       [folder / 'quality.json', folder / 'fixed_points_predictions.csv', folder / 'parameters.json'])
                     q = json.loads((folder / 'quality.json').read_text(encoding='utf-8'))
                     e = q['extraction']
@@ -174,7 +178,7 @@ def main(config_path=None):
                                     'base_threshold_amplitude': e['statistics']['thresholds_amplitude'][0],
                                     'history_threshold_amplitude': e['statistics']['thresholds_amplitude'][3],
                                     'water_km2': e['final_area_m2'] / 1e6,
-                                    **q['comparison_to_original'], 'water_shp': str(folder / 'water.shp')})
+                                    **q['comparison_to_original'], 'water_shp': str(folder / 'water_polygon.shp')})
                     masks.append(folder / 'water.tif')
                     write_csv(output / 'comparison.csv', summary)
             with log.stage('04', '输出三组并排快视图', sid):

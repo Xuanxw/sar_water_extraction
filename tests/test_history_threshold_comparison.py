@@ -44,7 +44,7 @@ class HistoryComparisonTests(unittest.TestCase):
                         folder=result/f'history_{level}'/record['date']/record['scene_id']
                         with rasterio.open(folder/'water.tif') as src:masks.append(src.read(1))
                         ids.append((folder/'fixed_points_predictions.csv').read_text(encoding='utf-8-sig').splitlines())
-                        self.assertTrue((folder/'water.shp').exists())
+                        self.assertTrue((folder/'water_polygon.shp').exists())
                         self.assertFalse((folder/'slope.tif').exists())
                         self.assertFalse((folder/'history.tif').exists())
                     self.assertTrue(np.all((masks[0]!=1)|(masks[1]==1)))

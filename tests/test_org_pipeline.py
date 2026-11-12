@@ -45,7 +45,7 @@ class OrgProductionTests(unittest.TestCase):
             name=f'{sensor}-SM-ORG-VV-20260101T030000-000001'
             tif=paths['ORG_ROOT']/(name+'.tif')
             with rasterio.open(tif,'w',**profile) as dst:dst.write(data,1)
-            xml='<product><polarisation>VV</polarisation></product>'
+            xml='<product><polarisation>VV</polarisation><platformHeading>0</platformHeading><incidenceAngleMidSwath>40</incidenceAngleMidSwath><look_side>right</look_side></product>'
             if sensor=='BC3':
                 with ZipFile(paths['ORG_ROOT']/(name+'.zip'),'w') as z:
                     z.write(tif,name+'.tif');z.writestr(name+'.xml',xml)
@@ -57,9 +57,10 @@ class OrgProductionTests(unittest.TestCase):
         for key,name,values in [('LANDCOVER_PATH','cover.tif',cover),('ELEVATION_PATH','dem.tif',np.zeros((64,64),np.float32))]:
             paths[key]=root/name
             with rasterio.open(paths[key],'w',**profile) as dst:dst.write(values,1)
-        options=config['org'];options.update(crop_buffer_m=2,save_quicklook=True)
+        options=config['org'];options.update(crop_buffer_m=2,save_quicklook=True,archive_intermediates=False)
         options['filter']['method']='none'
         options['auxiliary'].update(download_missing=False,buffer_m=2,landcover_resolution_m=1,dem_resolution_m=1)
+        config['polygon_output']=dict(hole_max_pixels=0,morph_kernel_size=0,min_water_pixels=1,smooth_iterations=0)
         config['processing']['block_size']=13
         config['output']['preview_size']=64
         config['quality_review'].update(points_per_stratum=4,boundary_radius_px=2,block_size=13)
@@ -75,6 +76,7 @@ class OrgProductionTests(unittest.TestCase):
             self.assertFalse((root/'2026-01-01/water.shp').exists())
             for row in rows:
                 folder=Path(row['water_shp']).parent
+                self.assertFalse((folder/'water.shp').exists())
                 report=json.loads((folder/'quality.json').read_text(encoding='utf-8'))
                 self.assertIsNone(report['accuracy']['f1'])
                 self.assertEqual(report['checks']['history_disagreement']['status'],'computed')
@@ -89,6 +91,12 @@ class OrgProductionTests(unittest.TestCase):
                     polygons=[shape(f['geometry']) for f in src]
                     self.assertTrue(all(p.difference(self.aoi).area==0 for p in polygons))
                     self.assertAlmostEqual(sum(p.area for p in polygons),area)
+                polygon=Path(row['water_polygon_shp'])
+                self.assertEqual(polygon.name,'water_polygon.shp')
+                self.assertTrue(polygon.with_suffix('.json').is_file())
+                with fiona.open(polygon) as layer:
+                    self.assertEqual(layer.schema['geometry'],'Polygon')
+                    self.assertTrue(all(shape(f['geometry']).is_valid for f in layer))
                 self.assertTrue((folder/'quicklook.png').exists())
             # 修改显示设置不能导致已有水体产品重算。
             config['logging']['console_color']=False
@@ -96,16 +104,21 @@ class OrgProductionTests(unittest.TestCase):
             with patch.object(pipeline,'crop_org',side_effect=AssertionError('crop repeated')),patch.object(pipeline,'segment',side_effect=AssertionError('segment repeated')):
                 pipeline.run_org_scenes(config)
             self.assertEqual(before,{p:p.stat().st_mtime_ns for p in before})
+            for row in rows:
+                Path(row['water_polygon_shp']).unlink()
+            with patch.object(pipeline,'segment',side_effect=AssertionError('must not segment')):
+                pipeline.run_org_scenes(config)
+            self.assertTrue(all(Path(row['water_polygon_shp']).is_file() for row in rows))
             spec=importlib.util.spec_from_file_location('merge_water',ROOT/'scripts/merge_water_shp.py')
             module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
             merged=module.merge_results(root,Path(temp)/'merged','EPSG:32650')
-            with fiona.open(merged/'2026-01-01_water.shp') as src:
+            with fiona.open(merged/'2026-01-01_water_polygon.shp') as src:
                 self.assertAlmostEqual(sum(shape(f['geometry']).area for f in src),2*area)  # 两景重叠面保留
 
     def test_interrupted_after_masks_resumes_without_resegmentation(self):
         with TemporaryDirectory() as temp:
             config=self.make_config(Path(temp))
-            with patch.object(pipeline,'vectorize',side_effect=RuntimeError('simulated interruption')):
+            with patch.object(pipeline,'export_water_polygon',side_effect=RuntimeError('simulated interruption')):
                 with self.assertRaisesRegex(RuntimeError,'simulated interruption'):pipeline.run_org_scenes(config)
             masks=list(config['paths']['OUTPUT_DIR'].glob('*/*/water.tif'))
             self.assertEqual(len(masks),1)
@@ -173,7 +186,7 @@ class OrgProductionTests(unittest.TestCase):
     def test_morphology_matches_single_block(self):
         with TemporaryDirectory() as temp:
             root=Path(temp);config=self.make_config(root)
-            config['org']['postprocess'].update(opening_radius_px=1,closing_radius_px=2)
+            config['org']['postprocess'].update(opening_radius_px=1,closing_radius_px=2,terrain_method='slope_only')
             aoi,crs=read_aoi(config['paths']['AOI_PATH'],'EPSG:32650')
             auxiliary=prepare_auxiliary(config,aoi,crs)
             source=next(config['paths']['ORG_ROOT'].glob('*.tif'))

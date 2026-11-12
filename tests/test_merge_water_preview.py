@@ -32,7 +32,7 @@ class MergePreviewTests(unittest.TestCase):
             extra=box(500800,4000000,501200,4000200)
             for i,geom in enumerate((donut,extra)):
                 folder=source/'2026-11-12'/str(i)
-                write_polygon(folder/'water.shp',geom)
+                write_polygon(folder/'water_polygon.shp',geom)
                 (folder/'scene.json').write_text(json.dumps({'status':'complete','date':'2026-11-12','scene_id':str(i)}))
             roi=box(500000,4000000,500500,4001000)
             roi_path=root/'roi_input.shp'
@@ -40,11 +40,11 @@ class MergePreviewTests(unittest.TestCase):
             hashes={p:hashlib.sha256(p.read_bytes()).hexdigest() for p in source.rglob('*') if p.is_file()}
             for use_roi in (True,False):
                 output=merge_results(source,root/str(use_roi),'EPSG:32650',roi_path if use_roi else None,preview_size=300)
-                with fiona.open(output/'2026-11-12_water.shp') as src:
+                with fiona.open(output/'2026-11-12_water_polygon.shp') as src:
                     water=unary_union([shape(f['geometry']) for f in src])
                 self.assertAlmostEqual(water.area,unary_union([donut,extra]).area)
                 self.assertFalse(water.contains(box(500400,4000400,500500,4000500)))
-                with Image.open(output/'2026-11-12_water.png') as image:
+                with Image.open(output/'2026-11-12_water_polygon.png') as image:
                     image.verify()
                 self.assertEqual((output/'roi.shp').exists(),use_roi)
                 self.assertEqual((output/'roi.png').exists(),use_roi)

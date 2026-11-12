@@ -1,5 +1,6 @@
 """按日期拼接水体SHP；默认追加要素，可选几何并集消除重叠。"""
 import json
+import hashlib
 import sys
 from pathlib import Path
 from threading import Event, Thread
@@ -15,8 +16,8 @@ from shapely import transform as transform_geometry, from_wkb, to_wkb, get_parts
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from thres_segmentation.run_log import RunLog
 
-INPUT_ROOT=Path(r'E:\InSAR\水体提取\北京密云区\outputs\thres_seg_20261112')
-OUTPUT_DIR=Path(r'E:\InSAR\水体提取\北京密云区\outputs\thres_seg_20261112\merged')
+INPUT_ROOT=Path(r'E:\InSAR\水体提取\北京密云区\outputs\thres_seg_base_q30_20261112')
+OUTPUT_DIR=Path(r'E:\InSAR\水体提取\北京密云区\outputs\thres_seg_base_q30_20261112\merged')
 TARGET_CRS='EPSG:32650'
 ROI_PATH=Path(r'E:\InSAR\水体提取\北京密云区\密云区行政划分.shp')  # 可设None。
 SAVE_QUICKLOOK=True
@@ -180,8 +181,12 @@ def merge_results(input_root,output_dir,target_crs,roi_path=None,save_previews=T
             for path in sorted(Path(input_root).glob('*/*/scene.json')):
                 record=json.loads(path.read_text(encoding='utf-8'))
                 if record['status']!='complete':continue
-                water=path.parent/'water.shp'
-                if not water.is_file():raise FileNotFoundError(water)
+                water=path.parent/'water_polygon.shp'
+                if not water.is_file():raise FileNotFoundError(f'缺少逐景面矢量：{water}；请先补充water_polygon.shp')
+                with fiona.open(water) as layer:
+                    if layer.schema['geometry'] not in ('Polygon','MultiPolygon'):
+                        raise ValueError(f'仅允许面矢量，实际为{layer.schema["geometry"]}：{water}')
+                    print(f'输入面矢量：{water}；{len(layer)}面',flush=True)
                 record['water_shp']=str(water)
                 grouped.setdefault(record['date'],[]).append(record)
             print(f'{len(grouped)}日期，{sum(map(len,grouped.values()))}景',flush=True)
@@ -201,22 +206,30 @@ def merge_results(input_root,output_dir,target_crs,roi_path=None,save_previews=T
         schema={'geometry':'Polygon','properties':({'date':'str:10'} if dissolve else {'scene_id':'str:120','date':'str:10','sensor':'str:8'})}
         for date_index,(date,records) in enumerate(grouped.items(),1):
             print(f'日期 {date_index}/{len(grouped)}：{date}，{len(records)}景',flush=True)
+            # 按实际面文件内容复用成果；不绑定绝对路径，成果迁移后仍可复用。
+            fingerprint=hashlib.sha256()
+            fingerprint.update(f'{target.to_wkt()}|{MERGE_BATCH_SIZE}|{UNION_METHOD}'.encode())
+            for record in records:
+                for extension in ('.shp','.dbf','.prj'):
+                    with Path(record['water_shp']).with_suffix(extension).open('rb') as stream:
+                        for block in iter(lambda:stream.read(4*1024*1024),b''):fingerprint.update(block)
+            source_key=fingerprint.hexdigest()
             suffix='_union' if dissolve else ''
-            summary_file=output_dir/f'{date}{suffix}_sources.json'
-            water_output=output_dir/f'{date}_water{suffix}.shp'
+            summary_file=output_dir/f'{date}_polygon{suffix}_sources.json'
+            water_output=output_dir/f'{date}_water_polygon{suffix}.shp'
             preview_output=water_output.with_suffix('.png')
             required=[water_output.with_suffix(s) for s in ('.shp','.shx','.dbf','.prj')]
             if save_previews:required.append(preview_output)
             if RESUME and summary_file.exists() and all(p.exists() for p in required):
                 previous=json.loads(summary_file.read_text(encoding='utf-8'))
-                if previous.get('complete') and previous.get('method')==method:
+                if previous.get('complete') and previous.get('method')==method and previous.get('source_key')==source_key:
                     log.message(f'{date}：复用已完成拼接','REUSED');continue
             if summary_file.exists():summary_file.unlink()
             pending=water_output.with_suffix('.partial.shp')
             count=0
             if dissolve:
                 # 并集后的面可能来自多景，逐面不再填写单一scene_id；来源写入JSON。
-                water=merge_date(records,target,output_dir/'.merge_cache'/date,log)
+                water=merge_date(records,target,output_dir/'.merge_cache'/'polygon'/date/source_key[:16],log)
                 with log.stage('05','写出几何并集SHP',date),fiona.open(pending,'w',driver='ESRI Shapefile',schema=schema,crs_wkt=target.to_wkt(),encoding='UTF-8') as dst:
                     batch=[]
                     for geom in get_parts(water):
@@ -249,8 +262,8 @@ def merge_results(input_root,output_dir,target_crs,roi_path=None,save_previews=T
             if save_previews:
                 with log.stage('04','生成日期快视图',date):
                     save_quicklook(water_output,roi_output,preview_output,f'{date} | {method} | {len(records)} scenes | {count} features',target,preview_size)
-            summary={'complete':True,'method':method,'date':date,'scene_ids':[r['scene_id'] for r in records],
-                     'feature_count':count,'roi_source':str(roi_path) if roi_path else None,'roi_role':'display_only_no_clipping',
+            summary={'complete':True,'source_key':source_key,'method':method,'date':date,'scene_ids':[r['scene_id'] for r in records],
+                     'geometry_type':'Polygon','input_files':[r['water_shp'] for r in records],'feature_count':count,'roi_source':str(roi_path) if roi_path else None,'roi_role':'display_only_no_clipping',
                      'quicklook':preview_output.name if save_previews else None,
                      'note':('几何并集，重叠已消除；逐面不再保留单景来源，全部来源见scene_ids。' if dissolve else '仅拼接，不做溶解/去重；重叠面保留，不能直接累加面面积作为去重水体面积。')}
             temp=summary_file.with_suffix('.partial.json')

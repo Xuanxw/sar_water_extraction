@@ -53,7 +53,7 @@ class SlopeComparisonTests(unittest.TestCase):
                 path.write_text(yaml.safe_dump(options), encoding='utf-8')
                 # 矢量阶段中断后，不重复计算该景已完成的20度分割。
                 with patch.object(experiment, 'prepare_auxiliary', return_value=auxiliary), \
-                     patch.object(experiment, 'vectorize', side_effect=RuntimeError('interrupted')):
+                     patch.object(experiment, 'export_water_polygon', side_effect=RuntimeError('interrupted')):
                     with self.assertRaisesRegex(RuntimeError, 'interrupted'):
                         experiment.main(path)
                 first_mask = next((root/'slope_results').glob('slope_20/*/*/water.tif'))
@@ -74,7 +74,7 @@ class SlopeComparisonTests(unittest.TestCase):
                         thresholds.append(quality['extraction']['statistics']['thresholds_amplitude'])
                         self.assertEqual(quality['comparison_to_slope20']['added_water_pixels'], 0)
                         self.assertIsNone(quality['accuracy']['f1'])
-                        self.assertTrue((folder/'water.shp').exists())
+                        self.assertTrue((folder/'water_polygon.shp').exists())
                         self.assertFalse((folder/'slope.tif').exists())
                     self.assertEqual(thresholds[0], thresholds[1])
                     self.assertEqual(thresholds[1], thresholds[2])
@@ -91,6 +91,7 @@ class SlopeComparisonTests(unittest.TestCase):
                     config['org']['postprocess']['history_relax_percent'] = 10
                     config['org']['postprocess']['max_slope_deg'] = 20
                     expected = root/f'expected_{sid}'; expected.mkdir()
+                    (expected/'metadata.json').write_bytes((result/'slope_20'/date/sid/'metadata.json').read_bytes())
                     stats = statistics(Path(parameters['filtered_image']), aoi, config, expected)
                     segment(Path(parameters['filtered_image']), aoi, auxiliary, config, expected, stats, save_context=False)
                     with rasterio.open(expected/'water.tif') as src:

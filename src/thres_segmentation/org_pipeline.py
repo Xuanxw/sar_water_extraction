@@ -18,7 +18,7 @@ from scipy.ndimage import binary_opening, binary_closing
 from filelock import FileLock
 
 from thres_segmentation.org_io import (write_json,inventory,read_aoi,prepare_auxiliary,
-    local_source,crop_org,vectorize,windows)
+    local_source,crop_org,export_water_polygon,windows)
 from thres_segmentation.metadata import read_source_metadata
 from thres_segmentation.scene_pipeline import disk_percentiles
 from thres_segmentation.quality_review import export_quality_review
@@ -96,12 +96,19 @@ def segment(filtered, aoi, auxiliary, config, folder, stats, save_context=True):
     totals={'raw_area_m2':0.,'final_area_m2':0.,'valid_area_m2':0.,'landcover_removed_m2':0.,
             'terrain_removed_m2':0.,'auxiliary_unknown_m2':0.,'sensitivity_area_m2':[0.,0.,0.]}
     files=[]
+    geometry_mode=post['terrain_enabled'] and post.get('terrain_method','slope_only')=='gui_geometry'
+    if geometry_mode:
+        from thres_segmentation.terrain_geometry import generate_terrain_mask
+        meta=json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
+        terrain=generate_terrain_mask(filtered,auxiliary['slope'],auxiliary['aspect'],meta,folder,post['max_slope_deg'])
+        auxiliary={**auxiliary,'terrain_exclusion':terrain['terrain_exclusion']}
+        terrain_files=[*terrain.values(),folder/'terrain_geometry.json']
     with ExitStack() as stack:
         src=stack.enter_context(rasterio.open(filtered));profile=src.profile.copy()
         profile.update(dtype='uint8',nodata=255,count=1)
         readers={}
         for name,path in auxiliary.items():
-            if name=='copernicus':continue
+            if name in ('copernicus','aspect'):continue
             original=stack.enter_context(rasterio.open(path))
             readers[name]=stack.enter_context(WarpedVRT(original,crs=src.crs,transform=src.transform,
                 width=src.width,height=src.height,dtype='float32',nodata=np.nan,
@@ -148,6 +155,9 @@ def segment(filtered, aoi, auxiliary, config, folder, stats, save_context=True):
                 known=~np.ma.getmaskarray(values)&np.isfinite(values.data)
                 slope[known]=values.data[known]
                 excluded_slope=known&(slope>post['max_slope_deg']);aux_missing|=~known
+            if geometry_mode:
+                terrain=readers['terrain_exclusion'].read(1,window=win,masked=True)
+                excluded_slope=(~np.ma.getmaskarray(terrain))&(terrain.data==1)
             def correct(base):
                 value=compare(base)&valid
                 if post['history_enabled']:
@@ -177,7 +187,7 @@ def segment(filtered, aoi, auxiliary, config, folder, stats, save_context=True):
                 totals['sensitivity_area_m2'][i]+=area_sum(value[crop],areas)
     for path in files:path.with_suffix('.partial.tif').replace(path)
     write_json(folder/'extraction.json',{'statistics':stats,**totals})
-    return files+[folder/'extraction.json']
+    return files+[folder/'extraction.json']+(terrain_files if geometry_mode else [])
 
 
 def save_preview(image_path,mask_path,destination,max_side):
@@ -235,12 +245,18 @@ def _run_org_scenes(config,log):
         root.mkdir(parents=True,exist_ok=True)
     # 防止两个进程同时改写同一任务；不会停止用户的其他训练/下载。
     with FileLock(str(root/'processing.lock'),timeout=0):
+        from thres_segmentation.product_layout import arrange_intermediates
+        archive=options.get('archive_intermediates',False)
+        if archive:arrange_intermediates(config,restore=True)
         # run.json仅记录当前参数，不再承担续跑validation。
         write_json(root/'run.json',{'config':config,'aoi_area_m2':aoi.area,'merge_by_date':False})
         write_json(root/'inventory.json',records)
         print(f'ORG逐景处理：{len(records)}景，{len({r["date"] for r in records})}日期；输出：{root}',flush=True)
         with log.stage('02','辅助数据下载/复用与空间对齐'):
             auxiliary=prepare_auxiliary(config,aoi,crs)
+        polygon_options=dict(options=config.get('polygon_output',{}),postprocess=options['postprocess'],
+                             cover_path=auxiliary.get('worldcover'),slope_path=auxiliary.get('slope'),
+                             clip_geometry=aoi,clip_crs=crs)
         with log.stage('03','初始化SNAP运行环境'):
             filter_config=dict(options['filter'])
             snap=None
@@ -255,12 +271,18 @@ def _run_org_scenes(config,log):
                 folder=root/record['date']/record['scene_id'];folder.mkdir(parents=True,exist_ok=True)
                 progress=SceneProgress(paths['CACHE_DIR'],record['scene_id'],folder,paths['SNAP_CACHE_DIR'],options['resume'])
                 print(f'开始 {index}/{len(records)}：{record["scene_id"]}',flush=True)
+                # 旧版只有坡度筛查；补齐原GUI地形分类时复用滤波/阈值缓存，仅重做下游。
+                if options['postprocess'].get('terrain_method')=='gui_geometry' and not (folder/'terrain_geometry.json').exists():
+                    for stage in ('mask','vector','quality','preview','complete'):progress.state['stages'].pop(stage,None)
                 if progress.completed('complete'):
                     scene_stage['status']='reused'
                     log.message('复用已完成的本景成果/覆盖检查','REUSED')
                     summary=json.loads((folder/'scene.json').read_text(encoding='utf-8'))
                     if summary['status']=='complete':
-                        summary.update(water_shp=str((folder/'water.shp').resolve()),quality_json=str((folder/'quality.json').resolve()))
+                        polygon=export_water_polygon(folder/'water.tif',**polygon_options)
+                        had_polygon=(summary.get('water_polygon_shp')==str(polygon.resolve()) and summary.get('water_shp')==str(polygon.resolve()))
+                        summary.update(water_shp=str(polygon.resolve()),water_polygon_shp=str(polygon.resolve()),quality_json=str((folder/'quality.json').resolve()))
+                        if not had_polygon:write_json(folder/'scene.json',summary)
                     rows.append(summary);continue
                 write_json(folder/'input.json',record)
                 crop=progress.folder/'amplitude.tif'
@@ -305,15 +327,12 @@ def _run_org_scenes(config,log):
                     if progress.completed('mask'):step['status']='reused'
                     else:
                         products=segment(filtered,scene_aoi,auxiliary,config,folder,stats)
+                        (folder/'water_polygon.json').unlink(missing_ok=True)
                         progress.mark('mask',products)
-                water=folder/'water.tif';shp=folder/'water.shp'
-                with log.stage('08','水体SHP输出',record['scene_id']) as step:
-                    if progress.completed('vector'):
-                        step['status']='reused'
-                    else:
-                        print('  输出逐景水体SHP',flush=True)
-                        vectorize(water,shp,record['scene_id'],record['date'],record['sensor'],scene_aoi)
-                        progress.mark('vector',list(folder.glob('water.*')))
+                water=folder/'water.tif';shp=folder/'water_polygon.shp'
+                with log.stage('08','完整水体面输出',record['scene_id']):
+                    export_water_polygon(water,overwrite=not options['resume'],**polygon_options)
+                    progress.mark('vector',list(folder.glob('water_polygon.*')))
                 review=dict(config['quality_review']);enabled=review.pop('enabled')
                 with log.stage('09','质量JSON/分层核验点/疑似区域',record['scene_id']) as step:
                     if progress.completed('quality'):
@@ -339,7 +358,8 @@ def _run_org_scenes(config,log):
                             'fraction':extraction['valid_area_m2']/aoi.area,'method':'pixel_center_grid_area_approximation'}
                         quality['extraction']=extraction
                         quality['correction_policy']=options['postprocess']
-                        quality['not_evaluated']=['overlap_consistency','temporal_change','radar_shadow_layover_geometry']
+                        quality['not_evaluated']=['overlap_consistency','temporal_change','ray_traced_radar_occlusion']
+                        if (folder/'terrain_geometry.json').exists():quality['terrain_geometry']=json.loads((folder/'terrain_geometry.json').read_text(encoding='utf-8'))
                         write_json(folder/'quality.json',quality)
                         if enabled:
                             # 每景仅保留一份简洁质量JSON；矢量仍在review/下。
@@ -350,15 +370,22 @@ def _run_org_scenes(config,log):
                     if not options['save_quicklook']:step['status']='skipped'
                     elif progress.completed('preview'):step['status']='reused'
                     else:
-                        save_preview(filtered,water,folder/'quicklook.png',config['output']['preview_size'])
-                        progress.mark('preview',[folder/'quicklook.png'])
+                        # 展示正式交付的清理后栅格，与water_polygon.shp保持同一处理阶段。
+                        save_preview(filtered,folder/'water_polygon.tif',folder/'quicklook.png',config['output']['preview_size'])
+                        previews=[folder/'quicklook.png']
+                        if (folder/'terrain_class.tif').exists():
+                            from thres_segmentation.terrain_geometry import save_terrain_preview
+                            save_terrain_preview(folder/'water_polygon.tif',folder/'terrain_class.tif',folder/'terrain_quicklook.png',config['output']['preview_size'])
+                            previews.append(folder/'terrain_quicklook.png')
+                        progress.mark('preview',previews)
                 with log.stage('11','保存逐景完成记录',record['scene_id']):
-                    summary={**record,'status':'complete','water_shp':str(shp.resolve()),'quality_json':str((folder/'quality.json').resolve())}
+                    summary={**record,'status':'complete','water_shp':str(shp.resolve()),'water_polygon_shp':str((folder/'water_polygon.shp').resolve()),'quality_json':str((folder/'quality.json').resolve())}
                     write_json(folder/'scene.json',summary)
                     files=[p for p in folder.rglob('*') if p.is_file() and '.partial' not in p.name and p.name!='complete.done.json']
                     progress.mark('complete',files)
                     rows.append(summary)
                     write_json(root/'progress.json',{'completed':len(rows),'total':len(records),'last_scene':record['scene_id']})
         write_json(root/'results.json',rows)
+        if archive:arrange_intermediates(config)
         print(f'逐景处理完成：{root}；未按日期合并。',flush=True)
     return root

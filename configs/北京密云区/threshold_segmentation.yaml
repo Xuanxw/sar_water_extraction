@@ -9,7 +9,7 @@
 # input_nodata_value=null保留文件掩膜之外的有限0；仅确认0为无效后才设0。
 # output_crs用于米制辅助分析；水体栅格/SHP保留原SAR网格/CRS。
 # history默认使用WorldCover 2021水体类80，只放宽SAR候选阈值，不强制填水。
-# 坡度筛查不等于雷达阴影/叠掩模拟；建成区排除可能漏掉真实城市积水。
+# 原GUI局部坡度/坡向判据含阴影/叠掩近似；不等于GAMMA沿视线几何模拟。
 # morphology半径单位为原始像元；0关闭，避免默认删除窄河道。
 paths:
   CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_bc
@@ -20,6 +20,7 @@ paths:
   AOI_PATH: E:\InSAR\水体提取\北京密云区\密云区行政划分.shp
   LANDCOVER_PATH: null
   ORG_HISTORY_PATH: null
+  GDALDEM_PATH: D:\Miniconda\envs\insar_env\Library\bin\gdaldem.exe
   SNAP_GPT_PATH: D:\SNAP\esa-snap\bin\gpt.exe
   SNAP_CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_snap
   SNAP_WORK_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_snap_work
@@ -51,6 +52,7 @@ org:
   normalization: none
   resume: true
   save_quicklook: true
+  archive_intermediates: true  # 原分割/地形掩膜等移到CACHE_DIR，outputs只保留最终成果。
   filter:
     method: snap_lee
     input_domain: amplitude
@@ -75,6 +77,7 @@ org:
     excluded_cover_classes:
     - 50
     terrain_enabled: true
+    terrain_method: gui_geometry  # 原GUI：XML航向/入射角/左右视 + DEM坡度坡向
     max_slope_deg: 20.0
     history_enabled: true
     history_relax_percent: 5.0
@@ -88,3 +91,11 @@ org:
 # 仅控制控制台颜色；processing.log始终纯文本，日志与计时CSV均追加保存。
 logging:
   console_color: true
+
+# 水体面成图：最终交付water_polygon.tif/shp/json；前置栅格在完成后归档到CACHE_DIR。
+# 最小面积和孔洞单位均为原始像素；平滑会轻微调整岸线，不等同原栅格逐像元边界。
+polygon_output:
+  hole_max_pixels: 200
+  morph_kernel_size: 3
+  min_water_pixels: 200
+  smooth_iterations: 2

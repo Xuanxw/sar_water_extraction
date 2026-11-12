@@ -195,6 +195,10 @@ def _prepare_auxiliary(config, aoi, crs):
                     dst.write(np.where(good,value,np.nan)[1:-1,1:-1].astype('float32'),1,window=win)
             pending.replace(slope)
         products['slope']=slope
+        if post.get('terrain_method','slope_only')=='gui_geometry':
+            from thres_segmentation.terrain_geometry import prepare_gui_layers
+            if options['elevation_scale']!=1:raise ValueError('GUI地形分支要求DEM以米为单位')
+            products.update(prepare_gui_layers(dem,paths['GDALDEM_PATH']))
     if post['history_enabled'] and history is not None:
         products['history']=history
     return products
@@ -239,18 +243,10 @@ def crop_org(source, destination, aoi, aoi_crs, band, buffer_m, nodata_value, bl
     return Path(destination)
 
 
-def vectorize(mask_path, destination, scene_id, date, sensor, clip_geometry=None):
-    """直接流式矢量化最终0/1/255栅格，不拼接分块多边形、不平滑原岸线。"""
-    destination=Path(destination)
-    schema={'geometry':'Polygon','properties':{'scene_id':'str:120','date':'str:10','sensor':'str:8'}}
-    with rasterio.open(mask_path) as src,fiona.open(destination,'w',driver='ESRI Shapefile',
-                schema=schema,crs_wkt=src.crs.to_wkt(),encoding='UTF-8') as dst:
-        for geom,value in shapes(rasterio.band(src,1),connectivity=4,transform=src.transform):
-            if value!=1:continue
-            polygon=shape(geom)
-            if clip_geometry is not None:polygon=polygon.intersection(clip_geometry)
-            parts=[polygon] if polygon.geom_type=='Polygon' else getattr(polygon,'geoms',[])
-            for part in parts:
-                if part.geom_type=='Polygon' and not part.is_empty:
-                    dst.write({'geometry':mapping(part),'properties':{'scene_id':scene_id,'date':date,'sensor':sensor}})
-    return destination
+def export_water_polygon(source, overwrite=False, **kwargs):
+    """从对应water.tif重新清理并生成完整水体面，不复制碎斑SHP。"""
+    from thres_segmentation.water_polygons import build_water_polygons
+    source=Path(source)
+    if source.with_name('slope.tif').exists():kwargs['slope_path']=source.with_name('slope.tif')
+    if source.with_name('terrain_exclusion.tif').exists():kwargs['terrain_path']=source.with_name('terrain_exclusion.tif')
+    return build_water_polygons(source.with_suffix('.tif'),source.with_name('water_polygon.shp'),overwrite=overwrite,**kwargs)
