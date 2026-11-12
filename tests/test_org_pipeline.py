@@ -100,7 +100,7 @@ class OrgProductionTests(unittest.TestCase):
             module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
             merged=module.merge_results(root,Path(temp)/'merged','EPSG:32650')
             with fiona.open(merged/'2026-01-01_water.shp') as src:
-                self.assertAlmostEqual(sum(shape(f['geometry']).area for f in src),area)
+                self.assertAlmostEqual(sum(shape(f['geometry']).area for f in src),2*area)  # 两景重叠面保留
 
     def test_interrupted_after_masks_resumes_without_resegmentation(self):
         with TemporaryDirectory() as temp:

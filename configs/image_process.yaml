@@ -5,30 +5,32 @@
 # all：prepare → 按开关预处理 → quicklook；不执行split/inspect/radiometry/labels。
 # 当前处理batch 2；批次输出独立，归一化复用batch 1训练统计。
 
-# 所有可修改的文件/目录路径；Windows路径不使用双引号，避免反斜杠转义。
+# 相对数据路径以DATA_ROOT为基准；软件和仓库路径保留绝对路径。
 paths:
-  SPLIT_CSV: I:\水体数据\水体数据分组.csv
-  IMAGE_ROOT: I:\水体数据\SAR影像_卫星环境应用中心
-  LABEL_ROOT: I:\水体数据\水体提取结果_卫星环境应用中心
+  # 数据搬迁后只修改本项；其余相对路径以此目录为基准。
+  DATA_ROOT: I:\水体数据
+  SPLIT_CSV: 水体数据分组.csv
+  IMAGE_ROOT: SAR影像_卫星环境应用中心
+  LABEL_ROOT: 水体提取结果_卫星环境应用中心
   # 当前整景数据根目录。
-  OUTPUT_DIR: I:\水体数据\prepared_scenes_bat2
+  OUTPUT_DIR: prepared_scenes_bat2
   # ZIP逐景展开，单景结束即清理临时影像。
-  CACHE_DIR: I:\水体数据\prepare_cache_bat2
-  # 可选：绝对目录，文件名为完整景号.tif/.tiff，1有效、0无效。
+  CACHE_DIR: prepare_cache_bat2
+  # 可选：DATA_ROOT下相对目录或绝对目录，文件名为完整景号.tif/.tiff，1有效、0无效。
   VALID_MASK_DIR: null
-  # 例如：完整景号: {image: 绝对影像路径, label: 绝对SHP路径}
+  # 例如：完整景号: {image: SAR影像目录/原始.zip, label: 标签目录/水体.shp}；相对DATA_ROOT。
   SOURCE_OVERRIDES: {}
   AUDIT_OUTPUT_ROOT: E:\Code_projects\sar_water_extraction\codex_analysis\radiometry_audit
-  QUICKLOOK_IMAGE_ROOT: I:\水体数据\prepared_scenes_bat2\images
+  QUICKLOOK_IMAGE_ROOT: prepared_scenes_bat2\images
   FONT_PATH: C:\Windows\Fonts\arial.ttf
-  CALIBRATED_ROOT: I:\水体数据\processed_scenes_bat2\calibrated
-  FILTERED_ROOT: I:\水体数据\processed_scenes_bat2\filtered
-  NORMALIZED_ROOT: I:\水体数据\processed_scenes_bat2\normalized
+  CALIBRATED_ROOT: processed_scenes_bat2\calibrated
+  FILTERED_ROOT: processed_scenes_bat2\filtered
+  NORMALIZED_ROOT: processed_scenes_bat2\normalized
   # null则由本批train重新统计；batch 2复用batch 1，保持多批输入尺度一致。
-  NORMALIZATION_REFERENCE: I:\水体数据\processed_scenes\normalized\preprocessing.json
+  NORMALIZATION_REFERENCE: processed_scenes\normalized\preprocessing.json
   WINDOW_CACHE_DIR: E:\Code_projects\sar_water_extraction\data_cache\bc_scenes
   SNAP_GPT_PATH: D:\SNAP\esa-snap\bin\gpt.exe
-  SNAP_CACHE_DIR: I:\水体数据\snap_lee_cache_bat2
+  SNAP_CACHE_DIR: snap_lee_cache_bat2
   # SSD临时工作区；I盘缓存保持原位置。
   SNAP_WORK_DIR: E:\Code_projects\sar_water_extraction\data_cache\snap_work_bat2
   NORMALIZE_WORK_DIR: E:\Code_projects\sar_water_extraction\data_cache\normalize_work_bat2

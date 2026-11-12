@@ -1,14 +1,16 @@
 # 本文件为唯一参数来源；修改后重新启动对应脚本。null表示关闭/未指定。
 # RESUME_CHECKPOINT保留当前续跑点；新实验设null，并设置独立OUTPUT_DIR。
 
-# 所有可修改的文件/目录路径；Windows路径不使用双引号，避免反斜杠转义。
+# 相对数据路径以DATA_ROOT为基准；模型结果和仓库缓存保留绝对路径。
 paths:
+  # 数据搬迁后只修改本项；其余相对路径以此目录为基准。
+  DATA_ROOT: I:\水体数据
   RESUME_CHECKPOINT: null
-  IMAGE_DIR: I:\水体数据\processed_scenes\normalized\images
-  LABEL_DIR: I:\水体数据\processed_scenes\normalized\labels
+  IMAGE_DIR: processed_scenes\normalized\images
+  LABEL_DIR: processed_scenes\normalized\labels
   # 多个目录依次添加；只有处理协议和归一化统计一致时才能合并。
   MANIFEST_PATHS:
-  - I:\水体数据\processed_scenes\normalized\split_manifest.csv
+  - processed_scenes\normalized\split_manifest.csv
   OUTPUT_ROOT: E:\Code_projects\sar_water_extraction\outputs
   OUTPUT_DIR: E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_full_train_bc_scenes_overlap
   WINDOW_CACHE_DIR: E:\Code_projects\sar_water_extraction\data_cache\bc_scenes

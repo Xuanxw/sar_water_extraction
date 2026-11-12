@@ -4,6 +4,7 @@
 每景完成后保存计数，可使用同一 output_dir 续跑；已完成景不会重新推理。
 """
 from supervised.load.sar_scene_dataset import check_preprocessed_input
+from datasets.manifest_paths import manifest_fingerprint
 
 import csv
 import hashlib
@@ -228,7 +229,7 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
     label_dir = Path(label_dir or c['label_dir'])
     check_preprocessed_input(image_dir,c)
     manifest = image_dir.parent/'split_manifest.csv'
-    if hashlib.sha256(manifest.read_bytes()).hexdigest() != c['split_manifest_sha256']:
+    if manifest_fingerprint(manifest) != c['split_manifest_sha256']:
         raise ValueError('划分清单与训练不一致')
     revision = image_dir.parent/'revision_settings.json'
     if c.get('label_revision_sha256') and hashlib.sha256(revision.read_bytes()).hexdigest() != c['label_revision_sha256']:

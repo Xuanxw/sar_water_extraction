@@ -18,6 +18,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 
 from supervised.load.sar_scene_dataset import SARSceneDataset, check_preprocessed_input
+from datasets.manifest_paths import manifest_fingerprint
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.sliding_inference import iter_scene_predictions
@@ -90,7 +91,7 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
         if not use_saved_val:
             raise ValueError('整景复评需使用保存的验证窗口名单；外部数据需单独定义验证协议')
         split_path = image_dir.parent/'split_manifest.csv'
-        if hashlib.sha256(split_path.read_bytes()).hexdigest() != checkpoint['split_manifest_sha256']:
+        if manifest_fingerprint(split_path) != checkpoint['split_manifest_sha256']:
             raise ValueError('整景采用清单与检查点不一致')
         scene_dataset = SARSceneDataset(image_dir.parent,
             Path(r'E:\Code_projects\sar_water_extraction\data_cache\bc_scenes'), bands=bands,
@@ -214,7 +215,7 @@ def prepare_scan(checkpoints, expected_epochs=None, image_dir=None, label_dir=No
         root = images.parent
         if (root / '.labels_rebuilding').exists():
             raise ValueError('标签正在重建，不能扫描')
-        if file_hash(root / 'split_manifest.csv') != checkpoint['split_manifest_sha256']:
+        if manifest_fingerprint(root / 'split_manifest.csv') != checkpoint['split_manifest_sha256']:
             raise ValueError('验证清单与检查点不同')
         revision = checkpoint.get('label_revision_sha256')
         if revision and file_hash(root / 'revision_settings.json') != revision:
@@ -334,6 +335,7 @@ LEGACY_SCAN_HASHES = (
     "1a4be4a54913aa9844f0a87f5f245ffcc43adaf6cc30ff5d3f2e9f1a3d4bb518",
 )
 OPTIMIZED_INFERENCE_HASH = "9cd25d3459f2bb4da6168f887655ddad2f37089a092365c11800ac07d84e00b7"
+PATH_UPGRADE_PREVIOUS_HASH = "afe72a4e0dd84832c44bb4fbadc167f8b32b299f1bcc00882955edc8d17d1924"
 
 
 def same_scan_protocol(saved, current):
@@ -341,7 +343,9 @@ def same_scan_protocol(saved, current):
     if saved == current:
         return True
     previous = (saved.get('code_hash'), saved.get('inference_code_hash'))
-    if previous != LEGACY_SCAN_HASHES or current.get('inference_code_hash') != OPTIMIZED_INFERENCE_HASH:
+    # 本次仅兼容清单路径转换指纹；不改变推理、阈值或统计口径。
+    compatible = (LEGACY_SCAN_HASHES, (PATH_UPGRADE_PREVIOUS_HASH, OPTIMIZED_INFERENCE_HASH))
+    if previous not in compatible or current.get('inference_code_hash') != OPTIMIZED_INFERENCE_HASH:
         return False
     return ({k: v for k, v in saved.items() if k not in ('code_hash', 'inference_code_hash')} ==
             {k: v for k, v in current.items() if k not in ('code_hash', 'inference_code_hash')})

@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader, Subset
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from datasets.dfc_sample.s1_dataset import WaterDataset, sample_name
+from datasets.manifest_paths import manifest_fingerprint
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.sliding_inference import iter_scene_predictions
 from supervised.evaluation.metrics import metrics_from_counts
@@ -92,7 +93,7 @@ class BNCalibrator:
         if self.checkpoint.get('data_layout') == 'full_scene':
             root = Path(self.checkpoint['image_dir']).parent
             check_preprocessed_input(root/'images',self.checkpoint)
-            if hashlib.sha256((root/'split_manifest.csv').read_bytes()).hexdigest() != self.checkpoint['split_manifest_sha256']:
+            if manifest_fingerprint(root/'split_manifest.csv') != self.checkpoint['split_manifest_sha256']:
                 raise ValueError('BN校准清单与检查点不同')
             revision = root/'revision_settings.json'
             if self.checkpoint.get('label_revision_sha256') and hashlib.sha256(revision.read_bytes()).hexdigest() != self.checkpoint['label_revision_sha256']:

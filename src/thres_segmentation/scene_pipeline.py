@@ -12,6 +12,7 @@ from rasterio.enums import Resampling
 from scipy.ndimage import uniform_filter
 
 from thres_segmentation.metadata import read_source_metadata
+from datasets.manifest_paths import source_path
 from thres_segmentation.pipeline import write_csv, save_figure
 from thres_segmentation.threshold import ThresholdSegmenter, read_input_preprocessing
 from supervised.evaluation.boundary_eval import boundary_regions, confusion_counts
@@ -165,7 +166,7 @@ def run_scene_segmentation(image_dir, label_dir, split_manifest, output_dir, ban
             name = record['name']
             scene_options = scene_analysis_options[name] if scene_analysis_options is not None else (analysis_options or {})
             print(f"开始 {index+1}/{len(records)}：{name}",flush=True)
-            meta, original, xml = read_source_metadata(record['source_image'])
+            meta, original, xml = read_source_metadata(source_path(record['source_image'], split_manifest))
             metadata_rows.append(dict(name=name,**meta))
             write_csv(output_dir/'metadata.csv',metadata_rows)
             if xml:

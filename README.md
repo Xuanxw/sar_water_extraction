@@ -22,6 +22,11 @@ python E:\Code_projects\sar_water_extraction\src\supervised\train.py
 
 ### YAML 使用约定
 
+- 数据搬迁：`image_process.yaml`、`train.yaml`、`threshold_segmentation.yaml` 的 `paths.DATA_ROOT` 指向“水体数据”根目录，其他数据路径相对于它解析。整体搬迁后修改这三个入口的 `DATA_ROOT`；仓库输出、SSD缓存和SNAP程序仍使用各自的绝对路径。
+- 三份“水体数据分组”CSV只记录景号、划分和批次名，不包含机器绝对路径。`split_manifest.csv` 的 `source_image/source_label` 相对于**清单所在目录**，因此复制到滤波/归一化子目录时必须重新计算相对路径，不能直接原样复制CSV。
+- 清单旁的 `split_manifest.paths.json` 保存仅路径转换前后的校验值，请与CSV一起搬迁。它用于继续复用已有预处理记录和训练窗口索引；清单内容再次变化时校验失效。原始影像、标签像素和分组不因路径转换而改变。
+- 搬迁后的文件路径或修改时间变化仍可能使窗口索引失效；旧检查点、运行日志和逐景处理凭据属于历史记录，不会自动改写。搬迁后先完成输入检查/索引准备，再启动训练或预处理续跑。
+
 - `train.yaml`：管理训练数据、续跑、模型和训练验证图件。
 - `post_process.yaml`：独立管理待评估检查点、后处理输出目录、阈值扫描和修正参数。
 - `image_process.yaml`：`paths` 管理源数据和各阶段目录；`run.MODE` 每次选一个任务；`processing` 管理滤波和归一化；`snap` 管理 GPT 线程、内存及成功后的缓存清理。

@@ -39,6 +39,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from datasets import snap_preprocess
 from datasets.speckle import SpeckleFilter
+from datasets.manifest_paths import source_path, relative_source, manifest_fingerprint, write_relative_manifest
 from supervised.load.sar_scene_dataset import SARSceneDataset
 
 # 参数统一在YAML维护；以下只将配置绑定到现有函数使用的变量。
@@ -325,7 +326,8 @@ def prepare_scene(row, image_file, label_file, output, cache_root, *, bands, rea
         return [dict(name=name, label_name=name, split=row['split'],
                      active=int(totals['water_pixels'] + totals['background_pixels'] > 0),
                      group_id=row['group_id'], scene_id=row['scene_id'], scene=row['scene'],
-                     source_image=str(image_file), source_label=str(label_file), row_off=0, col_off=0,
+                     source_image=relative_source(image_file, output/'split_manifest.csv'),
+                     source_label=relative_source(label_file, output/'split_manifest.csv'), row_off=0, col_off=0,
                      source_height=source.height, source_width=source.width, **totals,
                      pixel_x=source.res[0], pixel_y=source.res[1])]
 
@@ -535,7 +537,7 @@ def rebuild_scene(row, data_dir, read_window_size=1024):
     pending = label_path.with_suffix('.tif.partial')
     with rasterio.open(image_path) as src:
         # class=0和class=1的面均烧为1，其他字段值也不决定水陆。
-        geometries, _ = read_polygons(row['source_label'], src.crs, None, {None: 1})
+        geometries, _ = read_polygons(source_path(row['source_label'], data_dir/'split_manifest.csv'), src.crs, None, {None: 1})
         tree = STRtree(geometries)
         total_pixels = src.width * src.height
         # 旧准备清单已经逐像素统计过有效性。整景全有效时无需再读数百MB的SAR。
@@ -912,7 +914,7 @@ def process_stage(stage):
         raise RuntimeError('原始标签已变化，请先重新运行上游处理阶段同步标签副本')
     if source_root != OUTPUT_DIR and (not parent.get('complete') or (source_root / '.preprocessing_incomplete').exists()):
         raise RuntimeError(f'输入阶段未完成：{source_root}')
-    if source_root != OUTPUT_DIR and parent.get('source_manifest_sha256') != hashlib.sha256(manifest.read_bytes()).hexdigest():
+    if source_root != OUTPUT_DIR and parent.get('source_manifest_sha256') != manifest_fingerprint(manifest):
         raise RuntimeError('输入阶段的标签/划分清单已变化，请先重新生成该阶段')
     domain = parent.get('output_domain', INPUT_DOMAIN)
     quantity = parent.get('quantity', 'uncalibrated_DN')
@@ -931,7 +933,7 @@ def process_stage(stage):
         filtering = SpeckleFilter(dict(method='snap_lee', input_domain=domain, window_size=FILTER_WINDOW, enl=ENL))
     parameters = dict(stage=stage, bands=list(BANDS), input_domain=parent.get('output_domain', INPUT_DOMAIN),
                       output_domain='standardized' if stage == 'normalized' else domain, quantity=quantity,
-                      source_root=str(source_root), source_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                      source_root=str(source_root), source_manifest_sha256=manifest_fingerprint(manifest),
                       filter=filtering.config if filtering else None,
                       calibration_reference=CALIBRATION_REFERENCE if stage == 'calibrated' else parent.get('calibration_reference',''),
                       calibration_command=CALIBRATION_COMMAND if stage == 'calibrated' else None)
@@ -1047,7 +1049,7 @@ def process_stage(stage):
                 shutil.copy2(label, copied_label)
             save_record(target/'processing_status.json', dict(stage=stage, complete=False, completed=number,
                         expected=len(rows), reused=reused, generated=generated, last_scene=row['scene_id']))
-        shutil.copy2(manifest, target/'split_manifest.csv')
+        write_relative_manifest(manifest, target/'split_manifest.csv')
         if stage == 'normalized':
             # 在发布完成标记前预建窗口索引；训练只读取，不再估计/应用归一化。
             ds = SARSceneDataset(target, WINDOW_CACHE_DIR, bands=tuple(range(1,len(BANDS)+1)), window_size=WINDOW_SIZE,

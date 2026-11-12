@@ -16,6 +16,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from datasets.dfc_sample.s1_dataset import WaterDataset, resolve_sample_path
+from datasets.manifest_paths import manifest_fingerprint
 from supervised.evaluation.boundary_eval import BoundaryEvaluator, confusion_counts, save_boundary_figure
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.postprocess import WaterEnsemble
@@ -196,7 +197,7 @@ def run_comparison(checkpoint_path=CHECKPOINT, image_dir=None, label_dir=None,
     if split_manifest is not None:
         # 新 val 曾属于旧模型的训练集，必须核对划分来源，不能只改评价目录。
         split_manifest = Path(split_manifest)
-        split_sha256 = hashlib.sha256(split_manifest.read_bytes()).hexdigest()
+        split_sha256 = manifest_fingerprint(split_manifest)
         split_rows = read_csv(split_manifest)
         active = [r for r in split_rows if int(r["active"]) == 1]
         expected_train = {r["name"] for r in active if r["split"] == "train"}

@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from supervised.load.sar_scene_dataset import IGNORE_INDEX, SARSceneDataset, merge_scene_manifests
 from datasets.speckle import SpeckleFilter
+from datasets.manifest_paths import manifest_fingerprint
 from supervised.models.losses import WaterSegmentationLoss
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.models.unet import UNet
@@ -296,7 +297,7 @@ class WaterSegmentationTrainer:
             self.train_set, self.val_set = Subset(self.dataset, train_ids), Subset(self.dataset, val_ids)
             self.split_info = dict(split_strategy='scene_grouped_core_windows', data_layout='full_scene',
                                    split_manifest=str(split_path),
-                                   split_manifest_sha256=hashlib.sha256(split_path.read_bytes()).hexdigest(),
+                                   split_manifest_sha256=manifest_fingerprint(split_path),
                                    window_size=self.dataset.window_size, window_halo=self.dataset.halo,
                                    validation_protocol=(f"overlap_{self.validation_inference['blend']}_logits; unique_final_pixels; isolated_validation_rng" if self.validation_inference else 'nonoverlap_core_all_labeled_pixels; halo_context; no resize'),
                                    window_cache_key=self.dataset.cache_key,
@@ -338,7 +339,7 @@ class WaterSegmentationTrainer:
                 self.val_set = Subset(self.dataset, val_ids)
                 self.split_info = dict(split_strategy="scene_stratified_grouped",
                                        split_manifest=str(split_path),
-                                       split_manifest_sha256=hashlib.sha256(split_path.read_bytes()).hexdigest())
+                                       split_manifest_sha256=manifest_fingerprint(split_path))
                 # 新划分的分数不可直接与历史随机划分混排，使用独立实验目录。
                 if not output_dir_is_final:
                     self.output_dir = self.output_dir.with_name(self.output_dir.name + "_grouped")

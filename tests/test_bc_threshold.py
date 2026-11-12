@@ -89,7 +89,8 @@ class BCThresholdTests(unittest.TestCase):
                 z.write(raw,'folder/BC3-test.tiff');z.writestr('folder/BC3-test.xml',xml)
                 z.writestr('unrelated.xml','<product><platformHeading>999</platformHeading></product>')
             manifest=root/'split_manifest.csv'
-            record=dict(name=name,label_name=name,split='val',active=1,source_image=str(archive))
+            # 与CSV同目录的相对ZIP路径也应正确关联原始XML，不依赖工作目录。
+            record=dict(name=name,label_name=name,split='val',active=1,source_image=archive.name)
             with manifest.open('w',encoding='utf-8-sig',newline='') as f:
                 writer=csv.DictWriter(f,fieldnames=record);writer.writeheader();writer.writerow(record)
                 # 这两条故意无实际文件，必须按清单排除而不是扫描目录或误读train。

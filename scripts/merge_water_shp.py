@@ -1,32 +1,42 @@
-"""可选的水体SHP按日期合并；不由阈值提取主流程调用。"""
+"""按日期拼接水体SHP；默认追加要素，可选几何并集消除重叠。"""
 import json
 import sys
+from pathlib import Path
 from threading import Event, Thread
 from time import perf_counter
 from contextlib import contextmanager
-from pathlib import Path
+import fiona
+from fiona.transform import transform_geom
+from pyproj import CRS, Transformer
+from shapely.geometry import shape, mapping
+from shapely.ops import unary_union
+from shapely import transform as transform_geometry, from_wkb, to_wkb, get_parts, geos_version
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from thres_segmentation.run_log import RunLog
 
-import fiona
-from pyproj import CRS, Transformer
-from shapely.geometry import shape, mapping
-from shapely.ops import unary_union
-from shapely import transform as transform_geometry, from_wkb, to_wkb
-
-# 独立执行设置。只读取已完成的逐景产品，不修改它们。
 INPUT_ROOT=Path(r'E:\InSAR\水体提取\北京密云区\outputs\thres_seg_20261112')
 OUTPUT_DIR=Path(r'E:\InSAR\水体提取\北京密云区\outputs\thres_seg_20261112\merged')
 TARGET_CRS='EPSG:32650'
-ROI_PATH=Path(r'E:\InSAR\水体提取\北京密云区\密云区行政划分.shp')  # 不需要ROI时设为None。
+ROI_PATH=Path(r'E:\InSAR\水体提取\北京密云区\密云区行政划分.shp')  # 可设None。
 SAVE_QUICKLOOK=True
-PREVIEW_SIZE=1600  # 快视图栅格的最长边，不影响SHP几何精度。
+PREVIEW_SIZE=1600
+WRITE_BATCH_SIZE=5000
+DISSOLVE=False  # False：快速追加，保留重叠；True：几何并集，消除重叠和内部边界。
+MERGE_BATCH_SIZE=2000  # 仅并集模式使用：磁盘分批归并，完成节点可以续跑。
+HEARTBEAT_SECONDS=10  # GEOS计算期间定时提示耗时。
+UNION_METHOD='disjoint_subset'  # 支持时采用空间子集并集，否则回退unary_union。
 CONSOLE_COLOR=True
-MERGE_BATCH_SIZE=2000  # 每个叶子批次独立合并，不反复合并之前的全部结果。
-WRITE_BATCH_SIZE=1000
-HEARTBEAT_SECONDS=10  # GEOS单次计算期间显示等待时长，不伪造完成百分比。
-RESUME=True  # 同一输入下复用本输出目录.merge_cache；换输入/参数请换输出目录或设False。
+RESUME=True  # 复用本脚本已完成的日期；更换输入/参数后另设输出目录或设False。
+
+
+def merge_geometries(geometries):
+    """拆开MultiPolygon，按真实相交关系归组；仍为精确矢量并集，不简化边界。"""
+    import shapely
+    if UNION_METHOD=='disjoint_subset' and geos_version>=(3,12,0) and hasattr(shapely,'disjoint_subset_union_all'):
+        # 必须先拆分大MultiPolygon，否则它包含的离散小面无法充分参与空间分组。
+        return shapely.disjoint_subset_union_all(get_parts(geometries))
+    return unary_union(geometries)
 
 
 @contextmanager
@@ -52,7 +62,7 @@ def cached_union(geometries, destination, log, label):
     log.message(f'{label}：开始几何并集')
     with show_activity(log,label):
         # 上层传入的是两个已合并节点；叶子传入固定数量的原始面。
-        result=unary_union(geometries)
+        result=merge_geometries(geometries)
         pending=destination.with_suffix('.partial.wkb')
         pending.write_bytes(to_wkb(result));pending.replace(destination)
     log.message(f'{label}：完成，耗时{perf_counter()-started:.1f}秒','DONE')
@@ -98,126 +108,155 @@ def merge_date(records,target,cache,log):
     return from_wkb(nodes[0].read_bytes()) if nodes else unary_union([])
 
 
-def save_quicklook(water, roi, path, title, target, max_side):
-    """仅在显示网格上栅格化，保留水体孔洞；ROI叠加显示，不裁剪合并结果。"""
+def save_quicklook(water_path,roi_path,destination,title,target,max_side):
+    """流式栅格化仅用于显示，避免将所有水体组成一个巨大几何。"""
     import numpy as np
     from rasterio.features import rasterize
     from rasterio.transform import from_bounds
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.patches import Patch
-    geometries=[g for g in (water,roi) if g is not None and not g.is_empty]
-    if geometries:
-        bounds=[g.bounds for g in geometries]
+    bounds=[]
+    for path in (water_path,roi_path):
+        if path is not None:
+            with fiona.open(path) as src:
+                if len(src):bounds.append(src.bounds)
+    if bounds:
         left,bottom=min(b[0] for b in bounds),min(b[1] for b in bounds)
         right,top=max(b[2] for b in bounds),max(b[3] for b in bounds)
-    else:
-        left,bottom,right,top=0,0,1,1
+    else:left,bottom,right,top=0,0,1,1
     margin=max(right-left,top-bottom)*.04
     left-=margin;right+=margin;bottom-=margin;top+=margin
     scale=max_side/max(right-left,top-bottom)
-    width,height=max(1,round((right-left)*scale)),max(1,round((top-bottom)*scale))
-    transform=from_bounds(left,bottom,right,top,width,height)
-    rgb=np.full((height,width,3),255,np.uint8)
-    if water is not None and not water.is_empty:
-        mask=rasterize([(mapping(water),1)],out_shape=(height,width),transform=transform,dtype='uint8')
+    size=(max(1,round((top-bottom)*scale)),max(1,round((right-left)*scale)))
+    grid=from_bounds(left,bottom,right,top,size[1],size[0])
+    rgb=np.full((*size,3),255,np.uint8)
+    mask=np.zeros(size,np.uint8)
+    if water_path is not None:
+        with fiona.open(water_path) as src:
+            batch=[];total=len(src)
+            for index,feature in enumerate(src,1):
+                if feature['geometry']:batch.append((feature['geometry'],1))
+                if index%WRITE_BATCH_SIZE==0 or index==total:
+                    if batch:
+                        layer=rasterize(batch,out_shape=size,transform=grid,dtype='uint8')
+                        np.maximum(mask,layer,out=mask);batch=[]
+                    print(f'快视图绘制：{index}/{total}面 ({index/max(total,1):.1%})',flush=True)
         rgb[mask==1]=(35,115,195)
-    if roi is not None and not roi.is_empty:
-        border=rasterize([(mapping(roi.boundary),1)],out_shape=(height,width),transform=transform,dtype='uint8')
-        rgb[border==1]=(210,65,45)
+    if roi_path is not None:
+        lines=[]
+        with fiona.open(roi_path) as src:
+            for feature in src:
+                g=feature['geometry']
+                if not g:continue
+                polygons=[g['coordinates']] if g['type']=='Polygon' else g['coordinates']
+                for polygon in polygons:
+                    for ring in polygon:lines.append(({'type':'LineString','coordinates':ring},1))
+        if lines:
+            border=rasterize(lines,out_shape=size,transform=grid,dtype='uint8')
+            rgb[border==1]=(210,65,45)
     fig=Figure(figsize=(9,8));FigureCanvasAgg(fig)
     ax=fig.subplots();ax.imshow(rgb,extent=(left,right,bottom,top),origin='upper')
-    ax.set_aspect('equal');ax.set_title(title);ax.set_xlabel(f'Easting (m) | {target.to_string()}');ax.set_ylabel('Northing (m)')
+    ax.set_aspect('equal');ax.set_title(title)
+    ax.set_xlabel(f'Easting (m) | {target.to_string()}');ax.set_ylabel('Northing (m)')
     legend=[]
-    if water is not None:legend.append(Patch(facecolor='#2373c3',label='Merged water'))
-    if roi is not None:legend.append(Patch(facecolor='none',edgecolor='#d2412d',label='ROI boundary'))
+    if water_path is not None:legend.append(Patch(facecolor='#2373c3',label='Water'))
+    if roi_path is not None:legend.append(Patch(facecolor='none',edgecolor='#d2412d',label='ROI boundary'))
     if legend:ax.legend(handles=legend,loc='upper right')
-    if water is not None and water.is_empty:ax.text(.5,.5,'No detected water',transform=ax.transAxes,ha='center')
-    fig.text(.5,.01,'White background does not establish non-water or valid SAR coverage.',ha='center',fontsize=8)
-    fig.tight_layout(rect=(0,.03,1,1));fig.savefig(path,dpi=150);fig.clear()
+    fig.text(.5,.01,'White does not establish non-water or SAR coverage.',ha='center',fontsize=8)
+    fig.tight_layout(rect=(0,.03,1,1));fig.savefig(destination,dpi=150);fig.clear()
 
 
-def merge_results(input_root,output_dir,target_crs,roi_path=None,save_previews=True,preview_size=1600):
-    """同步输出控制台、processing.log和stage_timings.csv；异常与中断也记入日志。"""
+def merge_results(input_root,output_dir,target_crs,roi_path=None,save_previews=True,preview_size=1600,dissolve=False):
+    """默认追加；并集使用独立文件名和分批缓存，两种结果可以共存。"""
+    output_dir=Path(output_dir);target=CRS.from_user_input(target_crs)
+    method='geometric_union' if dissolve else 'feature_append'
+    mode='几何并集（消除重叠）' if dissolve else '追加要素（保留重叠）'
     log=RunLog(output_dir,CONSOLE_COLOR)
-    with log.capture(),log.stage('00','按日期合并水体总计'):
-        print(f'输入：{input_root}；输出：{output_dir}；ROI：{roi_path}',flush=True)
-        return _merge_results(input_root,output_dir,target_crs,roi_path,save_previews,preview_size,log)
-
-
-def _merge_results(input_root,output_dir,target_crs,roi_path,save_previews,preview_size,log):
-    """同日期几何并集；可选导出ROI和快视图，不裁剪水体、不作时序判别。"""
-    target=CRS.from_user_input(target_crs)
-    if not target.is_projected or any(abs(a.unit_conversion_factor-1)>1e-9 for a in target.axis_info[:2]):
-        raise ValueError('面积输出要求米制投影坐标系')
-    grouped={}
-    with log.stage('01','扫描已完成的逐景成果'):
-        for path in sorted(Path(input_root).glob('*/*/scene.json')):
-            record=json.loads(path.read_text(encoding='utf-8'))
-            if record['status']!='complete':continue
-            water=path.parent/'water.shp'
-            if not water.is_file():raise FileNotFoundError(f'水体成果缺失：{water}')
-            record['water_shp']=str(water)
-            grouped.setdefault(record['date'],[]).append(record)
-        print(f'发现{len(grouped)}个日期、{sum(map(len,grouped.values()))}景已完成成果',flush=True)
-    if not grouped:raise ValueError('没有已完成的逐景水体SHP')
-    output_dir=Path(output_dir);output_dir.mkdir(parents=True,exist_ok=True)
-    roi=None
-    if roi_path is not None:
-        print('[02] 读取/重投影ROI并导出ROI副本',flush=True)
-        with fiona.open(roi_path) as src:
-            if not src.crs:raise ValueError(f'ROI缺少CRS：{roi_path}')
-            transform=Transformer.from_crs(src.crs,target,always_xy=True).transform
-            roi=unary_union([transform_geometry(shape(f['geometry']),transform,interleaved=False,include_z=None)
-                             for f in src if f['geometry']])
-        if roi.is_empty or roi.geom_type not in ('Polygon','MultiPolygon'):
-            raise ValueError('ROI必须包含非空面几何')
-        # 输出重投影后的ROI副本；保留源文件，合并内部行政单元边界。
-        with fiona.open(output_dir/'roi.shp','w',driver='ESRI Shapefile',
-                        schema={'geometry':'Polygon','properties':{'id':'int'}},crs_wkt=target.to_wkt(),encoding='UTF-8') as dst:
-            for i,geom in enumerate([roi] if roi.geom_type=='Polygon' else roi.geoms,1):
-                dst.write({'geometry':mapping(geom),'properties':{'id':i}})
-        if save_previews:
-            with log.stage('02','生成ROI快视图'):
-                save_quicklook(None,roi,output_dir/'roi.png','ROI',target,preview_size)
-    for date_index,(date,records) in enumerate(grouped.items(),1):
-        print(f'日期 {date_index}/{len(grouped)}：{date}；共{len(records)}景',flush=True)
-        summary_file=output_dir/f'{date}_sources.json'
-        required=[output_dir/f'{date}_water{suffix}' for suffix in ('.shp','.shx','.dbf','.prj')]
-        if save_previews:required.append(output_dir/f'{date}_water.png')
-        if RESUME and summary_file.exists() and all(p.exists() for p in required):
-            previous=json.loads(summary_file.read_text(encoding='utf-8'))
-            if previous.get('complete'):
-                log.message(f'{date}：复用已完成的SHP和快视图','REUSED');continue
-        # 先撤销本日期完成标记；中断后不能把部分写出的SHP当作成品。
-        if summary_file.exists():summary_file.unlink()
-        combined=merge_date(records,target,output_dir/'.merge_cache'/date,log)
-        schema={'geometry':'Polygon','properties':{'date':'str:10','n_scenes':'int'}}
-        with log.stage('06','写出合并SHP',date), show_activity(log,f'{date}写出SHP'), fiona.open(output_dir/f'{date}_water.shp','w',driver='ESRI Shapefile',schema=schema,
-                        crs_wkt=target.to_wkt(),encoding='UTF-8') as dst:
-            polygons=[combined] if combined.geom_type=='Polygon' else getattr(combined,'geoms',[])
-            features=[]
-            for polygon_index,geom in enumerate(polygons,1):
-                if geom.geom_type=='Polygon' and not geom.is_empty:
-                    features.append({'geometry':mapping(geom),'properties':{'date':date,'n_scenes':len(records)}})
-                if len(features)>=WRITE_BATCH_SIZE:
-                    dst.writerecords(features);features=[]
-                    print(f'SHP写出：{polygon_index}/{len(polygons)}个面 ({polygon_index/max(len(polygons),1):.1%})',flush=True)
-            if features:dst.writerecords(features)
-        print(f'水体SHP已写出：{output_dir / (date+"_water.shp")}',flush=True)
-        if save_previews:
-            with log.stage('07','栅格化并保存日期快视图',date), show_activity(log,f'{date}生成快视图'):
-                save_quicklook(combined,roi,output_dir/f'{date}_water.png',
-                               f'{date} | {len(records)} scenes | water {combined.area/1e6:.3f} km2',target,preview_size)
-        summary={'complete':True,'date':date,'scene_ids':[r['scene_id'] for r in records],'water_area_m2':combined.area,
-                 'roi_source':str(roi_path) if roi_path is not None else None,'roi_role':'display_only_no_clipping',
-                 'quicklook':f'{date}_water.png' if save_previews else None,
-                 'method':'geometric_union','note':'仅对已有水体面求并集；未覆盖范围不代表非水体，不评定精度。'}
-        pending=summary_file.with_suffix('.partial.json')
-        pending.write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8');pending.replace(summary_file)
-        print(f'{date}：{len(records)}景，合并水体面积{combined.area/1e6:.3f}平方公里',flush=True)
-    return output_dir
+    with log.capture(),log.stage('00',f'按日期合并SHP：{mode}'):
+        print(f'输入：{input_root}；输出：{output_dir}；模式：{mode}',flush=True)
+        grouped={}
+        with log.stage('01','扫描已完成的逐景产品'):
+            for path in sorted(Path(input_root).glob('*/*/scene.json')):
+                record=json.loads(path.read_text(encoding='utf-8'))
+                if record['status']!='complete':continue
+                water=path.parent/'water.shp'
+                if not water.is_file():raise FileNotFoundError(water)
+                record['water_shp']=str(water)
+                grouped.setdefault(record['date'],[]).append(record)
+            print(f'{len(grouped)}日期，{sum(map(len,grouped.values()))}景',flush=True)
+        if not grouped:raise ValueError('没有已完成的逐景水体SHP')
+        roi_output=None
+        if roi_path is not None:
+            roi_output=output_dir/'roi.shp'
+            with log.stage('02','导出ROI及快视图'),fiona.open(roi_path) as src:
+                if not src.crs:raise ValueError(f'ROI缺少CRS：{roi_path}')
+                same=CRS.from_user_input(src.crs)==target
+                with fiona.open(roi_output,'w',driver='ESRI Shapefile',schema=src.schema,crs_wkt=target.to_wkt(),encoding='UTF-8') as dst:
+                    for f in src:
+                        if not f['geometry']:continue
+                        geom=f['geometry'] if same else transform_geom(src.crs,target.to_wkt(),f['geometry'])
+                        dst.write({'geometry':geom,'properties':dict(f['properties'])})
+                if save_previews:save_quicklook(None,roi_output,output_dir/'roi.png','ROI',target,preview_size)
+        schema={'geometry':'Polygon','properties':({'date':'str:10'} if dissolve else {'scene_id':'str:120','date':'str:10','sensor':'str:8'})}
+        for date_index,(date,records) in enumerate(grouped.items(),1):
+            print(f'日期 {date_index}/{len(grouped)}：{date}，{len(records)}景',flush=True)
+            suffix='_union' if dissolve else ''
+            summary_file=output_dir/f'{date}{suffix}_sources.json'
+            water_output=output_dir/f'{date}_water{suffix}.shp'
+            preview_output=water_output.with_suffix('.png')
+            required=[water_output.with_suffix(s) for s in ('.shp','.shx','.dbf','.prj')]
+            if save_previews:required.append(preview_output)
+            if RESUME and summary_file.exists() and all(p.exists() for p in required):
+                previous=json.loads(summary_file.read_text(encoding='utf-8'))
+                if previous.get('complete') and previous.get('method')==method:
+                    log.message(f'{date}：复用已完成拼接','REUSED');continue
+            if summary_file.exists():summary_file.unlink()
+            pending=water_output.with_suffix('.partial.shp')
+            count=0
+            if dissolve:
+                # 并集后的面可能来自多景，逐面不再填写单一scene_id；来源写入JSON。
+                water=merge_date(records,target,output_dir/'.merge_cache'/date,log)
+                with log.stage('05','写出几何并集SHP',date),fiona.open(pending,'w',driver='ESRI Shapefile',schema=schema,crs_wkt=target.to_wkt(),encoding='UTF-8') as dst:
+                    batch=[]
+                    for geom in get_parts(water):
+                        if geom.is_empty:continue
+                        batch.append({'geometry':mapping(geom),'properties':{'date':date}})
+                        if len(batch)>=WRITE_BATCH_SIZE:
+                            dst.writerecords(batch);count+=len(batch);batch=[]
+                            print(f'并集SHP已写出{count}面',flush=True)
+                    if batch:dst.writerecords(batch);count+=len(batch)
+                del water
+            else:
+                with log.stage('03','读取并批量写出SHP',date),fiona.open(pending,'w',driver='ESRI Shapefile',schema=schema,crs_wkt=target.to_wkt(),encoding='UTF-8') as dst:
+                    for scene_index,record in enumerate(records,1):
+                        with fiona.open(record['water_shp']) as src:
+                            if not src.crs:raise ValueError(f"SHP缺少CRS：{record['water_shp']}")
+                            same=CRS.from_user_input(src.crs)==target
+                            total=len(src);batch=[]
+                            print(f'景{scene_index}/{len(records)}：{record["scene_id"]}；{total}面；同CRS直接复制={same}',flush=True)
+                            for index,feature in enumerate(src,1):
+                                if feature['geometry']:
+                                    geom=feature['geometry'] if same else transform_geom(src.crs,target.to_wkt(),feature['geometry'])
+                                    batch.append({'geometry':geom,'properties':{'scene_id':record['scene_id'],'date':date,'sensor':record.get('sensor','')}})
+                                if index%WRITE_BATCH_SIZE==0 or index==total:
+                                    dst.writerecords(batch);count+=len(batch);batch=[]
+                                    print(f'景{scene_index}/{len(records)} 已追加{index}/{total}面 ({index/max(total,1):.1%})；本日期累计{count}面',flush=True)
+            for suffix in ('.shp','.shx','.dbf','.prj','.cpg'):
+                source=pending.with_suffix(suffix)
+                if source.exists():source.replace(water_output.with_suffix(suffix))
+            print(f'SHP已完成：{water_output}；{count}面；{mode}',flush=True)
+            if save_previews:
+                with log.stage('04','生成日期快视图',date):
+                    save_quicklook(water_output,roi_output,preview_output,f'{date} | {method} | {len(records)} scenes | {count} features',target,preview_size)
+            summary={'complete':True,'method':method,'date':date,'scene_ids':[r['scene_id'] for r in records],
+                     'feature_count':count,'roi_source':str(roi_path) if roi_path else None,'roi_role':'display_only_no_clipping',
+                     'quicklook':preview_output.name if save_previews else None,
+                     'note':('几何并集，重叠已消除；逐面不再保留单景来源，全部来源见scene_ids。' if dissolve else '仅拼接，不做溶解/去重；重叠面保留，不能直接累加面面积作为去重水体面积。')}
+            temp=summary_file.with_suffix('.partial.json')
+            temp.write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(summary_file)
+        return output_dir
 
 
 if __name__=='__main__':
-    merge_results(INPUT_ROOT,OUTPUT_DIR,TARGET_CRS,ROI_PATH,SAVE_QUICKLOOK,PREVIEW_SIZE)
+    merge_results(INPUT_ROOT,OUTPUT_DIR,TARGET_CRS,ROI_PATH,SAVE_QUICKLOOK,PREVIEW_SIZE,dissolve=DISSOLVE)

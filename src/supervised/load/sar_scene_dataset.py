@@ -12,6 +12,7 @@ from rasterio.windows import Window
 import torch
 from torch.utils.data import Dataset
 from datasets.speckle import SpeckleFilter, read_filtered_window
+from datasets.manifest_paths import manifest_fingerprint, source_path
 
 IGNORE_INDEX = -1
 
@@ -88,7 +89,7 @@ class SARSceneDataset(Dataset):
                             linked = path.parent / linked
                         linked_stat = linked.stat()
                         source_stamp.append((str(linked.resolve()), linked_stat.st_size, linked_stat.st_mtime_ns))
-        signature = dict(version=1, manifest=hashlib.sha256(self.manifest_path.read_bytes()).hexdigest(),
+        signature = dict(version=1, manifest=manifest_fingerprint(self.manifest_path),
                          sources=source_stamp, window=window_size, halo=halo, bands=bands)
         self.cache_key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()[:20]
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -283,6 +284,11 @@ def merge_scene_manifests(manifest_paths, **dataset_options):
                 if identifier.casefold() in seen:
                     raise ValueError(f'多个manifest存在重复景号：{identifier}；请移除重复来源')
                 seen.add(identifier.casefold())
+                # 合并清单放在仓库缓存，先按各自CSV解析源路径，防止基准目录改变。
+                row = dict(row)
+                for field in ('source_image', 'source_label'):
+                    if row.get(field):
+                        row[field] = str(source_path(row[field], path))
                 # name使用绝对路径，现有训练/整景验证的Path拼接均会保留该绝对路径。
                 merged.append(dict(row, original_name=row['name'],
                                    name=str((path.parent/'images'/row['split']/row['name']).resolve()),
@@ -293,7 +299,7 @@ def merge_scene_manifests(manifest_paths, **dataset_options):
             windows.append(part)
         finally:
             child.close()
-        sources.append(dict(manifest=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        sources.append(dict(manifest=str(path), sha256=manifest_fingerprint(path),
                             preprocessing=record))
     train_groups = {r['group_id'] for r in merged if r['split'] == 'train'}
     val_groups = {r['group_id'] for r in merged if r['split'] == 'val'}

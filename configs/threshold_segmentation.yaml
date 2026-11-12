@@ -1,8 +1,10 @@
 # 通用离线val阈值配置；密云ORG案例见configs/北京密云区/threshold_segmentation.yaml。
 paths:
-  IMAGE_DIR: I:\水体数据\processed_scenes_bat2\normalized\images\val
-  LABEL_DIR: I:\水体数据\processed_scenes_bat2\normalized\labels\val
-  SPLIT_MANIFEST: I:\水体数据\processed_scenes_bat2\normalized\split_manifest.csv
+  # 数据搬迁后只修改本项；其余相对路径以此目录为基准。
+  DATA_ROOT: I:\水体数据
+  IMAGE_DIR: processed_scenes_bat2\normalized\images\val
+  LABEL_DIR: processed_scenes_bat2\normalized\labels\val
+  SPLIT_MANIFEST: processed_scenes_bat2\normalized\split_manifest.csv
   CACHE_DIR: E:\Code_projects\sar_water_extraction\data_cache\threshold_bc
   AUXILIARY_CACHE_DIR: E:\Code_projects\sar_water_extraction\data_cache\auxiliary
   OUTPUT_ROOT: E:\Code_projects\sar_water_extraction\outputs\thres_seg\quality
