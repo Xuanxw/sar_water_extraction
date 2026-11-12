@@ -15,7 +15,7 @@ from thres_segmentation.water_analysis import pixel_areas, area_sum
 def load_review_options():
     """质量检查参数独立配置，不读取训练配置、不启动影像处理。"""
     import yaml
-    path=Path(__file__).resolve().parents[2]/'configs/threshold_quality.yaml'
+    path=Path(__file__).resolve().parents[2]/'configs/threshold_segmentation.yaml'
     with path.open(encoding='utf-8') as stream:
         return yaml.safe_load(stream)['quality_review']
 

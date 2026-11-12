@@ -189,7 +189,7 @@ def image_path(path, cache=None):
 
 
 def read_polygons(path, target_crs, field, class_map):
-    """按明确映射读取面并转到影像CRS；未知类别不烧为背景，无效面不自动修复。"""
+    """读取标签面并转到影像CRS；仅清除退化内环，其余无效面仍按原规则处理。"""
     if not class_map or any(v not in (0, 1) for v in class_map.values()):
         raise ValueError("先确认标签类别，再配置CLASS_MAP或SCENE_CLASS_RULES；映射结果只能为0/1")
     geometries, classes, skipped = [], [], Counter()
@@ -206,7 +206,28 @@ def read_polygons(path, target_crs, field, class_map):
                 continue
             if not feature["geometry"]:
                 raise ValueError(f"标签要素{feature.id}为空：{path}")
-            geometry = shape(feature["geometry"])
+            raw_geometry = feature["geometry"]
+            removed_holes = 0
+            if raw_geometry["type"] in ("Polygon", "MultiPolygon"):
+                polygons = ([raw_geometry["coordinates"]] if raw_geometry["type"] == "Polygon"
+                            else raw_geometry["coordinates"])
+                cleaned = []
+                for rings in polygons:
+                    kept = list(rings[:1])  # 外环原样保留，不能为绕过报错而丢掉整个水体面。
+                    for ring in rings[1:]:
+                        # 不足三个不同平面坐标的内环没有面积，无法构成水体中的孔洞。
+                        # 仅在内存清除；不改源SHP，也不按面积正负删除自相交环。
+                        if len({tuple(point[:2]) for point in ring}) < 3:
+                            removed_holes += 1
+                        else:
+                            kept.append(ring)
+                    cleaned.append(kept)
+                raw_geometry = dict(type=raw_geometry["type"], coordinates=(
+                    cleaned[0] if raw_geometry["type"] == "Polygon" else cleaned))
+            try:
+                geometry = shape(raw_geometry)
+            except ValueError as error:
+                raise ValueError(f"标签要素{feature.id}无法构造面：{error}；{path}") from error
             if geometry.is_empty or (not geometry.is_valid and not ACCEPT_REVIEWED_GEOMETRY):
                 raise ValueError(f"标签要素{feature.id}几何待修复：{explain_validity(geometry)}；{path}")
             if not same_crs:
@@ -215,6 +236,8 @@ def read_polygons(path, target_crs, field, class_map):
                 raise ValueError(f"标签要素{feature.id}转换后不是有效面：{path}")
             if not geometry.is_valid:
                 print(f"  已人工复核，原样栅格化：{path.name} 要素{feature.id}；{explain_validity(geometry)}", flush=True)
+            if removed_holes:
+                print(f"  读取时移除{removed_holes}个退化内环：{path.name} 要素{feature.id}；保留外环，原SHP未修改", flush=True)
             geometries.append(geometry)
             classes.append(class_map[value])
     if skipped:

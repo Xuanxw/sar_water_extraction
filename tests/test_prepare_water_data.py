@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from zipfile import ZipFile, ZIP_DEFLATED
 import csv
+import json
 import sys
 import unittest
 
@@ -15,7 +16,7 @@ import rasterio
 from rasterio.features import rasterize
 from rasterio.transform import from_origin
 from rasterio.warp import transform_geom
-from shapely.geometry import box, mapping, Polygon
+from shapely.geometry import box, mapping, Polygon, MultiPolygon
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
@@ -25,6 +26,12 @@ from datasets.dfc_sample.s1_dataset import WaterDataset
 
 
 class PrepareWaterDataTests(unittest.TestCase):
+    def setUp(self):
+        # 合成清单不分生产批次，避免当前YAML选择batch 2时把测试样本全部过滤。
+        batch = patch.object(prepare, 'PREPARE_BATCH', None)
+        batch.start()
+        self.addCleanup(batch.stop)
+
     def sources(self, root, name='SAMPLE_A', nodata=-9999, reproject=False):
         images, labels = root/'source_images', root/'source_labels'
         images.mkdir(exist_ok=True)
@@ -130,8 +137,45 @@ class PrepareWaterDataTests(unittest.TestCase):
             with fiona.open(bad,'w',driver='ESRI Shapefile',crs='EPSG:32650',
                             schema={'geometry':'Polygon','properties':{'kind':'int'}}) as dst:
                 dst.write(dict(geometry=mapping(Polygon([(0,0),(2,2),(0,2),(2,0),(0,0)])),properties={'kind':1}))
-            with self.assertRaisesRegex(ValueError,'几何待修复'):
+            with patch.object(prepare,'ACCEPT_REVIEWED_GEOMETRY',False), self.assertRaisesRegex(ValueError,'几何待修复'):
                 prepare.read_polygons(bad,'EPSG:32650','kind',{1:1})
+
+    def test_degenerate_holes_preserve_water_polygon_and_real_holes(self):
+        """复现两点内环：保留外环、真实孔洞和多面部件，源文件不变。"""
+        outer=[(0,0),(10,0),(10,10),(0,10),(0,0)]
+        hole=[(2,2),(4,2),(4,4),(2,4),(2,2)]
+        other=[(20,0),(30,0),(30,10),(20,10),(20,0)]
+        with TemporaryDirectory() as temp:
+            for kind in ('Polygon','MultiPolygon'):
+                with self.subTest(kind=kind):
+                    rings=[outer,hole,[(5,5),(5,5)]]
+                    coordinates=rings if kind=='Polygon' else [rings,[other]]
+                    path=Path(temp)/'short_hole.geojson'
+                    path.write_text(json.dumps(dict(type='FeatureCollection',features=[dict(
+                        type='Feature',properties={'kind':1},geometry=dict(type=kind,coordinates=coordinates)
+                    )])),encoding='utf-8')
+                    before=path.read_bytes(); messages=StringIO()
+                    with redirect_stdout(messages),patch.object(prepare,'ACCEPT_REVIEWED_GEOMETRY',False):
+                        geometries,classes=prepare.read_polygons(path,'EPSG:4326','kind',{1:1})
+                    expected=Polygon(outer,[hole])
+                    if kind=='MultiPolygon':
+                        expected=MultiPolygon([expected,Polygon(other)])
+                    self.assertEqual(len(geometries),1)
+                    self.assertTrue(geometries[0].is_valid)
+                    self.assertTrue(geometries[0].equals(expected))
+                    np.testing.assert_array_equal(classes,[1])
+                    self.assertIn('移除1个退化内环',messages.getvalue())
+                    self.assertEqual(path.read_bytes(),before)
+
+    def test_malformed_outer_ring_still_reports_feature(self):
+        """外环不能被静默删除；出错时明确打印要素编号。"""
+        with TemporaryDirectory() as temp:
+            path=Path(temp)/'short_outer.geojson'
+            path.write_text(json.dumps(dict(type='FeatureCollection',features=[dict(
+                type='Feature',properties={'kind':1},geometry=dict(type='Polygon',coordinates=[[(0,0),(0,0)]])
+            )])),encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'标签要素0无法构造面'):
+                prepare.read_polygons(path,'EPSG:4326','kind',{1:1})
 
     def test_main_preserves_split_and_ignores_unapproved_scenes(self):
         with TemporaryDirectory() as temp:

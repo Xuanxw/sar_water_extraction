@@ -1,0 +1,19 @@
+# 手动执行：python scripts/slope_threshold_comparison.py
+# 除基础Q10、历史Q20及坡度20/15/10外，科学参数沿用原生产run.json。
+# 不依赖history_threshold_comparison的结果，不重新运行SNAP，不下载辅助数据。
+# 三组的差异均相对本实验slope_20计算；人工核验点沿用原生产点位和权重。
+# 续跑记录只放本实验CACHE_DIR；完整分割、矢量及单组成果分别复用。
+# 修改参数或输入后另设OUTPUT_DIR/CACHE_DIR，或resume:false重新计算本实验。
+paths:
+  BASELINE_OUTPUT_DIR: E:\InSAR\水体提取\北京密云区\outputs\thres_seg
+  BASELINE_CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_bc
+  SNAP_CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_snap
+  AUXILIARY_CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\auxiliary
+  OUTPUT_DIR: E:\InSAR\水体提取\北京密云区\outputs\slope_threshold_comparison
+  CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\slope_threshold_comparison
+experiment:
+  base_percentile: 10
+  history_percentile: 20
+  max_slope_degrees: [20, 15, 10]  # 严格大于阈值才剔除，阈值越小越严格。
+  resume: true
+  console_color: true

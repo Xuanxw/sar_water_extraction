@@ -22,12 +22,13 @@ class BCThresholdTests(unittest.TestCase):
     def test_entry_dispatches_bc_single_vv(self):
         from thres_segmentation import main
         with patch("thres_segmentation.scene_pipeline.run_scene_segmentation", return_value={}) as run:
-            main.main()
+            main.main(Path(__file__).resolve().parents[1]/"configs/threshold_segmentation.yaml")
         self.assertEqual(run.call_args.kwargs['bands'], {'VV':1})
         self.assertEqual(run.call_args.kwargs['threshold_options']['preprocessing'],'offline_normalized')
         self.assertNotIn('stretch',run.call_args.kwargs['threshold_options'])
-        self.assertEqual(main.IMAGE_DIR,main.PREPROCESSING['paths']['NORMALIZED_ROOT']/'images/val')
-        self.assertEqual(run.call_args.kwargs['image_dir'], main.SPLIT_MANIFEST.parent/'images/val')
+        config=main.load_yaml(Path(__file__).resolve().parents[1]/"configs/threshold_segmentation.yaml")
+        self.assertEqual(run.call_args.kwargs['image_dir'],config['paths']['IMAGE_DIR'])
+        self.assertEqual(run.call_args.kwargs['image_dir'],config['paths']['SPLIT_MANIFEST'].parent/'images/val')
 
     def test_disk_percentiles_match_numpy_with_ties(self):
         with TemporaryDirectory() as temp:
@@ -36,6 +37,39 @@ class BCThresholdTests(unittest.TestCase):
             values.tofile(path)
             q=[0,1,10,50,99,100]
             np.testing.assert_allclose(disk_percentiles(path,len(values),q)[0],np.percentile(values,q))
+
+    def test_custom_yaml_controls_all_dispatch_parameters(self):
+        import yaml
+        from thres_segmentation import main
+        with TemporaryDirectory() as temp:
+            config=yaml.safe_load((Path(__file__).resolve().parents[1]/'configs/threshold_segmentation.yaml').read_text(encoding='utf-8'))
+            config['paths']['IMAGE_DIR']=str(Path(temp)/'images/val')
+            config['paths']['LABEL_DIR']=None
+            config['paths']['SPLIT_MANIFEST']=str(Path(temp)/'split_manifest.csv')
+            config['paths']['REFERENCE_PATH']=str(Path(temp)/'history.tif')
+            config['paths']['OUTPUT_DIR']=str(Path(temp)/'result')
+            config['threshold']['water_percent']=7.5
+            config['threshold']['mode']='top'
+            config['input']['bands']={'VH':2}
+            config['input']['scene_prefix']='BC4-'
+            config['processing']['block_size']=2048
+            config['quality_review']['points_per_stratum']=17
+            config['output']['max_visualizations']=0
+            path=Path(temp)/'test.yaml';path.write_text(yaml.safe_dump(config),encoding='utf-8')
+            with patch('thres_segmentation.scene_pipeline.run_scene_segmentation',return_value={}) as run:
+                main.main(path)
+            args=run.call_args.kwargs
+            self.assertEqual(args['image_dir'],Path(temp)/'images/val')
+            self.assertIsNone(args['label_dir'])
+            self.assertEqual(args['analysis_options']['reference_path'],Path(temp)/'history.tif')
+            self.assertEqual(args['threshold_options']['water_percent'],7.5)
+            self.assertEqual(args['threshold_options']['mode'],'top')
+            self.assertEqual(args['bands'],{'VH':2})
+            self.assertEqual(args['scene_prefix'],'BC4-')
+            self.assertEqual(args['block_size'],2048)
+            self.assertEqual(args['quality_review_options']['points_per_stratum'],17)
+            self.assertEqual(args['max_visualizations'],0)
+            self.assertEqual(args['output_dir'],Path(temp)/'result')
 
     def test_full_scene_matches_in_memory_and_boundary_counts(self):
         with TemporaryDirectory() as temp:

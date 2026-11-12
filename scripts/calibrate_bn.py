@@ -26,6 +26,8 @@ ROOT = Path("E:/Code_projects/sar_water_extraction")
 # 固定要诊断的源检查点；训练仍在运行时train_end可能被下一轮覆盖，请先停止或改用固定副本。
 RUN_DIR = ROOT / "outputs/pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_bc_scenes_overlap/20261110_221430_589086"
 CHECKPOINT_NAME = "train_end.pth"
+# None新建对照；指定目录则复用校准模型，跳过CSV中已经完成的景/阶段。
+RESUME_DIR = RUN_DIR / "bn_calibration/20261111_164753_515753"
 EXPECTED_EPOCH = 7  # 防止运行中的train_end更新后，误把其他轮当成第7轮；None不限定。
 CALIBRATION_SAMPLES = 128  # 固定种子抽取train窗口，不能按val表现挑选。
 CACHE_DIR = ROOT / "data_cache/bc_scenes"
@@ -72,8 +74,13 @@ class BNCalibrator:
         if EXPECTED_EPOCH is not None and self.checkpoint['epoch'] != EXPECTED_EPOCH:
             raise ValueError(f"源检查点已变为第{self.checkpoint['epoch']}轮；预期第{EXPECTED_EPOCH}轮，请核对配置")
         self.validation_inference = self.checkpoint.get('validation_inference', {})
-        self.output_dir = self.run_dir / "bn_calibration" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        self.output_dir.mkdir(parents=True, exist_ok=False)
+        self.output_dir = (Path(RESUME_DIR) if RESUME_DIR is not None else
+                           self.run_dir / "bn_calibration" / datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+        if RESUME_DIR is not None:
+            if not (self.output_dir/'calibrated.pth').is_file():
+                raise FileNotFoundError(f'续跑目录缺少calibrated.pth：{self.output_dir}')
+        else:
+            self.output_dir.mkdir(parents=True, exist_ok=False)
         # 校准只能恢复统计量不匹配，不能修复已经变成 NaN/Inf 的模型参数。
         if not all(torch.isfinite(value).all().item() for value in self.checkpoint["model_state_dict"].values()):
             raise ValueError("模型包含 NaN/Inf，不能通过 BN 校准恢复，请选择有限权重的 BN 模型。")
@@ -81,7 +88,7 @@ class BNCalibrator:
         self.model = load_model(self.checkpoint).to(self.device)  # 根据模型名称重建并严格加载。
         self.model.eval()
 
-        # 完全使用检查点保存的划分；校准只需要训练影像，不读取它们的标签。
+        # 完全使用检查点保存的划分；标签不参与BN统计量估计。
         if self.checkpoint.get('data_layout') == 'full_scene':
             root = Path(self.checkpoint['image_dir']).parent
             check_preprocessed_input(root/'images',self.checkpoint)
@@ -277,14 +284,31 @@ class BNCalibrator:
         """先校准并保存，再逐景成对评价；每景立即写CSV和进度。"""
         print(f"输出目录：{self.output_dir}",flush=True)
         started=perf_counter()
-        self.calibrate_layers()
-        calibrated={k:v.detach().cpu().clone() for k,v in self.model.state_dict().items()}
         original=self.checkpoint['model_state_dict']
+        if RESUME_DIR is not None:
+            saved=torch.load(self.output_dir/'calibrated.pth',map_location='cpu',weights_only=True)
+            meta=saved['bn_calibration']
+            for key in ('epoch','model_name','model_kwargs','bands','split_manifest_sha256',
+                        'label_revision_sha256','input_preprocessing','validation_inference'):
+                if saved.get(key)!=self.checkpoint.get(key):
+                    raise ValueError(f'续跑源模型或数据协议不一致：{key}')
+            if (meta['train_files']!=self.calibration_files or
+                    meta['evaluation_scenes']!=list(EVALUATION_SCENES) or
+                    Path(meta['source_checkpoint']).resolve()!=self.checkpoint_path.resolve()):
+                raise ValueError('续跑校准样本、评价范围或源检查点不一致')
+            calibrated=saved['model_state_dict']
+            self.model.load_state_dict(calibrated)
+            del saved
+            print('续跑：已加载校准模型，不重新校准BN。',flush=True)
+        else:
+            self.calibrate_layers()
+            calibrated={k:v.detach().cpu().clone() for k,v in self.model.state_dict().items()}
         # 校准只允许改变BN运行统计；禁止意外改变学习参数。
         for name,value in self.model.named_parameters():
             if not torch.equal(value.detach().cpu(),original[name]):
                 raise RuntimeError(f'校准意外改变了学习参数：{name}')
-        self.save_calibrated_model()
+        if RESUME_DIR is None:
+            self.save_calibrated_model()
         if not self.validation_inference:
             self.model.load_state_dict(original);before=self.evaluate()
             self.model.load_state_dict(calibrated);after=self.evaluate()
@@ -296,33 +320,56 @@ class BNCalibrator:
                     raise ValueError('指定场景不在val中')
                 scenes=[n for n in scenes if n in EVALUATION_SCENES]
             scenes.sort(key=lambda n:n!=PRIORITY_SCENE)
+            # 按景和阶段恢复：若某景before完成、after中断，只补after，不重复计数。
+            completed={p:{} for p in ('before','after')}
+            if RESUME_DIR is not None:
+                for phase in completed:
+                    path=self.output_dir/f'{phase}_per_scene.csv'
+                    if path.exists():
+                        with path.open(encoding='utf-8-sig',newline='') as f:
+                            for row in csv.DictReader(f):
+                                scene=row.pop('scene_id')
+                                if scene not in scenes or scene in completed[phase]:
+                                    raise ValueError(f'已存结果存在重复或非本次val场景：{scene}')
+                                completed[phase][scene]={k:int(v) if k in ('tn','fp','fn','tp','valid_pixels')
+                                                        else float(v) for k,v in row.items()}
+                paired=set(completed['before']) & set(completed['after'])
+                print(f'续跑：保留{len(paired)}/{len(scenes)}景完整对照，继续未完成阶段。',flush=True)
+            progress_path=self.output_dir/'progress.json'
+            previous_elapsed=(json.loads(progress_path.read_text(encoding='utf-8')).get('elapsed_seconds',0)
+                              if RESUME_DIR is not None and progress_path.exists() else 0)
             counts={p:np.zeros(4,np.int64) for p in ('before','after')}
             losses=dict(before=0.0,after=0.0)
             for i,scene in enumerate(scenes,1):
                 pair={}
                 for phase,state in (('before',original),('after',calibrated)):
                     self.phase=phase
-                    print(f"对照 {i}/{len(scenes)}景 {phase}：{scene}",flush=True)
-                    self.model.load_state_dict(state)
-                    result=self.evaluate_blended((scene,))
+                    if scene in completed[phase]:
+                        result=completed[phase][scene]
+                    else:
+                        print(f"对照 {i}/{len(scenes)}景 {phase}：{scene}",flush=True)
+                        self.model.load_state_dict(state)
+                        result=self.evaluate_blended((scene,))
+                        row=dict(scene_id=scene,**result)
+                        path=self.output_dir/f'{phase}_per_scene.csv'
+                        write_header=not path.exists() or path.stat().st_size==0
+                        with path.open('a',encoding='utf-8-sig',newline='') as f:
+                            writer=csv.DictWriter(f,fieldnames=list(row))
+                            if write_header:writer.writeheader()
+                            writer.writerow(row)
                     pair[phase]=result
                     counts[phase]+=np.array([result[k] for k in ('tn','fp','fn','tp')],np.int64)
                     losses[phase]+=result['loss']*result['valid_pixels']
-                    row=dict(scene_id=scene,**result)
-                    path=self.output_dir/f'{phase}_per_scene.csv'
-                    with path.open('a',encoding='utf-8-sig',newline='') as f:
-                        writer=csv.DictWriter(f,fieldnames=list(row))
-                        if i==1:writer.writeheader()
-                        writer.writerow(row)
                 if pair['before']['valid_pixels']!=pair['after']['valid_pixels']:
                     raise RuntimeError('前后有效像素数不一致')
                 print(f"完成 {i}/{len(scenes)}景：F1 {pair['before']['f1']:.4f} → {pair['after']['f1']:.4f}；"
                       f"P {pair['before']['precision']:.4f} → {pair['after']['precision']:.4f}；"
                       f"R {pair['before']['recall']:.4f} → {pair['after']['recall']:.4f}",flush=True)
                 progress=dict(completed_scenes=i,total_scenes=len(scenes),last_scene=scene,
-                    complete=i==len(scenes),elapsed_seconds=perf_counter()-started)
+                    complete=i==len(scenes),elapsed_seconds=previous_elapsed+perf_counter()-started)
                 (self.output_dir/'progress.json').write_text(json.dumps(progress,ensure_ascii=False,indent=2),encoding='utf-8')
             before,after=[dict(loss=losses[p]/int(counts[p].sum()),**metrics_from_counts(counts[p])) for p in ('before','after')]
+        self.model.load_state_dict(calibrated)
         self.save_result(before,after)
         print(f"校准前：{before}\n校准后：{after}",flush=True)
         for loader in (self.train_loader,self.val_loader):

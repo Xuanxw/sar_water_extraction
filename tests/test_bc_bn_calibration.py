@@ -25,7 +25,7 @@ class BNTests(unittest.TestCase):
                 mean=torch.tensor([0.]),std=torch.tensor([1.]),batch_size=2,ignore_index=-1,val_loss=1.,epoch=20)
             ds.close();torch.save(c,root/'last.pth')
             params={k:v.clone() for k,v in model.named_parameters()}
-            with patch.object(bn,'RUN_DIR',root),patch.object(bn,'ROOT',root),patch.object(bn,'load_model',return_value=model),patch.object(bn,'CHECKPOINT_NAME','last.pth'),patch.object(bn,'EXPECTED_EPOCH',20),patch.object(bn,'CACHE_DIR',root/'cache'):
+            with patch.object(bn,'RUN_DIR',root),patch.object(bn,'ROOT',root),patch.object(bn,'load_model',return_value=model),patch.object(bn,'CHECKPOINT_NAME','last.pth'),patch.object(bn,'EXPECTED_EPOCH',20),patch.object(bn,'CACHE_DIR',root/'cache'),patch.object(bn,'RESUME_DIR',None):
                 runner=bn.BNCalibrator()
                 self.assertTrue(set(runner.calibration_files)<=set(c['train_files']))
                 self.assertFalse(set(runner.calibration_files)&set(c['val_files']))
@@ -46,6 +46,31 @@ class BNTests(unittest.TestCase):
                 saved=torch.load(next((root/'bn_calibration').rglob('calibrated.pth')),weights_only=True)
                 self.assertEqual(saved['resume_phase'],'bn_calibrated_inference_only')
                 self.assertEqual(saved['bn_calibration']['validation_inference'],runner.validation_inference)
-                runner.train_loader.dataset.dataset.close()
+                runner.run()
+                self.assertTrue((runner.output_dir/'progress.json').is_file())
+                self.assertTrue((runner.output_dir/'before_per_scene.csv').is_file())
+                self.assertTrue((runner.output_dir/'after_per_scene.csv').is_file())
+                self.assertIn('model_state_dict',runner.checkpoint)
+                self.assertNotIn('bn_calibration',runner.checkpoint)
+                # 完成后再次启动不推理；只有after中断时只补该阶段，before不重写。
+                torch.save(runner.checkpoint,root/'last.pth')
+                before_path=runner.output_dir/'before_per_scene.csv'
+                before_bytes=before_path.read_bytes()
+                with patch.object(bn,'RESUME_DIR',runner.output_dir):
+                    resumed=bn.BNCalibrator()
+                    with patch.object(resumed,'calibrate_layers',side_effect=AssertionError('不能重新校准')), \
+                         patch.object(resumed,'evaluate_blended',side_effect=AssertionError('不能重复评价')):
+                        resumed.run()
+                    self.assertEqual(before_path.read_bytes(),before_bytes)
+                    after_path=runner.output_dir/'after_per_scene.csv'
+                    after_path.write_text(after_path.read_text(encoding='utf-8-sig').splitlines()[0]+'\n',encoding='utf-8-sig')
+                    resumed=bn.BNCalibrator()
+                    with patch.object(resumed,'calibrate_layers',side_effect=AssertionError('不能重新校准')), \
+                         patch.object(resumed,'evaluate_blended',wraps=resumed.evaluate_blended) as evaluate:
+                        resumed.run()
+                        self.assertEqual(evaluate.call_count,1)
+                        self.assertEqual(resumed.phase,'after')
+                    self.assertEqual(before_path.read_bytes(),before_bytes)
+
 
 if __name__=='__main__':unittest.main()

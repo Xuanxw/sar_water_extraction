@@ -146,6 +146,43 @@ def build_hard_sample_plan(losses, hard_ratio=0.5, pool_ratio=0.25, seed=42, gro
     return plan.tolist(), pool.tolist()
 
 
+class EpochIndexSampler:
+    """主进程只更新本轮索引，已启动的 DataLoader workers 不需要重建。"""
+
+    def __init__(self, indices):
+        self.indices = indices
+
+    def __iter__(self):
+        return iter(self.indices)
+
+    def __len__(self):
+        return len(self.indices)
+
+
+class ReusableSubsetLoader:
+    """仅用于确定性整景读取；增强仍在主进程执行，不支持 worker 内随机变换。"""
+
+    def __init__(self, dataset, indices, **loader_options):
+        self.sampler = EpochIndexSampler(indices)
+        self.loader = DataLoader(dataset, sampler=self.sampler, **loader_options)
+        self._iterated = False
+
+    def set_indices(self, indices):
+        self.sampler.indices = indices
+
+    def __len__(self):
+        return len(self.loader)
+
+    def __iter__(self):
+        if self._iterated and self.loader.persistent_workers:
+            # 旧定长子集每轮新建 iterator，均消耗一个 CPU int64 base_seed。
+            # persistent reset 不再消耗它；显式补齐，保持增强/dropout 的随机序列。
+            torch.empty((), dtype=torch.int64).random_()
+        iterator = iter(self.loader)
+        self._iterated = True
+        return iterator
+
+
 class WaterSegmentationTrainer:
     """有监督水体语义分割训练器，统一管理基线和 UAFNet 的训练、验证和保存。"""
 
@@ -550,9 +587,18 @@ class WaterSegmentationTrainer:
     def prepare_train_sampling(self, epoch):
         """按上一轮结束时的难度记录生成本轮计划；前几轮仍使用原随机 DataLoader。"""
         if self.sampling == "random":
+            count = len(self.train_set)
+            selected = count
             if self.scene_options is not None and self.windows_per_epoch is not None:
-                plan = torch.randperm(len(self.train_set), generator=torch.Generator().manual_seed(self.seed+epoch))[:self.windows_per_epoch].tolist()
-                self.train_loader = DataLoader(self.train_set, batch_size=self.batch_size, sampler=plan, **self.loader_options)
+                plan = torch.randperm(count, generator=torch.Generator().manual_seed(self.seed+epoch))[:self.windows_per_epoch].tolist()
+                selected = len(plan)
+                if isinstance(self.train_loader, ReusableSubsetLoader):
+                    self.train_loader.set_indices(plan)
+                else:
+                    self.train_loader = ReusableSubsetLoader(self.train_set, plan,
+                        batch_size=self.batch_size, **self.loader_options)
+            cprint(f"Epoch {epoch} 采样：{'限量抽样' if selected < count else '完整遍历'}；"
+                   f"本轮窗口 {selected}/{count}（训练候选总数）", color="blue", flush=True)
             return
         count = len(self.train_set)
         self.hard_pool = []
@@ -643,7 +689,8 @@ class WaterSegmentationTrainer:
                 blend=self.validation_inference['blend'],
                 mean=self.mean,std=self.std,inputs_normalized=self.inputs_normalized,
                 device=self.device,use_amp=self.use_amp,batch_size=self.batch_size,
-                num_workers=self.validation_inference.get('num_workers',0),speckle=self.speckle)
+                num_workers=self.validation_inference.get('num_workers',0),speckle=self.speckle,
+                boundary_context=False)  # 训练计分/概览不算跨块边界，复用输入像素并只读核心标签。
             for piece in pieces:
                 # helper返回的数组不引用滚动融合缓冲，直接共享内存，无需再复制整块。
                 yield dict(image=torch.from_numpy(piece['image'])[None],
@@ -698,7 +745,7 @@ class WaterSegmentationTrainer:
             if not self.inputs_normalized and "fused_scores" not in batch:
                 image = (image - self.mean) / self.std
             if not fused:
-                image = image.masked_fill(~batch["valid_mask"].to(self.device).unsqueeze(1), 0)
+                image = image.masked_fill(~batch["valid_mask"].to(self.device, non_blocking=True).unsqueeze(1), 0)
             if training:
                 self.recent_train_files = (self.recent_train_files + list(batch["name"]))[-20:]
                 self.optimizer.zero_grad(set_to_none=True)
@@ -802,12 +849,11 @@ class WaterSegmentationTrainer:
             else:
                 confusion += torch.bincount(label[valid] * 2 + prediction[valid], minlength=4)
             if quality is not None:
-                probability = (logits.detach()[:, 0].double().sigmoid().float() if self.criterion.binary
-                               else logits.detach().double().softmax(dim=1)[:, 1].float())
+                # 质量图先抽概览像素，再以原FP64公式算概率；全分辨率计量保持不变。
                 for i, name in enumerate(batch["name"]):
-                    quality.add(name, image[i, 0], label[i], probability[i], prediction[i], batch["valid_mask"][i],
+                    quality.add(name, image[i, 0], label[i], None, prediction[i], batch["valid_mask"][i],
                                 scene_window=batch.get('scene_window'),scene_shape=batch.get('scene_shape'),
-                                counts=sample_counts[i] if sample_counts is not None else None)
+                                counts=sample_counts[i] if sample_counts is not None else None, logits=logits[i])
             if step % 50 == 0:
                 if 'fused_scores' in batch:
                     scene_number, scene_total = batch['scene_progress']

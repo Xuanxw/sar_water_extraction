@@ -158,14 +158,16 @@ class AuxiliaryTests(unittest.TestCase):
         from thres_segmentation import main
         image = self.raster('scene.tif')
         prepared = {'scene.tif':dict(reference_path='downloaded_water.tif',reference_water_values=(1,))}
-        options = dict(download_history=True,download_elevation=False)
-        with patch.multiple(main,MODE='download',DATA_LAYOUT='patch',SPLIT_MANIFEST=None,
-                            IMAGE_DIR=self.root,AUXILIARY_OPTIONS=options), \
+        config=main.load_yaml(Path(__file__).resolve().parents[1]/'configs/threshold_segmentation.yaml')
+        config['run'].update(mode='download',data_layout='patch')
+        config['paths'].update(SPLIT_MANIFEST=None,IMAGE_DIR=self.root)
+        config['auxiliary'].update(download_history=True,download_elevation=False)
+        with patch.object(main,'load_yaml',return_value=config), \
              patch('thres_segmentation.auxiliary_data.prepare_auxiliary_inputs',return_value=prepared), \
              patch('thres_segmentation.pipeline.run_segmentation') as segment:
             self.assertEqual(main.main(),prepared);segment.assert_not_called()
-        with patch.multiple(main,MODE='dataset',DATA_LAYOUT='patch',SPLIT_MANIFEST=None,
-                            IMAGE_DIR=self.root,AUXILIARY_OPTIONS=options), \
+        config['run']['mode']='dataset'
+        with patch.object(main,'load_yaml',return_value=config), \
              patch('thres_segmentation.auxiliary_data.prepare_auxiliary_inputs',return_value=prepared), \
              patch('thres_segmentation.pipeline.run_segmentation') as segment:
             main.main()

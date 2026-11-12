@@ -365,18 +365,12 @@ python E:\Code_projects\sar_water_extraction\src\supervised\evaluation\model_eva
 python E:\Code_projects\sar_water_extraction\src\thres_segmentation\main.py
 ```
 
-这是独立入口，不加载模型检查点。`MODE="dataset"` 从 `configs/image_process.yaml` 的 `paths.NORMALIZED_ROOT` 读取固定val影像，直接复用SNAP滤波和train统计z-score成果，不再执行旧Lee近似、逐景拉伸或转dB；按整景百分位提取水体，**不是Otsu**。`MODE="gui"` 保留历史GIS流程，未使用此BC离线链路。
+这是独立入口，不加载模型检查点，也不读取train.yaml或image_process.yaml。处理参数全部来自入口`CONFIG_PATH`指定的YAML。
 
-| `THRESHOLD_OPTIONS` 项 | 含义 |
-|---|---|
-| `water_percent=10` | 逐图选第10百分位作为暗值阈值；不是模型概率0.1，也不是读取标签得到水体比例 |
-| `mode="bottom"` | 取低于阈值的暗像素；`top`取高于或等于第100-q百分位的亮像素 |
-| `lee_window=5` | Lee近似滤波的5×5窗口；1关闭滤波 |
-| `noise_ratio=0.12` | 以全图方差乘此比例估计噪声方差，参与局部平滑权重 |
-| `stretch=(1,99)` | 去斑后按1/99百分位缩放至0～1并截断极端值；这是强度分数，不是水体概率 |
-| `power_to_db=False` | 不转换存储域；仅确认线性功率输入时才考虑10log10转换 |
+- **密云ORG案例**：当前指向`configs/北京密云区/threshold_segmentation.yaml`。直接读取原始ORG，完成行政区裁剪、SNAP Lee、分位阈值及辅助修正，逐景输出SHP、质量JSON和人工核验点。支持按完成阶段续跑，不自动合并日期。操作见[案例说明](configs/北京密云区/README.md)。
+- **通用离线val**：切换到`configs/threshold_segmentation.yaml`。使用`paths.IMAGE_DIR/LABEL_DIR/SPLIT_MANIFEST`，复用已有离线滤波/归一化结果，不再次预处理。
 
-`water_percent` 是固定方案参数；同值像素和无效域会使实际水体比例不严格等于该数值。`USE_LANDCOVER` 控制是否额外使用辅助土地覆盖补水。原始阈值掩膜位于 `masks/threshold_VV`、`masks/threshold_VH`，比较原始算法时使用这些目录。
+`water_percent=10`是整景有效范围内的第10百分位暗侧阈值，不是Otsu、模型概率或精度保证。NoData保持未知，辅助水体不是真值。参数和质量核查说明见[阈值分割说明](src/thres_segmentation/README.md)。
 
 ## 模型与传统阈值结果对比
 

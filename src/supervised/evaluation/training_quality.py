@@ -58,8 +58,8 @@ class ValidationQualityWriter:
         self.status = self.folder / "status.json"
         self.status.write_text(json.dumps(dict(complete=False, epoch=epoch)), encoding="utf-8")
 
-    def add(self, name, image, label, probability, prediction, valid_mask, scene_window=None, scene_shape=None, counts=None):
-        """取本批已计算的预测；整景模式仅拼入中心区，halo不会重复计数。"""
+    def add(self, name, image, label, probability, prediction, valid_mask, scene_window=None, scene_shape=None, counts=None, logits=None):
+        """拼入中心区；probability为None时，仅用概览位置的logits计算概率。"""
         if scene_window is not None:
             top, left, h, w = scene_window
             key, halo = name, 0  # 共享推理器已裁边并融合，不能再次裁halo。
@@ -96,46 +96,53 @@ class ValidationQualityWriter:
         iy = np.flatnonzero((self.ys >= top) & (self.ys < top+h))
         ix = np.flatnonzero((self.xs >= left) & (self.xs < left+w))
         dst = np.ix_(iy, ix)
-        tensors = (image, label, probability, prediction, valid_mask)
-        dtypes = (torch.float32, torch.int8, torch.float32, torch.int8, torch.bool)
         if counts is not None:
-            # 原分辨率计数来自验证器；只复制概览实际需要的像素，避免整块重复搬运/计量。
+            # 复用验证器的原分辨率计数。
             self.counts += np.asarray(counts, dtype=np.int64)
-            if not len(iy) or not len(ix):
-                return
-            previews = []
-            for tensor, dtype in zip(tensors, dtypes):
-                rows = torch.as_tensor(self.ys[iy]-top+halo, device=tensor.device)
-                cols = torch.as_tensor(self.xs[ix]-left+halo, device=tensor.device)
-                previews.append(tensor.detach()[rows[:, None], cols[None, :]].to(dtype=dtype).cpu().numpy())
-            image, label, probability, prediction, valid_mask = previews
-            self.image[dst] = np.where(valid_mask, image, np.nan)
-            self.label[dst] = label
-            self.probability[dst] = np.where(valid_mask, probability, np.nan)
-            self.prediction[dst] = np.where(valid_mask, prediction, -1)
+        else:
+            # 旧调用没有计数时，仍统计全部中心像素；只搬运所需的类别数组。
+            core = label.detach()[halo:halo+h, halo:halo+w].to(dtype=torch.int8).cpu().numpy()
+            pred = prediction.detach()[halo:halo+h, halo:halo+w].to(dtype=torch.int8).cpu().numpy()
+            for start in range(0, h, 64):
+                truth = core[start:start+64]
+                result = pred[start:start+64]
+                for actual in (0, 1):
+                    for predicted in (0, 1):
+                        self.counts[2*actual+predicted] += np.count_nonzero(
+                            (truth == actual) & (result == predicted))
+        if not len(iy) or not len(ix):
             return
-        # GPU只复制已有本批结果，不保留计算图；不改动训练随机数或模型状态。
-        # 在复制到CPU前压缩类别数组；不修改训练中原有tensor。
-        image, label, probability, prediction, valid_mask = [
-            x.detach().to(dtype=dtype).cpu().numpy() for x, dtype in zip(tensors, dtypes)
+
+        def sample(tensor):
+            rows = torch.as_tensor(self.ys[iy]-top+halo, device=tensor.device)
+            cols = torch.as_tensor(self.xs[ix]-left+halo, device=tensor.device)
+            return tensor.detach()[..., rows[:, None], cols[None, :]]
+
+        # 先抽概览像素，再按原精度计算概率，不保留计算图。
+        if probability is None:
+            if logits is None:
+                raise ValueError("probability为None时必须提供logits")
+            sampled_logits = sample(logits)
+            if sampled_logits.ndim == 2:
+                probability = sampled_logits.double().sigmoid()
+            elif sampled_logits.ndim == 3 and sampled_logits.shape[0] == 1:
+                probability = sampled_logits[0].double().sigmoid()
+            elif sampled_logits.ndim == 3 and sampled_logits.shape[0] == 2:
+                probability = sampled_logits.double().softmax(dim=0)[1]
+            else:
+                raise ValueError("logits形状必须为H×W、1×H×W或2×H×W")
+        else:
+            probability = sample(probability)
+        probability = probability.float().cpu().numpy()
+        tensors = (image, label, prediction, valid_mask)
+        dtypes = (torch.float32, torch.int8, torch.int8, torch.bool)
+        image, label, prediction, valid_mask = [
+            sample(tensor).to(dtype=dtype).cpu().numpy() for tensor, dtype in zip(tensors, dtypes)
         ]
-        core = label[halo:halo+h, halo:halo+w]
-        pred = prediction[halo:halo+h, halo:halo+w]
-        # 按64行计数，避免整窗口布尔索引产生多个int64临时数组。
-        # 仍统计全部有效中心像素；与概览降采样无关。
-        for start in range(0, h, 64):
-            truth = core[start:start+64]
-            result = pred[start:start+64]
-            for actual in (0, 1):
-                for predicted in (0, 1):
-                    self.counts[2*actual+predicted] += np.count_nonzero(
-                        (truth == actual) & (result == predicted))
-        dst = np.ix_(iy, ix); src = np.ix_(self.ys[iy]-top+halo, self.xs[ix]-left+halo)
-        image_valid = valid_mask[src]
-        self.image[dst] = np.where(image_valid, image[src], np.nan)
-        self.label[dst] = label[src]
-        self.probability[dst] = np.where(image_valid, probability[src], np.nan)
-        self.prediction[dst] = np.where(image_valid, prediction[src], -1)
+        self.image[dst] = np.where(valid_mask, image, np.nan)
+        self.label[dst] = label
+        self.probability[dst] = np.where(valid_mask, probability, np.nan)
+        self.prediction[dst] = np.where(valid_mask, prediction, -1)
 
     def flush(self):
         """一景结束即写图并释放其数组；中断时status保留complete=false。"""

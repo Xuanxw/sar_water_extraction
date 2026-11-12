@@ -3,14 +3,14 @@
 
 # 所有可修改的文件/目录路径；Windows路径不使用双引号，避免反斜杠转义。
 paths:
-  RESUME_CHECKPOINT: E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_bc_scenes_overlap\20261110_221430_589086\train_end.pth
+  RESUME_CHECKPOINT: null
   IMAGE_DIR: I:\水体数据\processed_scenes\normalized\images
   LABEL_DIR: I:\水体数据\processed_scenes\normalized\labels
   # 多个目录依次添加；只有处理协议和归一化统计一致时才能合并。
   MANIFEST_PATHS:
   - I:\水体数据\processed_scenes\normalized\split_manifest.csv
   OUTPUT_ROOT: E:\Code_projects\sar_water_extraction\outputs
-  OUTPUT_DIR: E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_bc_scenes_overlap
+  OUTPUT_DIR: E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_full_train_bc_scenes_overlap
   WINDOW_CACHE_DIR: E:\Code_projects\sar_water_extraction\data_cache\bc_scenes
 # 执行模式与批次/实验输出。
 run:
@@ -51,7 +51,7 @@ data:
     halo: 128
     normalization_windows: 2
     max_open_scenes: 4
-    windows_per_epoch: 4096
+    windows_per_epoch: null
     num_workers: 2
 
 # 网络结构；只使用选中METHOD的参数。

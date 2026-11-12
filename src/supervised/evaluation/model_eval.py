@@ -2,10 +2,13 @@
 
 from math import log
 from pathlib import Path
-from datetime import datetime
 import csv
 import hashlib
 import sys
+import json
+from time import perf_counter
+
+import numpy as np
 
 ROOT = Path("E:/Code_projects/sar_water_extraction")
 sys.path.insert(0, str(ROOT / "src"))  # 从 evaluation 直接运行时找到项目数据集与模型模块。
@@ -17,19 +20,31 @@ from torch.utils.data import DataLoader, Subset
 from supervised.load.sar_scene_dataset import SARSceneDataset, check_preprocessed_input
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.metrics import metrics_from_counts
+from supervised.evaluation.sliding_inference import iter_scene_predictions
 
-CHECKPOINT_PATH = Path(r"E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_balanced_bce_labels_corrected_bc_scenes\20261103_203233_244527\best_f1.pth")
+RUN_DIR = ROOT / "outputs/pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_bc_scenes_overlap/20261110_221430_589086"
+CHECKPOINT_PATH = RUN_DIR / "best_f1.pth"
 IMAGE_DIR = None  # 默认使用检查点保存的输入路径和处理协议。
 LABEL_DIR = None
 USE_SAVED_VAL = True
 BATCH_SIZE = None
 USE_AMP = None
 THRESHOLD = 0.5
-MODE = "single"
-SCAN_CHECKPOINTS = {"BC_DeepLab": CHECKPOINT_PATH}
+MODE = "scan"  # scan：完整val融合扫描；single：旧窗口固定阈值评价，不用于本轮融合对照。
+SCAN_CHECKPOINTS = {
+    "epoch_006": CHECKPOINT_PATH,
+    "epoch_007": RUN_DIR / "train_end.pth",
+    "epoch_007_bn": RUN_DIR / "bn_calibration/20261111_164753_515753/calibrated.pth",
+}
+EXPECTED_EPOCHS = {"epoch_006": 6, "epoch_007": 7, "epoch_007_bn": 7}
+# 固定目录自动续跑：每个模型/每景完成后保存小型计数文件；中断的景重算。
+# 改模型、阈值或数据时需换新目录，避免混用不同协议的结果。
+SCAN_OUTPUT_DIR = RUN_DIR / "threshold_scan_bn"
+CPU_THREADS = 2
 
-SCAN_THRESHOLDS = [i / 1000 for i in range(10, 991)]  # 0.01～0.99，步长 0.001；各模型相同。
+SCAN_THRESHOLDS = [i / 100 for i in range(1, 100)]  # 0.01～0.99，步长0.01，含0.5；各模型相同。
 PRECISION_TARGETS = (0.80, 0.85, 0.90)
+RECALL_TARGETS = (0.80, 0.85, 0.90)
 
 
 def threshold_counts(score, label, thresholds, ignore_index=-1):
@@ -165,61 +180,289 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
     return rows
 
 
-def run_threshold_scan(checkpoints=SCAN_CHECKPOINTS, thresholds=SCAN_THRESHOLDS,
-                       targets=PRECISION_TARGETS, output_dir=None, image_dir=None, label_dir=None):
-    """同一验证集各推理一次，保存阈值表、共同精确率要求对照表和 PR 曲线。"""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+def file_hash(path):
+    """流式指纹：防止 train_end 被覆盖后，续跑混入另一轮权重。"""
+    with Path(path).open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
-    if not thresholds or not all(0 < t < 1 for t in thresholds) or sorted(set(thresholds)) != list(thresholds):
-        raise ValueError("扫描阈值须在 0～1 之间，严格递增且不重复")
-    # 先确认各模型使用相同验证名单及标签来源，再开始推理。
-    reference = None
-    epochs = {}
+
+def write_json(path, record):
+    """先写临时文件再替换，中断时保留上一次完整记录。"""
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def prepare_scan(checkpoints, expected_epochs=None, image_dir=None, label_dir=None):
+    """只读核查三个模型的原val、归一化和融合协议；不加载GPU、不扫描影像像素。"""
+    if not checkpoints:
+        raise ValueError("未指定检查点")
+    reference, models = None, {}
     for name, path in checkpoints.items():
+        if Path(name).name != name:
+            raise ValueError("模型名称不能包含目录")
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        identity = (checkpoint["val_files"], checkpoint["image_dir"], checkpoint["label_dir"],
-                    checkpoint["bands"], checkpoint.get("ignore_index", -1))
-        if reference is not None and identity != reference:
-            raise ValueError("扫描要求相同验证名单、数据目录、输入波段和忽略值")
-        reference = identity
-        epochs[name] = checkpoint["epoch"]
+        if expected_epochs and name in expected_epochs and checkpoint['epoch'] != expected_epochs[name]:
+            raise ValueError(f"{name}实际为第{checkpoint['epoch']}轮，检查点可能被覆盖")
+        config = checkpoint.get('validation_inference', {})
+        if checkpoint.get('data_layout') != 'full_scene' or not config.get('blend'):
+            raise ValueError("本次扫描要求保存了重叠融合协议的整景检查点")
+        images = Path(checkpoint['image_dir'] if image_dir is None else image_dir)
+        labels = Path(checkpoint['label_dir'] if label_dir is None else label_dir)
+        check_preprocessed_input(images, checkpoint)
+        root = images.parent
+        if (root / '.labels_rebuilding').exists():
+            raise ValueError('标签正在重建，不能扫描')
+        if file_hash(root / 'split_manifest.csv') != checkpoint['split_manifest_sha256']:
+            raise ValueError('验证清单与检查点不同')
+        revision = checkpoint.get('label_revision_sha256')
+        if revision and file_hash(root / 'revision_settings.json') != revision:
+            raise ValueError('标签版本与检查点不同')
+        with (root / 'split_manifest.csv').open(encoding='utf-8-sig', newline='') as stream:
+            active = [r for r in csv.DictReader(stream) if int(r['active']) == 1]
+        wanted = set(checkpoint['val_scene_files'])
+        scenes = sorted([r for r in active if r['split'] == 'val' and r['name'] in wanted],
+                        key=lambda r: r['scene_id'])
+        if not scenes or len(scenes) != len(wanted) or {r['name'] for r in scenes} != wanted:
+            raise ValueError('检查点的完整验证景未在清单中找到')
+        if len({r['scene_id'] for r in scenes}) != len(scenes):
+            raise ValueError('验证景编号重复')
+        train_groups = {r['group_id'] for r in active if r['split'] == 'train'}
+        if train_groups & {r['group_id'] for r in scenes}:
+            raise ValueError('train/val地理组交叉')
+        protocol = dict(image_dir=str(images.resolve()), label_dir=str(labels.resolve()),
+            split_manifest_sha256=checkpoint['split_manifest_sha256'], label_revision_sha256=revision,
+            val_files=sorted(checkpoint['val_files']), val_scene_files=sorted(wanted),
+            bands=list(checkpoint['bands']), window_size=checkpoint['window_size'],
+            halo=checkpoint['window_halo'], validation_inference=config,
+            mean=torch.as_tensor(checkpoint['mean']).flatten().tolist(),
+            std=torch.as_tensor(checkpoint['std']).flatten().tolist(),
+            inputs_normalized=checkpoint.get('inputs_normalized', False),
+            input_preprocessing=checkpoint.get('input_preprocessing'), speckle=checkpoint.get('speckle'),
+            batch_size=checkpoint['batch_size'], amp_enabled=checkpoint.get('amp_enabled', False))
+        # 文件大小/时间核查无需读取整景；若文件变化，拒绝复用已完成景。
+        stamps = []
+        for row in scenes:
+            for folder, key in ((images, 'name'), (labels, 'label_name')):
+                source = folder / 'val' / row[key]
+                stat = source.stat()
+                stamps.append((str(source.resolve()), stat.st_size, stat.st_mtime_ns))
+        protocol['source_stamps'] = stamps
+        protocol = json.loads(json.dumps(protocol, default=str))
+        if reference is not None and protocol != reference:
+            raise ValueError(f'{name}的验证数据或推理协议与其他模型不同')
+        reference = protocol
+        models[name] = dict(path=str(Path(path).resolve()), sha256=file_hash(path), epoch=checkpoint['epoch'])
+        print(f"核查通过：{name}，epoch={checkpoint['epoch']}，val={len(scenes)}景", flush=True)
         del checkpoint
-    output_dir = (ROOT / "codex_analysis/threshold_scan" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                  if output_dir is None else Path(output_dir))
-    output_dir.mkdir(parents=True, exist_ok=False)
-    all_rows, comparisons = [], []
-    fig, axis = plt.subplots(figsize=(8, 6))
-    for name, path in checkpoints.items():
-        print(f"开始扫描：{name}；{len(thresholds)} 个阈值；不使用土地覆盖后处理", flush=True)
-        rows = evaluate(path, image_dir=image_dir, label_dir=label_dir, use_saved_val=True, threshold=.5, thresholds=thresholds)
-        all_rows.extend(dict(model=name, checkpoint=str(path), epoch=epochs[name], **r) for r in rows)
-        matched = precision_matches(rows, targets)
-        comparisons.extend(dict(model=name, **r) for r in matched)
-        for r in matched:
-            print(f"{name}：P要求={r['target_precision']:.0%}；{r}", flush=True)
-        best = max(rows, key=lambda r: r["f1"] if r["tp"] + r["fp"] + r["fn"] else -1)
-        print(f"{name} 扫描最佳 F1：{best}", flush=True)
-        # 无预测点的 P 不定义，不把它画成精确率 100% 的曲线端点；不做插值或包络美化。
-        plotted = sorted((r for r in rows if r["tp"] + r["fp"] > 0), key=lambda r:r["recall"])
-        axis.plot([r["recall"] for r in plotted], [r["precision"] for r in plotted], label=name)
-        for r in matched:
-            if r["status"] == "reachable":
-                axis.scatter(r["recall"], r["precision"], s=25)
-    for filename, rows in (("threshold_metrics.csv", all_rows), ("precision_comparison.csv", comparisons)):
-        with (output_dir / filename).open("w", newline="", encoding="utf-8-sig") as stream:
-            writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
+    return dict(protocol=reference, models=models, scenes=scenes)
+
+
+def fused_threshold_counts(scores, labels, valid_mask, edges):
+    """融合logit分箱后反向累计，一次获得所有阈值的计数；每个有效像素仅计一次。"""
+    valid = valid_mask & np.isin(labels, (0, 1))
+    values = scores[valid]
+    if not np.isfinite(values).all():
+        raise FloatingPointError('融合输出包含NaN/Inf')
+    bins = np.searchsorted(edges, values, side='right')
+    size = len(edges) + 1
+    bins += labels[valid].astype(np.int64) * size
+    histogram = np.bincount(bins, minlength=2 * size).reshape(2, size)
+    tail = histogram[:, ::-1].cumsum(axis=1)[:, ::-1][:, 1:]
+    fp, tp = tail
+    return np.stack((histogram[0].sum() - fp, fp, histogram[1].sum() - tp, tp), axis=1)
+
+
+def save_scan_tables(output_dir, all_rows, scene_rows, targets, recall_targets):
+    """更新CSV与曲线；匹配条件采用实际扫描点，不插值制造可达精度。"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    comparisons, summary = [], []
+    groups = sorted({(r['model'], r['subset']) for r in all_rows})
+    for model, subset in groups:
+        rows = [r for r in all_rows if (r['model'], r['subset']) == (model, subset)]
+        for metric, levels, objective in (('precision', targets, 'recall'),
+                                           ('recall', recall_targets, 'precision')):
+            for level in levels:
+                eligible = [r for r in rows if r[metric] >= level and r['tp'] + r['fp'] > 0]
+                best = max(eligible, key=lambda r: (r[objective], r[metric])) if eligible else None
+                comparisons.append(dict(model=model, subset=subset, constraint=metric, target=level,
+                    status='reachable' if best else 'unreachable',
+                    **{k: best[k] if best else '' for k in ('threshold', 'precision', 'recall', 'f1', 'iou')}))
+        best = max(rows, key=lambda r: r['f1'] if np.isfinite(r['f1']) else -1)
+        summary.append(dict(model=model, subset=subset, rule='best_f1', **{
+            k: best[k] for k in ('threshold', 'precision', 'recall', 'f1', 'iou')}))
+        for row in rows:
+            if row['precision'] > .8 and row['recall'] > .8:
+                summary.append(dict(model=model, subset=subset, rule='P_R_above_80', **{
+                    k: row[k] for k in ('threshold', 'precision', 'recall', 'f1', 'iou')}))
+    for filename, rows in (('threshold_metrics.csv', all_rows), ('per_scene_thresholds.csv', scene_rows),
+                           ('matched_precision_recall.csv', comparisons), ('operating_points.csv', summary)):
+        path = output_dir / filename
+        temporary = path.with_suffix('.csv.tmp')
+        with temporary.open('w', encoding='utf-8-sig', newline='') as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
-    axis.set(xlabel="Recall", ylabel="Precision", xlim=(0, 1), ylim=(0, 1),
-             title="Validation PR sweep (raw predictions, no postprocessing)")
-    axis.grid(alpha=.3)
-    axis.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "pr_curve.png", dpi=180)
-    plt.close(fig)
-    print(f"扫描完成：{output_dir}；结果属于验证集调参，不代表独立测试成绩。", flush=True)
+        temporary.replace(path)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    try:
+        for ax, subset in zip(axes, ('all', 'BC3')):
+            for model in sorted({r['model'] for r in all_rows}):
+                rows = [r for r in all_rows if r['model'] == model and r['subset'] == subset
+                        and r['tp'] + r['fp'] > 0 and np.isfinite(r['recall'])]
+                if rows:
+                    ax.plot([r['recall'] for r in rows], [r['precision'] for r in rows], label=model)
+            ax.axvline(.8, color='gray', linestyle='--')
+            ax.axhline(.8, color='gray', linestyle='--')
+            ax.set(title=subset, xlabel='Recall', ylabel='Precision', xlim=(0, 1), ylim=(0, 1))
+            ax.grid(alpha=.3)
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / 'pr_curve.png', dpi=140)
+    finally:
+        plt.close(fig)
+
+
+# 仅兼容本次已做逐像元等价测试的实现升级；模型、数据、阈值及融合协议仍须完全一致。
+LEGACY_SCAN_HASHES = (
+    "987dcf2a0eb36cdaeb704f394856ac63964591b7b5f0c6a32c0d36e7aefcc76a",
+    "1a4be4a54913aa9844f0a87f5f245ffcc43adaf6cc30ff5d3f2e9f1a3d4bb518",
+)
+OPTIMIZED_INFERENCE_HASH = "9cd25d3459f2bb4da6168f887655ddad2f37089a092365c11800ac07d84e00b7"
+
+
+def same_scan_protocol(saved, current):
+    """允许已核验的等价提速版本续跑；其他源码变化仍需新输出目录。"""
+    if saved == current:
+        return True
+    previous = (saved.get('code_hash'), saved.get('inference_code_hash'))
+    if previous != LEGACY_SCAN_HASHES or current.get('inference_code_hash') != OPTIMIZED_INFERENCE_HASH:
+        return False
+    return ({k: v for k, v in saved.items() if k not in ('code_hash', 'inference_code_hash')} ==
+            {k: v for k, v in current.items() if k not in ('code_hash', 'inference_code_hash')})
+
+
+def run_threshold_scan(checkpoints=SCAN_CHECKPOINTS, thresholds=SCAN_THRESHOLDS,
+                       targets=PRECISION_TARGETS, output_dir=SCAN_OUTPUT_DIR, image_dir=None, label_dir=None,
+                       recall_targets=RECALL_TARGETS, expected_epochs=EXPECTED_EPOCHS):
+    """完整val采用原Hann等融合协议；一景推理一次，原子保存计数，重启自动续跑。"""
+    thresholds = list(thresholds)
+    if not thresholds or not all(0 < t < 1 for t in thresholds) or sorted(set(thresholds)) != thresholds:
+        raise ValueError('阈值须在0～1之间，严格递增且不重复')
+    torch.set_num_threads(CPU_THREADS)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    metadata = prepare_scan(checkpoints, expected_epochs, image_dir, label_dir)
+    protocol, scenes = metadata['protocol'], metadata['scenes']
+    metadata.update(thresholds=thresholds, precision_targets=list(targets), recall_targets=list(recall_targets),
+                    device=str(device), algorithm='fused_logit_histogram_v1',
+                    code_hash=file_hash(__file__), inference_code_hash=file_hash(
+                        Path(__file__).with_name('sliding_inference.py')))
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest = output_dir / 'scan_protocol.json'
+    if manifest.exists():
+        if not same_scan_protocol(json.loads(manifest.read_text(encoding='utf-8')), metadata):
+            raise ValueError('续跑目录的模型、数据或扫描协议已改变，请设置新的SCAN_OUTPUT_DIR')
+    else:
+        if any(output_dir.iterdir()):
+            raise ValueError('输出目录非空且缺少扫描协议，请换新目录')
+        write_json(manifest, metadata)
+    # sigmoid单调，比较logit与log(t/(1-t))等价，避免半精度概率舍入。
+    edges = np.log(np.asarray(thresholds, np.float64) / (1 - np.asarray(thresholds, np.float64)))
+    all_rows, scene_rows, denominators = [], [], {}
+    start = perf_counter()
+    for model_number, (name, path) in enumerate(checkpoints.items(), 1):
+        folder = output_dir / 'scene_counts' / name
+        folder.mkdir(parents=True, exist_ok=True)
+        completed = sum((folder / f"{r['scene_id']}.npz").exists() for r in scenes)
+        print(f"模型{model_number}/{len(checkpoints)}：{name}；复用{completed}/{len(scenes)}景；设备{device}", flush=True)
+        model = checkpoint = None
+        totals = {'all': np.zeros((len(thresholds), 4), np.int64),
+                  'BC3': np.zeros((len(thresholds), 4), np.int64)}
+        numbers = {'all': 0, 'BC3': 0}
+        for number, row in enumerate(scenes, 1):
+            destination = folder / f"{row['scene_id']}.npz"
+            reused = destination.exists()
+            scene_start = perf_counter()
+            if reused:
+                with np.load(destination, allow_pickle=False) as saved:
+                    counts = saved['counts']
+                    if not np.array_equal(saved['thresholds'], thresholds):
+                        raise ValueError(f'景缓存阈值不一致：{destination}')
+            else:
+                if model is None:
+                    if file_hash(path) != metadata['models'][name]['sha256']:
+                        raise ValueError('检查点在扫描期间被修改')
+                    checkpoint = torch.load(path, map_location='cpu', weights_only=True)
+                    model = load_model(checkpoint).to(device).eval()
+                    del checkpoint
+                counts = np.zeros((len(thresholds), 4), np.int64)
+                config = protocol['validation_inference']
+                print(f"  开始{name} {number}/{len(scenes)}景：{row['scene_id']}", flush=True)
+                for index, block in enumerate(iter_scene_predictions(model,
+                        Path(protocol['image_dir']) / 'val' / row['name'],
+                        Path(protocol['label_dir']) / 'val' / row['label_name'],
+                        bands=protocol['bands'], window_size=protocol['window_size'], halo=protocol['halo'],
+                        stride=config.get('stride'), blend=config['blend'], mean=protocol['mean'], std=protocol['std'],
+                        inputs_normalized=protocol['inputs_normalized'], device=device,
+                        use_amp=device.type == 'cuda' and protocol['amp_enabled'],
+                        batch_size=protocol['batch_size'], num_workers=config.get('num_workers', 0),
+                        speckle=protocol['speckle']), 1):
+                    counts += fused_threshold_counts(block['scores'], block['label'], block['valid_mask'], edges)
+                    if index % 100 == 0:
+                        print(f"    {name} 景{number}/{len(scenes)}：已融合{index}块；耗时{perf_counter()-scene_start:.0f}s", flush=True)
+                temporary = destination.with_suffix('.npz.tmp')
+                with temporary.open('wb') as stream:
+                    np.savez_compressed(stream, counts=counts, thresholds=thresholds)
+                temporary.replace(destination)
+            if counts.shape != (len(thresholds), 4) or np.any(counts < 0):
+                raise ValueError(f'景缓存计数异常：{destination}')
+            # 各阈值/各模型的真值正负样本必须完全相同，不能重复计算重叠区域。
+            truth = counts[:, [0, 3]] + counts[:, [1, 2]]
+            if not np.all(truth == truth[0]) or truth[0].sum() == 0:
+                raise ValueError(f"无有效像素或计量范围不一致：{row['scene_id']}")
+            previous = denominators.setdefault(row['scene_id'], truth[0].tolist())
+            if previous != truth[0].tolist():
+                raise ValueError(f"不同模型的有效像素/标签不一致：{row['scene_id']}")
+            subsets = ['all'] + (['BC3'] if row['scene_id'].upper().startswith('BC3-') else [])
+            for subset in subsets:
+                totals[subset] += counts
+                numbers[subset] += 1
+            for threshold, count in zip(thresholds, counts):
+                scene_rows.append(dict(model=name, scene_id=row['scene_id'], group_id=row['group_id'],
+                    threshold=threshold, **metrics_from_counts(count)))
+            print(f"  {'复用' if reused else '完成'} {name} {number}/{len(scenes)}景：{row['scene_id']}", flush=True)
+            write_json(output_dir / 'progress.json', dict(complete=False, model=name,
+                model_number=model_number, model_count=len(checkpoints), completed_scenes=number,
+                total_scenes=len(scenes), scene_id=row['scene_id'], invocation_seconds=perf_counter()-start))
+        for subset, counts in totals.items():
+            if numbers[subset]:
+                for threshold, count in zip(thresholds, counts):
+                    all_rows.append(dict(model=name, epoch=metadata['models'][name]['epoch'], subset=subset,
+                        scenes=numbers[subset], threshold=threshold, **metrics_from_counts(count)))
+        for subset in ('all', 'BC3'):
+            rows = [r for r in all_rows if r['model'] == name and r['subset'] == subset]
+            if not rows:
+                continue
+            best = max(rows, key=lambda r: r['f1'] if np.isfinite(r['f1']) else -1)
+            print(f"{name} / {subset}：最佳F1={best['f1']:.4f}，阈值={best['threshold']:.3f}，"
+                  f"P={best['precision']:.4f}，R={best['recall']:.4f}", flush=True)
+            fixed = next((r for r in rows if r['threshold'] == .5), None)
+            if fixed:
+                print(f"  0.5复核：F1={fixed['f1']:.4f}，P={fixed['precision']:.4f}，"
+                      f"R={fixed['recall']:.4f}，有效像素={fixed['valid_pixels']}", flush=True)
+        del model
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        save_scan_tables(output_dir, all_rows, scene_rows, targets, recall_targets)
+    write_json(output_dir / 'progress.json', dict(complete=True, models=list(checkpoints),
+        total_scenes=len(scenes), invocation_seconds=perf_counter()-start))
+    print(f'扫描完成：{output_dir}；阈值由val选取，泛化仍需独立测试集。', flush=True)
     return output_dir
 
 

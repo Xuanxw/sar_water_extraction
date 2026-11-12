@@ -1,0 +1,94 @@
+# 2026-11-12基础阈值对照：基础Q35、坡度15度。
+# 基础门限高于原历史Q25，关闭不再产生额外恢复的历史分支；其余算法不变。
+# 这是整景放宽候选区域，可能显著增加山区误检，不能按水体面积判断精度。
+# 独立成果和阶段缓存；辅助数据及SNAP缓存沿用已有目录。
+# 北京密云区专用：自动扫描已完成的BC2–BC5 ORG；排除SLC，不限制景数或日期数。
+# 无真值，不报告F1/IoU；不按日期合并。所有路径均为绝对路径。
+# 当前输入为线性幅度：SNAP Lee功率域滤波后恢复幅度，不做辐射校正。
+# 续跑只读CACHE_DIR/scenes/景号/progress.json及对应文件；相对路径支持缓存/成果迁移。
+# 修改输入或算法参数后用resume: false重算；需保留旧成果时另设输出目录和缓存目录。
+# LANDCOVER_PATH/ELEVATION_PATH/ORG_HISTORY_PATH可省略或设null；download_missing=true时下载所需公共瓦片。
+# water_percent=35是整景AOI内第35百分位，不是Otsu、概率阈值或精度保证。
+# normalization=none/scene_zscore；线性z-score不改变百分位阈值分类。
+# input_nodata_value=null保留文件掩膜之外的有限0；仅确认0为无效后才设0。
+# output_crs用于米制辅助分析；水体栅格/SHP保留原SAR网格/CRS。
+# history默认使用WorldCover 2021水体类80，只放宽SAR候选阈值，不强制填水。
+# 坡度筛查不等于雷达阴影/叠掩模拟；建成区排除可能漏掉真实城市积水。
+# morphology半径单位为原始像元；0关闭，避免默认删除窄河道。
+paths:
+  CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_bc_base_q35_20261112
+  AUXILIARY_CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\auxiliary
+  OUTPUT_ROOT: E:\InSAR\水体提取\北京密云区\outputs\thres_seg_base_q35_20261112
+  OUTPUT_DIR: E:\InSAR\水体提取\北京密云区\outputs\thres_seg_base_q35_20261112
+  ORG_ROOT: E:\InSAR\水体提取\北京密云区\ORG
+  AOI_PATH: E:\InSAR\水体提取\北京密云区\密云区行政划分.shp
+  LANDCOVER_PATH: null
+  ORG_HISTORY_PATH: null
+  SNAP_GPT_PATH: D:\SNAP\esa-snap\bin\gpt.exe
+  SNAP_CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_snap
+  SNAP_WORK_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_snap_work
+run:
+  mode: org_scenes
+input:
+  bands:
+    VV: 1
+threshold:
+  water_percent: 35
+  mode: bottom
+processing:
+  block_size: 1024
+output:
+  preview_size: 1200
+quality_review:
+  enabled: true
+  points_per_stratum: 50
+  boundary_radius_px: 5
+  seed: 42
+  block_size: 1024
+  slope_threshold_deg: 15.0
+org:
+  filename_timezone: UTC
+  date_timezone: Asia/Shanghai
+  output_crs: EPSG:32650
+  crop_buffer_m: 150.0
+  input_nodata_value: null
+  normalization: none
+  resume: true
+  save_quicklook: true
+  filter:
+    method: snap_lee
+    input_domain: amplitude
+    window_size: 7
+    enl: 1.0
+  snap_threads: 4
+  snap_tile_cache: 512M
+  sensitivity_delta_percent: 2.0
+  auxiliary:
+    download_missing: true
+    worldcover_year: 2021
+    buffer_m: 1000.0
+    max_tiles: 16
+    max_mosaic_pixels: 100000000
+    timeout: 60
+    retries: 3
+    landcover_resolution_m: 10.0
+    dem_resolution_m: 30.0
+    elevation_scale: 1.0
+  postprocess:
+    landcover_enabled: true
+    excluded_cover_classes:
+    - 50
+    terrain_enabled: true
+    max_slope_deg: 15.0
+    history_enabled: false
+    history_relax_percent: 0.0  # 历史分支关闭，不额外提高幅度门限。
+    history_water_values:
+    - 1
+    history_dry_values:
+    - 0
+    opening_radius_px: 0
+    closing_radius_px: 0
+
+# 仅控制控制台颜色；processing.log始终纯文本，日志与计时CSV均追加保存。
+logging:
+  console_color: true

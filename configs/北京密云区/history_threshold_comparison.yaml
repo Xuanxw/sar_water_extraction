@@ -1,0 +1,16 @@
+# 独立实验入口：python scripts/history_threshold_comparison.py
+# 参数继承BASELINE_OUTPUT_DIR/run.json，固定基础Q10，只改变历史Q15/Q20/Q25。
+# 不运行SNAP、不重新抽样；缺少既有滤波/辅助缓存时停止。
+# resume仅依据本实验CACHE_DIR中的阶段记录和文件是否存在，不校验路径哈希。
+# 需要从头重算本实验时设resume:false；更换实验参数/源数据时另设输出及缓存。
+paths:
+  BASELINE_OUTPUT_DIR: E:\InSAR\水体提取\北京密云区\outputs\thres_seg
+  BASELINE_CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_bc
+  SNAP_CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_snap
+  AUXILIARY_CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\auxiliary
+  OUTPUT_DIR: E:\InSAR\水体提取\北京密云区\outputs\history_threshold_comparison
+  CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\history_threshold_comparison
+experiment:
+  history_percentiles: [15, 20, 25]  # 绝对分位数；对应history_relax_percent=5/10/15
+  resume: true
+  console_color: true
