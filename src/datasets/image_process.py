@@ -77,7 +77,6 @@ Z_DISPLAY_RANGE = tuple(CONFIG["inspection"]["Z_DISPLAY_RANGE"])
 QUICKLOOK_LOOKS = CONFIG["inspection"]["QUICKLOOK_LOOKS"]
 QUICKLOOK_MAX_SIDE = CONFIG["inspection"]["QUICKLOOK_MAX_SIDE"]
 STRIPE_ROWS = CONFIG["inspection"]["STRIPE_ROWS"]
-FONT_PATH = CONFIG["paths"]["FONT_PATH"]
 PNG_COMPRESSION = CONFIG["inspection"]["PNG_COMPRESSION"]
 LABEL_RULE = CONFIG["labels"]["LABEL_RULE"]
 CALIBRATED_ROOT = CONFIG["paths"]["CALIBRATED_ROOT"]
@@ -1113,7 +1112,8 @@ def export_scene(path):
     col,row_height = max(shape[1],620), shape[0]+72
     canvas = Image.new('L',(2*col+24,2*row_height+54),255)
     draw = ImageDraw.Draw(canvas)
-    font = ImageFont.truetype(str(FONT_PATH),15) if FONT_PATH.exists() else ImageFont.load_default()
+    # 使用Pillow自带字体，不依赖Windows或Linux的字体安装路径。
+    font = ImageFont.load_default(size=15)
     draw.text((8,4),path.stem,fill=0,font=font)
     draw.text((8,26),'Display overviews only; source pixels and training files are not modified.',fill=0,font=font)
     rectangles = {}

@@ -22,7 +22,6 @@ paths:
   SOURCE_OVERRIDES: {}
   AUDIT_OUTPUT_ROOT: E:\Code_projects\sar_water_extraction\codex_analysis\radiometry_audit
   QUICKLOOK_IMAGE_ROOT: prepared_scenes_bat2\images
-  FONT_PATH: C:\Windows\Fonts\arial.ttf
   CALIBRATED_ROOT: processed_scenes_bat2\calibrated
   FILTERED_ROOT: processed_scenes_bat2\filtered
   NORMALIZED_ROOT: processed_scenes_bat2\normalized
