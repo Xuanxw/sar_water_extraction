@@ -20,12 +20,11 @@ from matplotlib.lines import Line2D
 import matplotlib
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
-from configuration import load_yaml
+from configuration import load_yaml, config_argument
 from thres_segmentation.org_io import read_aoi, signature
 from thres_segmentation.water_analysis import pixel_areas, area_sum
 
 # 执行设置：只导出指定景，不扫描并批量生成全部影像。
-CONFIG_PATH=Path(r'E:\Code_projects\sar_water_extraction\configs\北京密云区\threshold_segmentation.yaml')
 SCENE_ID='BC5-SM-ORG-VV-20250730T142126-002563-000124-000A03-01'
 OUTPUT_DIR=Path(r'E:\InSAR\水体提取\北京密云区\outputs\coverage_before_roi')
 MAX_SIDE=1600
@@ -40,8 +39,8 @@ def draw_boundary(ax,geometry,color,linewidth=1.3,linestyle='-'):
             x,y=ring.xy;ax.plot(x,y,color=color,linewidth=linewidth,linestyle=linestyle)
 
 
-def main():
-    config=load_yaml(CONFIG_PATH);paths=config['paths']
+def main(config_path):
+    config=load_yaml(config_path);paths=config['paths']
     records=json.loads((paths['OUTPUT_DIR']/'inventory.json').read_text(encoding='utf-8'))
     record=next(r for r in records if r['scene_id']==SCENE_ID)
     source=Path(record['path'])
@@ -115,4 +114,4 @@ def main():
     return target
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':main(config_argument())

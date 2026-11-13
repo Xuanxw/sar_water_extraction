@@ -15,6 +15,9 @@ from datasets import image_process
 from supervised.load.sar_scene_dataset import SARSceneDataset
 import label_fixtures as fixtures
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+image_process.configure(Path(__file__).resolve().parents[1] / 'configs/image_process.yaml')
+
 
 class InPlaceLabelTests(unittest.TestCase):
     def test_replace_reversed_labels_preserve_sources_and_refresh_cache(self):

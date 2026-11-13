@@ -13,6 +13,9 @@ from supervised import train
 from supervised.models.losses import WaterSegmentationLoss
 import test_sar_scene_dataset as scene_tests
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class BCTrainingWeightTests(unittest.TestCase):
     def test_weighted_loss_balances_total_gradient_and_ignores_unknown(self):

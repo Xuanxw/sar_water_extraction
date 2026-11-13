@@ -6,6 +6,10 @@ from unittest.mock import Mock, patch
 from supervised import train, post_process
 from supervised.evaluation import postprocess
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+post_process.configure(Path(__file__).resolve().parents[1] / 'configs/post_process.yaml')
+
 
 class TrainingPipelineTests(unittest.TestCase):
     def test_training_success_and_failure_never_start_postprocess(self):

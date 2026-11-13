@@ -271,9 +271,13 @@ def _run_org_scenes(config,log):
                 folder=root/record['date']/record['scene_id'];folder.mkdir(parents=True,exist_ok=True)
                 progress=SceneProgress(paths['CACHE_DIR'],record['scene_id'],folder,paths['SNAP_CACHE_DIR'],options['resume'])
                 print(f'开始 {index}/{len(records)}：{record["scene_id"]}',flush=True)
-                # 旧版只有坡度筛查；补齐原GUI地形分类时复用滤波/阈值缓存，仅重做下游。
-                if options['postprocess'].get('terrain_method')=='gui_geometry' and not (folder/'terrain_geometry.json').exists():
-                    for stage in ('mask','vector','quality','preview','complete'):progress.state['stages'].pop(stage,None)
+                # 手动重跑入口时识别地形算法版本；复用滤波/分位数，避免误用修正前的掩膜。
+                if options['postprocess'].get('terrain_method')=='gui_geometry':
+                    from thres_segmentation.terrain_geometry import TERRAIN_METHOD_VERSION
+                    terrain_record=folder/'terrain_geometry.json'
+                    method=json.loads(terrain_record.read_text(encoding='utf-8')).get('method') if terrain_record.exists() else None
+                    if method!=TERRAIN_METHOD_VERSION:
+                        for stage in ('mask','vector','quality','preview','complete'):progress.state['stages'].pop(stage,None)
                 if progress.completed('complete'):
                     scene_stage['status']='reused'
                     log.message('复用已完成的本景成果/覆盖检查','REUSED')

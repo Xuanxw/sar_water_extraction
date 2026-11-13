@@ -12,6 +12,9 @@ from torch.utils.data import DataLoader, Dataset, Subset
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from supervised import train
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class DeterministicWindowDataset(Dataset):
     """与 SARSceneDataset 相同：worker 只读取确定性窗口，增强由主进程完成。"""

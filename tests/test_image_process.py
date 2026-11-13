@@ -16,6 +16,9 @@ from supervised.train import WaterSegmentationTrainer
 from supervised.evaluation import model_eval
 import test_sar_scene_dataset as fixture
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+tools.configure(Path(__file__).resolve().parents[1] / 'configs/image_process.yaml')
+
 class ImageProcessTests(unittest.TestCase):
     def setUp(self):
         cpu = patch.object(torch.cuda,'is_available',return_value=False)

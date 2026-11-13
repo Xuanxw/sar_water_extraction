@@ -38,7 +38,7 @@ def snap_runtime(gpt_path):
     """记录实际计算模块的版本和指纹，升级SNAP后不复用旧统计量/滤波缓存。"""
     executable = Path(gpt_path)
     if not executable.is_file():
-        raise FileNotFoundError(f'未找到SNAP GPT：{executable}；请检查configs/image_process.yaml中的SNAP_GPT_PATH')
+        raise FileNotFoundError(f'未找到SNAP GPT：{executable}；请检查本次YAML中的SNAP_GPT_PATH')
     home = executable.parent.parent
     modules = [home/'snap/modules/org-esa-snap-snap-core.jar',
                home/'microwavetbx/modules/eu-esa-microwavetbx-sar-op-sar-processing.jar']
@@ -94,7 +94,7 @@ class SnapSpeckleFilter:
             self._prepared[key] = output
             return output
         if not create:
-            raise FileNotFoundError(f'缺少匹配的SNAP预处理成果：{source.name}；请先运行 python src/datasets/image_process.py')
+            raise FileNotFoundError(f'缺少匹配的SNAP预处理成果：{source.name}；请先运行 python src/datasets/image_process.py <配置.yaml>')
         folder.mkdir(parents=True, exist_ok=True)
         with FileLock(str(folder/'prepare.lock')):
             if not completed():

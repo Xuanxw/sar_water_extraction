@@ -13,6 +13,9 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
 from supervised import train
 from supervised.models.checkpoint import load_model
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 WEIGHTS = (1.0, 0.5, 0.5, 2.0)
 LABEL = torch.tensor([[1, 0], [-1, 1]])

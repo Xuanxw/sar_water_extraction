@@ -13,6 +13,10 @@ from supervised import train, post_process
 import test_sar_scene_dataset as fixtures
 from supervised.evaluation import training_quality as quality
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+post_process.configure(Path(__file__).resolve().parents[1] / 'configs/post_process.yaml')
+
 
 class TrainingQualityTests(unittest.TestCase):
     def test_shared_counts_and_sampled_copy_match_full_copy(self):

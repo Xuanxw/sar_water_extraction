@@ -1,4 +1,4 @@
-"""统一训练入口：修改configs/train.yaml后运行 python src/supervised/train.py。"""
+"""统一训练入口：运行 python src/supervised/train.py <配置.yaml>。"""
 import csv
 import json
 import hashlib
@@ -38,69 +38,93 @@ from supervised.models.resnet import ResNet50WaterNet
 
 # ---------- 执行入口 ----------
 # 参数统一在YAML维护；以下只将配置绑定到现有函数使用的变量。
-from configuration import load_yaml
-CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "train.yaml"
-CONFIG = load_yaml(CONFIG_PATH)
+from configuration import load_yaml, config_argument
+# 直接复用训练类时的输出命名；正式入口由指定YAML覆盖，不隐式读取配置文件。
+RUN_DIRECTORY_FORMAT = '%Y%m%d_%H%M%S_%f'
+RESULT_FILES = dict(
+    metrics='metrics.csv', sampling='sampling.csv', sampling_groups='sampling_groups.csv',
+    split='split_manifest.csv', labels='label_revision.json', error='training_error.log',
+    last='last.pth', train_end='train_end.pth', best='best.pth', best_f1='best_f1.pth',
+    best_balanced='best_balanced_accuracy.pth', abnormal='abnormal.pth',
+    features='features', val_scenes='val_scenes_epoch_{epoch:03d}.csv',
+)
+WATER_GROUP_NAMES = ('无水体', '水体≤1%', '水体1%–10%', '水体10%–50%', '水体>50%')
 
-# ---------- 配置绑定 ----------
-METHOD = CONFIG["run"]["METHOD"]
-RESUME_CHECKPOINT = CONFIG["paths"]["RESUME_CHECKPOINT"]
-IMAGE_DIR = CONFIG["paths"]["IMAGE_DIR"]
-LABEL_DIR = CONFIG["paths"]["LABEL_DIR"]
-MANIFEST_PATHS = CONFIG["paths"]["MANIFEST_PATHS"]
-OUTPUT_ROOT = CONFIG["paths"]["OUTPUT_ROOT"]
-OUTPUT_DIR = CONFIG["paths"]["OUTPUT_DIR"]
-WINDOW_CACHE_DIR = CONFIG["paths"]["WINDOW_CACHE_DIR"]
-RUN_DIRECTORY_FORMAT = CONFIG["run"]["RUN_DIRECTORY_FORMAT"]
-RESULT_FILES = CONFIG["run"]["RESULT_FILES"]
-POLARIZATIONS = tuple(CONFIG["data"]["POLARIZATIONS"])
-POLARIZATION_BANDS = CONFIG["data"]["POLARIZATION_BANDS"]
-VAL_RATIO = CONFIG["data"]["VAL_RATIO"]
-MAX_SAMPLES = CONFIG["data"]["MAX_SAMPLES"]
-DATA_LAYOUT = CONFIG["data"]["DATA_LAYOUT"]
-SCENE_OPTIONS = CONFIG["data"]["SCENE_OPTIONS"]
-PRETRAINED = CONFIG["model"]["PRETRAINED"]
-CPU_THREADS = CONFIG["training"]["CPU_THREADS"]
-BATCH_SIZE = CONFIG["training"]["BATCH_SIZE"]
-EPOCHS = CONFIG["training"]["EPOCHS"]
-LEARNING_RATE = CONFIG["training"]["LEARNING_RATE"]
-SEED = CONFIG["training"]["SEED"]
-LOSS_NAME = CONFIG["training"]["LOSS_NAME"]
-BCE_WEIGHT = CONFIG["training"]["BCE_WEIGHT"]
-DICE_WEIGHT = CONFIG["training"]["DICE_WEIGHT"]
-CLASS_WEIGHT_MODE = CONFIG["training"]["CLASS_WEIGHT_MODE"]
-OPTIMIZER_NAME = CONFIG["training"]["OPTIMIZER_NAME"]
-WEIGHT_DECAY = CONFIG["training"]["WEIGHT_DECAY"]
-COSINE_SCHEDULE = CONFIG["training"]["COSINE_SCHEDULE"]
-TRAIN_AUGMENTATION = CONFIG["training"]["TRAIN_AUGMENTATION"]
-ABNORMAL_F1_THRESHOLD = CONFIG["training"]["ABNORMAL_F1_THRESHOLD"]
-SAMPLING = CONFIG["training"]["SAMPLING"]
-HARD_WARMUP_EPOCHS = CONFIG["training"]["HARD_WARMUP_EPOCHS"]
-HARD_SAMPLE_RATIO = CONFIG["training"]["HARD_SAMPLE_RATIO"]
-HARD_POOL_RATIO = CONFIG["training"]["HARD_POOL_RATIO"]
-LOW_WATER_POOL_RATIO = CONFIG["training"]["LOW_WATER_POOL_RATIO"]
-WATER_GROUP_NAMES = tuple(CONFIG["training"]["WATER_GROUP_NAMES"])
-DEEPLAB_BACKBONE = CONFIG["model"]["DEEPLAB_BACKBONE"]
-DEEPLAB_DECODER_CHANNELS = CONFIG["model"]["DEEPLAB_DECODER_CHANNELS"]
-DEEPLAB_LOW_LEVEL_CHANNELS = CONFIG["model"]["DEEPLAB_LOW_LEVEL_CHANNELS"]
-DEEPLAB_ASPP_RATES = tuple(CONFIG["model"]["DEEPLAB_ASPP_RATES"])
-DEEPLAB_DROPOUT = CONFIG["model"]["DEEPLAB_DROPOUT"]
-BASE_CHANNELS = CONFIG["model"]["BASE_CHANNELS"]
-DECODER_CHANNELS = CONFIG["model"]["DECODER_CHANNELS"]
-STAGE = CONFIG["model"]["STAGE"]
-UAFNET_BACKBONE = CONFIG["model"]["UAFNET_BACKBONE"]
-UAFNET_FINAL_RESIDUAL = CONFIG["model"]["UAFNET_FINAL_RESIDUAL"]
-UAFNET_MBDC_DILATIONS = CONFIG["model"]["UAFNET_MBDC_DILATIONS"]
-UAFNET_HIGH_RESOLUTION_REFINEMENT = CONFIG["model"]["UAFNET_HIGH_RESOLUTION_REFINEMENT"]
-UAFNET_REFINEMENT_DECODER = CONFIG["model"]["UAFNET_REFINEMENT_DECODER"]
-HEAD_LOSS_WEIGHTS = tuple(CONFIG["training"]["HEAD_LOSS_WEIGHTS"])
-SAVE_FEATURE_MAPS = CONFIG["quality"]["SAVE_FEATURE_MAPS"]
-FEATURE_MAP_INTERVAL = CONFIG["quality"]["FEATURE_MAP_INTERVAL"]
-FEATURE_MAP_SAMPLES = CONFIG["quality"]["FEATURE_MAP_SAMPLES"]
-SCENE_OPTIONS.update(cache_dir=WINDOW_CACHE_DIR)
-VALIDATION_QUALITY_OPTIONS = dict(enabled=CONFIG["quality"]["SAVE_VALIDATION_FIGURES"],
-    interval=CONFIG["quality"]["INTERVAL"], max_scenes=CONFIG["quality"]["MAX_SCENES"],
-    max_side=CONFIG["quality"]["PREVIEW_MAX_SIDE"])
+CONFIG_PATH = CONFIG = None
+
+
+def configure(config_path):
+    """显式加载本次YAML；导入模块时不读取文件或命令行参数。"""
+    global CONFIG_PATH, CONFIG, METHOD, RESUME_CHECKPOINT, IMAGE_DIR, LABEL_DIR, MANIFEST_PATHS, OUTPUT_ROOT
+    global OUTPUT_DIR, WINDOW_CACHE_DIR, RUN_DIRECTORY_FORMAT, RESULT_FILES, POLARIZATIONS, POLARIZATION_BANDS, VAL_RATIO, MAX_SAMPLES
+    global DATA_LAYOUT, SCENE_OPTIONS, PRETRAINED, CPU_THREADS, BATCH_SIZE, EPOCHS, LEARNING_RATE, SEED
+    global LOSS_NAME, BCE_WEIGHT, DICE_WEIGHT, CLASS_WEIGHT_MODE, OPTIMIZER_NAME, WEIGHT_DECAY, COSINE_SCHEDULE, TRAIN_AUGMENTATION
+    global ABNORMAL_F1_THRESHOLD, SAMPLING, HARD_WARMUP_EPOCHS, HARD_SAMPLE_RATIO, HARD_POOL_RATIO, LOW_WATER_POOL_RATIO, WATER_GROUP_NAMES, DEEPLAB_BACKBONE
+    global DEEPLAB_DECODER_CHANNELS, DEEPLAB_LOW_LEVEL_CHANNELS, DEEPLAB_ASPP_RATES, DEEPLAB_DROPOUT, BASE_CHANNELS, DECODER_CHANNELS, STAGE, UAFNET_BACKBONE
+    global UAFNET_FINAL_RESIDUAL, UAFNET_MBDC_DILATIONS, UAFNET_HIGH_RESOLUTION_REFINEMENT, UAFNET_REFINEMENT_DECODER, HEAD_LOSS_WEIGHTS, SAVE_FEATURE_MAPS, FEATURE_MAP_INTERVAL, FEATURE_MAP_SAMPLES
+    global VALIDATION_QUALITY_OPTIONS
+    CONFIG_PATH = Path(config_path).expanduser().resolve()
+    CONFIG = load_yaml(CONFIG_PATH)
+
+    # ---------- 配置绑定 ----------
+    METHOD = CONFIG["run"]["METHOD"]
+    RESUME_CHECKPOINT = CONFIG["paths"]["RESUME_CHECKPOINT"]
+    IMAGE_DIR = CONFIG["paths"]["IMAGE_DIR"]
+    LABEL_DIR = CONFIG["paths"]["LABEL_DIR"]
+    MANIFEST_PATHS = CONFIG["paths"]["MANIFEST_PATHS"]
+    OUTPUT_ROOT = CONFIG["paths"]["OUTPUT_ROOT"]
+    OUTPUT_DIR = CONFIG["paths"]["OUTPUT_DIR"]
+    WINDOW_CACHE_DIR = CONFIG["paths"]["WINDOW_CACHE_DIR"]
+    RUN_DIRECTORY_FORMAT = CONFIG["run"]["RUN_DIRECTORY_FORMAT"]
+    RESULT_FILES = CONFIG["run"]["RESULT_FILES"]
+    POLARIZATIONS = tuple(CONFIG["data"]["POLARIZATIONS"])
+    POLARIZATION_BANDS = CONFIG["data"]["POLARIZATION_BANDS"]
+    VAL_RATIO = CONFIG["data"]["VAL_RATIO"]
+    MAX_SAMPLES = CONFIG["data"]["MAX_SAMPLES"]
+    DATA_LAYOUT = CONFIG["data"]["DATA_LAYOUT"]
+    SCENE_OPTIONS = CONFIG["data"]["SCENE_OPTIONS"]
+    PRETRAINED = CONFIG["model"]["PRETRAINED"]
+    CPU_THREADS = CONFIG["training"]["CPU_THREADS"]
+    BATCH_SIZE = CONFIG["training"]["BATCH_SIZE"]
+    EPOCHS = CONFIG["training"]["EPOCHS"]
+    LEARNING_RATE = CONFIG["training"]["LEARNING_RATE"]
+    SEED = CONFIG["training"]["SEED"]
+    LOSS_NAME = CONFIG["training"]["LOSS_NAME"]
+    BCE_WEIGHT = CONFIG["training"]["BCE_WEIGHT"]
+    DICE_WEIGHT = CONFIG["training"]["DICE_WEIGHT"]
+    CLASS_WEIGHT_MODE = CONFIG["training"]["CLASS_WEIGHT_MODE"]
+    OPTIMIZER_NAME = CONFIG["training"]["OPTIMIZER_NAME"]
+    WEIGHT_DECAY = CONFIG["training"]["WEIGHT_DECAY"]
+    COSINE_SCHEDULE = CONFIG["training"]["COSINE_SCHEDULE"]
+    TRAIN_AUGMENTATION = CONFIG["training"]["TRAIN_AUGMENTATION"]
+    ABNORMAL_F1_THRESHOLD = CONFIG["training"]["ABNORMAL_F1_THRESHOLD"]
+    SAMPLING = CONFIG["training"]["SAMPLING"]
+    HARD_WARMUP_EPOCHS = CONFIG["training"]["HARD_WARMUP_EPOCHS"]
+    HARD_SAMPLE_RATIO = CONFIG["training"]["HARD_SAMPLE_RATIO"]
+    HARD_POOL_RATIO = CONFIG["training"]["HARD_POOL_RATIO"]
+    LOW_WATER_POOL_RATIO = CONFIG["training"]["LOW_WATER_POOL_RATIO"]
+    WATER_GROUP_NAMES = tuple(CONFIG["training"]["WATER_GROUP_NAMES"])
+    DEEPLAB_BACKBONE = CONFIG["model"]["DEEPLAB_BACKBONE"]
+    DEEPLAB_DECODER_CHANNELS = CONFIG["model"]["DEEPLAB_DECODER_CHANNELS"]
+    DEEPLAB_LOW_LEVEL_CHANNELS = CONFIG["model"]["DEEPLAB_LOW_LEVEL_CHANNELS"]
+    DEEPLAB_ASPP_RATES = tuple(CONFIG["model"]["DEEPLAB_ASPP_RATES"])
+    DEEPLAB_DROPOUT = CONFIG["model"]["DEEPLAB_DROPOUT"]
+    BASE_CHANNELS = CONFIG["model"]["BASE_CHANNELS"]
+    DECODER_CHANNELS = CONFIG["model"]["DECODER_CHANNELS"]
+    STAGE = CONFIG["model"]["STAGE"]
+    UAFNET_BACKBONE = CONFIG["model"]["UAFNET_BACKBONE"]
+    UAFNET_FINAL_RESIDUAL = CONFIG["model"]["UAFNET_FINAL_RESIDUAL"]
+    UAFNET_MBDC_DILATIONS = CONFIG["model"]["UAFNET_MBDC_DILATIONS"]
+    UAFNET_HIGH_RESOLUTION_REFINEMENT = CONFIG["model"]["UAFNET_HIGH_RESOLUTION_REFINEMENT"]
+    UAFNET_REFINEMENT_DECODER = CONFIG["model"]["UAFNET_REFINEMENT_DECODER"]
+    HEAD_LOSS_WEIGHTS = tuple(CONFIG["training"]["HEAD_LOSS_WEIGHTS"])
+    SAVE_FEATURE_MAPS = CONFIG["quality"]["SAVE_FEATURE_MAPS"]
+    FEATURE_MAP_INTERVAL = CONFIG["quality"]["FEATURE_MAP_INTERVAL"]
+    FEATURE_MAP_SAMPLES = CONFIG["quality"]["FEATURE_MAP_SAMPLES"]
+    SCENE_OPTIONS.update(cache_dir=WINDOW_CACHE_DIR)
+    VALIDATION_QUALITY_OPTIONS = dict(enabled=CONFIG["quality"]["SAVE_VALIDATION_FIGURES"],
+        interval=CONFIG["quality"]["INTERVAL"], max_scenes=CONFIG["quality"]["MAX_SCENES"],
+        max_side=CONFIG["quality"]["PREVIEW_MAX_SIDE"])
 
 
 def build_hard_sample_plan(losses, hard_ratio=0.5, pool_ratio=0.25, seed=42, groups=None, low_water_pool_ratio=None):
@@ -221,7 +245,7 @@ class WaterSegmentationTrainer:
             self.model_info['input_representation'] = (
                 f"uncalibrated_{self.speckle['input_domain']}; SNAP_Lee_power_domain; "
                 "restore_input_domain; train_mean_std")
-            cprint('SNAP整景缓存只读复用；缺少成果请先运行src/datasets/image_process.py。辐射校正未执行。', 'cyan', flush=True)
+            cprint('SNAP整景缓存只读复用；缺少成果请先运行src/datasets/image_process.py <配置.yaml>。辐射校正未执行。', 'cyan', flush=True)
         if self.speckle is not None and not output_dir_is_final:
             self.output_dir = self.output_dir.with_name(self.output_dir.name + '_' + self.speckle['method'])
         self.start_epoch, self.resume_validation = 1, False
@@ -1037,6 +1061,8 @@ class WaterSegmentationTrainer:
 
 def create_trainer(method=None):
     """平级选择网络与保存目录，然后创建同一个公共训练器。"""
+    if CONFIG is None:
+        raise ValueError("请先调用configure(config_path)，再创建训练器")
     if DATA_LAYOUT not in ('full_scene', 'patch'):
         raise ValueError('DATA_LAYOUT应为full_scene或patch')
     method = METHOD if method is None else method
@@ -1205,8 +1231,12 @@ def create_trainer(method=None):
     )
 
 
-def main(method=None):
-    """只运行训练及其验证质量输出；离线后处理由post_process.py独立执行。"""
+def main(config_path=None, method=None):
+    """按显式YAML训练和验证；离线后处理仍由独立入口执行。"""
+    if config_path is not None:
+        configure(config_path)
+    if CONFIG is None:
+        raise ValueError("请传入YAML路径，或先调用configure(config_path)")
     cprint(f"训练配置：{CONFIG_PATH}", "cyan", flush=True)
     torch.set_num_threads(CPU_THREADS)
     trainer = create_trainer() if method is None else create_trainer(method)
@@ -1217,4 +1247,4 @@ def main(method=None):
 
 
 if __name__ == "__main__":
-    main()
+    main(config_argument())

@@ -8,6 +8,9 @@ from configuration import load_yaml
 from supervised import train
 from datasets import snap_preprocess
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class YamlConfigurationTests(unittest.TestCase):
     def test_paths_and_label_null_key(self):

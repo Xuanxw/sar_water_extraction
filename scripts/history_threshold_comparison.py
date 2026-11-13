@@ -12,13 +12,12 @@ from pyproj import Transformer
 from shapely import transform as transform_geometry
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from configuration import load_yaml
+from configuration import load_yaml, config_argument
 from thres_segmentation.org_pipeline import SceneProgress, statistics, segment
 from thres_segmentation.product_layout import scene_product
 from thres_segmentation.org_io import read_aoi, prepare_auxiliary, export_water_polygon, windows, write_json
 from thres_segmentation.run_log import RunLog
 
-CONFIG_PATH = Path(r'E:\Code_projects\sar_water_extraction\configs\北京密云区\history_threshold_comparison.yaml')
 
 
 def write_csv(path, rows):
@@ -84,8 +83,8 @@ def save_comparison(filtered, masks, percentiles, destination, max_side):
     fig.clear()
 
 
-def main(config_path=None):
-    options = load_yaml(config_path or CONFIG_PATH)
+def main(config_path):
+    options = load_yaml(config_path)
     paths, experiment = options['paths'], options['experiment']
     baseline, output, cache = paths['BASELINE_OUTPUT_DIR'], paths['OUTPUT_DIR'], paths['CACHE_DIR']
     # 只保护源成果目录，避免配置笔误导致覆盖；不增加路径哈希等续跑限制。
@@ -191,4 +190,4 @@ def main(config_path=None):
 
 
 if __name__ == '__main__':
-    main()
+    main(config_argument())

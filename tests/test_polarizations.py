@@ -12,6 +12,9 @@ from supervised import train
 from supervised.models.pvt import PVTUANet
 from supervised.models.checkpoint import load_model
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class PolarizationTests(unittest.TestCase):
     def test_selection_controls_bands_channels_metadata_and_directory(self):

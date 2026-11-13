@@ -15,6 +15,9 @@ from supervised.models.losses import WaterSegmentationLoss
 from supervised.models.pvt import PVTUANet, UncertaintyRank
 from supervised.models.checkpoint import load_model
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class TinyWaterDataset(torch.utils.data.Dataset):
     def __init__(self, image_dir, label_dir=None, bands=None):

@@ -1,0 +1,21 @@
+# 独立实验，不读取train或threshold配置；相对路径以本YAML目录为基准。
+# inspect仅检查XML；nominal生成名义LUT。整景visibility案例配置见configs/北京密云区/sar_geometry_visibility*.yaml，当前为独立候选对照。
+mode: inspect
+paths:
+  XML_PATH: E:/InSAR/水体提取/北京密云区/SLC/BC2-SM-SLC-1SVV-20250727T025242-033428-000141-008294.zip
+  DEM_PATH: null  # 必须提供已确认WGS84椭球高、米单位的单波段DEM。
+  OUTPUT_DIR: ../codex_analysis/sar_geometry/nominal_experiment
+  CORE_PATH: ../build/sar_geometry/sar_geometry_core.exe  # Linux去掉.exe；多配置构建可能位于Release子目录。
+xml_member: null  # ZIP中只有一份annotation XML时自动选择，不读取calibration。
+model:
+  radar_grid_confirmed: false  # 确认实际雷达网格及时间原点后才能启用nominal。
+  doppler_mode: null  # zero=已确认零Doppler；metadata=已确认使用注释dataDcPolynomial。
+  doppler_sign: null  # metadata模式明确填1或-1；不能根据经验猜测。
+  height_datum: null  # 只接受WGS84_ellipsoid；当前不自动完成正高转换。
+  max_iterations: 40
+  tolerance_hz: 0.01
+  tolerance_pixels: 0.0001
+  max_step_seconds: 2.0
+execution:
+  block_rows: 64
+  resume: true

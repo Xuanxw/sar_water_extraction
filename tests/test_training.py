@@ -7,6 +7,9 @@ from unittest.mock import patch
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
                 str(Path(__file__).resolve().parents[1] / "scripts")]
 from supervised import train
+
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
 class TrainingSelectionTests(unittest.TestCase):
     def test_methods_are_peers_and_keep_checkpoint_contract(self):
         cases = (

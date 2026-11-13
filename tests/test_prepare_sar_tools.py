@@ -10,6 +10,9 @@ from rasterio.transform import from_origin
 from PIL import Image
 from datasets import image_process as tools
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+tools.configure(Path(__file__).resolve().parents[1] / 'configs/image_process.yaml')
+
 class SarToolsTests(unittest.TestCase):
     def test_mode_executes_only_selected_task(self):
         tasks=['prepare_labels','prepare_dataset','audit','export_quicklooks']

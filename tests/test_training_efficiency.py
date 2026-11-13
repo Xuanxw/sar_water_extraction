@@ -14,6 +14,9 @@ import test_sar_scene_dataset as fixture
 from supervised import train
 from supervised.evaluation import sliding_inference, training_quality, model_eval
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class EfficiencyTests(unittest.TestCase):
     def test_training_validation_fast_path_keeps_metrics_and_quality(self):

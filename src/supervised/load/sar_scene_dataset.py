@@ -106,7 +106,7 @@ class SARSceneDataset(Dataset):
             print(f'复用窗口索引：{len(self.windows)}个窗口', flush=True)
         else:
             if require_prepared:
-                raise FileNotFoundError('缺少窗口索引，请先运行 python src/datasets/image_process.py')
+                raise FileNotFoundError('缺少窗口索引，请先运行 python src/datasets/image_process.py <配置.yaml>')
             records = []
             for sid, r in enumerate(self.scenes):
                 with rasterio.open(self.root/'labels'/r['split']/r['label_name']) as src:
@@ -217,7 +217,7 @@ class SARSceneDataset(Dataset):
             with np.load(path) as saved:
                 return saved['mean'], saved['std'], saved['indices'].tolist()
         if self.require_prepared:
-            raise FileNotFoundError('缺少匹配的训练集归一化统计，请先运行 python src/datasets/image_process.py')
+            raise FileNotFoundError('缺少匹配的训练集归一化统计，请先运行 python src/datasets/image_process.py <配置.yaml>')
         rng = np.random.default_rng(self.seed)
         selected = []
         for sid in np.unique(self.windows[selected_ids, 0]):

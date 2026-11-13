@@ -18,6 +18,9 @@ from supervised.models import pvt
 from supervised.models.checkpoint import load_model
 from supervised.models.losses import WaterSegmentationLoss
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class DeepLabExperimentTests(unittest.TestCase):
     @classmethod
@@ -115,7 +118,7 @@ class DeepLabExperimentTests(unittest.TestCase):
                  patch.multiple(train, POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2}, DATA_LAYOUT="patch", CLASS_WEIGHT_MODE="none", SAMPLING="hard"), patch.object(train, "RESUME_CHECKPOINT", None), \
                  patch.object(train, "VALIDATION_QUALITY_OPTIONS", dict(enabled=False)), \
                  patch.object(torch.cuda, "is_available", return_value=False):
-                train.main("deeplabv3")
+                train.main(method="deeplabv3")
                 run = next((root / "runs").iterdir())
             self.assertEqual(run.parent.name, "runs")
             checkpoint = torch.load(run / "best_f1.pth", weights_only=True)

@@ -11,6 +11,9 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
                 str(Path(__file__).resolve().parents[1] / "scripts")]
 from supervised.models.losses import WaterSegmentationLoss
 from supervised import train
+
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
 class LossTests(unittest.TestCase):
     def test_bce_matches_original_and_ignored_pixels_have_no_gradient(self):
         score = torch.tensor([[[[0., 2., -3.]]]], requires_grad=True)

@@ -15,6 +15,9 @@ from supervised.evaluation.visual import FeatureVisualizer
 from supervised.models.pvt import PVTUANet
 from test_uafnet_training import TinyWaterDataset
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class FeatureVisualizationTests(unittest.TestCase):
     @classmethod

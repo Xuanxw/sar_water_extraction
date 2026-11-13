@@ -1,6 +1,19 @@
 """读取执行入口的 YAML；可用 DATA_ROOT 统一解析数据目录，不启动处理。"""
 from pathlib import Path
+import sys
 import yaml
+
+
+def config_argument(argv=None, optional_args=0):
+    """从sys.argv读取必填YAML路径；相对路径以终端工作目录为准，不加载配置或启动任务。"""
+    args = sys.argv if argv is None else argv
+    usage = f"用法：python {args[0]} <配置.yaml>" + (" [对照配置.yaml]" if optional_args else "")
+    if len(args) == 2 and args[1] in ('-h', '--help'):
+        print(usage)
+        raise SystemExit(0)
+    if not 2 <= len(args) <= 2 + optional_args:
+        raise SystemExit(usage)
+    return Path(args[1]).expanduser().resolve()
 
 
 def load_yaml(path):

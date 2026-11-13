@@ -1,0 +1,45 @@
+# 15m剖面采样敏感性检查，输出地理网格仍为30m。
+mode: visibility
+paths:
+  XML_PATH: E:/InSAR/水体提取/北京密云区/SLC/BC2-SM-SLC-1SVV-20250727T025242-033428-000141-008294.zip
+  ORG_PATH: E:/InSAR/水体提取/北京密云区/ORG/BC2-SM-ORG-2SVV-20250727T025242-033428-000141-008294/bc2-sm-org-vv-20250727t025242-033428-000141-008294-01.tiff
+  DEM_TILES:
+  - E:/InSAR/水体提取/北京密云区/data_cache/auxiliary/tiles/copernicus/Copernicus_DSM_COG_10_N40_00_E116_00_DEM.tif
+  - E:/InSAR/水体提取/北京密云区/data_cache/auxiliary/tiles/copernicus/Copernicus_DSM_COG_10_N40_00_E117_00_DEM.tif
+  GEOID_PATH: /vsicurl/https://cdn.proj.org/us_nga_egm08_25.tif
+  OUTPUT_DIR: E:\Code_projects\sar_water_extraction\codex_analysis\sar_geometry\miyun_025242_profiles_15m
+  CORE_PATH: E:/Code_projects/sar_water_extraction/build/sar_geometry/sar_geometry_core.exe
+  BASELINE_DIR: E:/InSAR/水体提取/北京密云区/data_cache/threshold_bc_20261112/scenes/BC2-SM-ORG-VV-20250727T025242-033428-000141-008294-01/products
+  GUI_SLOPE_PATH: E:/InSAR/水体提取/北京密云区/data_cache/auxiliary/aligned/copernicus_b8fb0a1c360127ae6a5d_gui_zt_slope.tif
+  GUI_ASPECT_PATH: E:/InSAR/水体提取/北京密云区/data_cache/auxiliary/aligned/copernicus_b8fb0a1c360127ae6a5d_gui_zt_aspect.tif
+xml_member: null
+model:
+  radar_grid_confirmed: false
+  doppler_mode: zero
+  doppler_sign: null
+  height_datum: EGM2008
+  max_iterations: 40
+  tolerance_hz: 0.01
+  tolerance_pixels: 0.0001
+  max_step_seconds: 2.0
+scene:
+  allow_unconfirmed_geometry: true
+  geometry_assumption_note: BC SM按零Doppler候选模型进行对照，时间原点取imageInformation；尚无独立GAMMA或控制点验证。
+  output_crs: EPSG:32650
+  resolution_m: 30
+  azimuth_step_m: 15
+  range_step_m: 15
+  support_buffer_m: 20000
+  height_bounds_m:
+  - -12000
+  - 10000
+  height_tolerance_m: 0.05
+  org_nodata: 0
+  max_profile_points: 20000000
+execution:
+  threads: 4
+  profile_batch_rows: 32
+  map_block_rows: 64
+  block_rows: 64
+  resume: true
+  time_budget_seconds: 180

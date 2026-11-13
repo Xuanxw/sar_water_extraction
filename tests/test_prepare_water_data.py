@@ -24,6 +24,9 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
 from datasets import image_process as prepare
 from datasets.dfc_sample.s1_dataset import WaterDataset
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+prepare.configure(Path(__file__).resolve().parents[1] / 'configs/image_process.yaml')
+
 
 class PrepareWaterDataTests(unittest.TestCase):
     def setUp(self):
@@ -263,6 +266,72 @@ class PrepareWaterDataTests(unittest.TestCase):
                 after = list(csv.DictReader(stream))
             self.assertEqual([r for r in after if r['scene_id']=='SAMPLE_A'], before)
             self.assertEqual(len({r['name'] for r in after}), len(after))
+
+    def test_resume_excludes_unfinished_scene_but_protects_completed(self):
+        """合成三景：A完成、B失败、C未开始；排除B后仅生成C，A的像元和记录不变。"""
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name in ('SAMPLE_A', 'SAMPLE_B', 'SAMPLE_C'):
+                self.sources(root, name)
+            split = root/'split.csv'
+            fields = ['影像编号', '数据划分', '场景', '是否采用']
+            entries = [['SAMPLE_A', 'train', 'G_a', '已确认'],
+                       ['SAMPLE_B', 'val', 'G_b', '已确认'],
+                       ['SAMPLE_C', 'val', 'G_c', '已确认']]
+
+            def write_rows(values):
+                with split.open('w', encoding='utf-8-sig', newline='') as stream:
+                    writer = csv.writer(stream)
+                    writer.writerow(fields)
+                    writer.writerows(values)
+
+            write_rows(entries)
+            config = dict(SPLIT_CSV=split, IMAGE_ROOT=root/'source_images',
+                          LABEL_ROOT=root/'source_labels', OUTPUT_DIR=root/'prepared', CACHE_DIR=root/'cache',
+                          READ_WINDOW_SIZE=4, CLASS_FIELD='kind', CLASS_MAP={0:0, 1:1},
+                          SCENE_CLASS_RULES={}, MAX_SCENES=None)
+            original = prepare.prepare_scene
+
+            def fail_second(row, *args, **kwargs):
+                if row['scene_id'] == 'SAMPLE_B':
+                    raise ValueError('标签缺少坐标系')
+                return original(row, *args, **kwargs)
+
+            with patch.multiple(prepare, **config), redirect_stdout(StringIO()):
+                with patch.object(prepare, 'prepare_scene', side_effect=fail_second):
+                    with self.assertRaisesRegex(ValueError, '标签缺少坐标系'):
+                        prepare.prepare_dataset(mode='prepare', reuse_complete=True)
+                output = config['OUTPUT_DIR']
+                partial = output/'split_manifest.csv.partial'
+                before = partial.read_bytes()
+                preserved = {p: (p.read_bytes(), p.stat().st_mtime_ns)
+                             for kind in ('images', 'labels') for p in (output/kind/'train').glob('*.tif')}
+                # 已完成景不得退出、改train/val或换地理组；未完成景不能顺便换分组。
+                for row, column, value in ((0, 3, '否'), (0, 1, 'val'), (0, 2, 'G_d'), (1, 2, 'G_e')):
+                    changed = [r.copy() for r in entries]
+                    changed[row][column] = value
+                    write_rows(changed)
+                    with patch.object(prepare, 'prepare_scene') as build:
+                        with self.assertRaisesRegex(ValueError, '已改变'):
+                            prepare.prepare_dataset(mode='prepare', reuse_complete=True)
+                        build.assert_not_called()
+                    self.assertEqual(partial.read_bytes(), before)
+                # 仅把失败景改为否，不手动修改输出目录的旧快照。
+                entries[1][3] = '否'
+                write_rows(entries)
+                with patch.object(prepare, 'prepare_scene', wraps=original) as build:
+                    prepare.prepare_dataset(mode='prepare', reuse_complete=True)
+                    self.assertEqual(build.call_count, 1)
+                    self.assertEqual(build.call_args.args[0]['scene_id'], 'SAMPLE_C')
+                with (output/'split_manifest.csv').open(encoding='utf-8-sig', newline='') as stream:
+                    result = list(csv.DictReader(stream))
+                self.assertEqual([r['scene_id'] for r in result], ['SAMPLE_A', 'SAMPLE_C'])
+                self.assertEqual((output/'scene_split.csv').read_bytes(), split.read_bytes())
+                for path, saved in preserved.items():
+                    self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), saved)
+                with patch.object(prepare, 'prepare_scene') as build:
+                    prepare.prepare_dataset(mode='prepare', reuse_complete=True)
+                    build.assert_not_called()
 
     def test_split_only_does_not_read_images_or_geometry(self):
         with TemporaryDirectory() as temp:

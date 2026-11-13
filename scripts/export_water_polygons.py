@@ -3,12 +3,11 @@ import json
 import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
-from configuration import load_yaml
+from configuration import load_yaml, config_argument
 from thres_segmentation.org_io import export_water_polygon,write_json,read_aoi,prepare_auxiliary
 
-CONFIG_PATH=Path(r'E:\Code_projects\sar_water_extraction\configs\北京密云区\threshold_segmentation_20261112.yaml')
 
-def main(config_path=CONFIG_PATH):
+def main(config_path):
     config=load_yaml(config_path);root=Path(config['paths']['OUTPUT_DIR'])
     from thres_segmentation.product_layout import arrange_intermediates
     arrange_intermediates(config,restore=True)
@@ -36,4 +35,4 @@ def main(config_path=CONFIG_PATH):
     if config['org'].get('archive_intermediates',False):arrange_intermediates(config)
     print(f'全部完成：{len(completed)}景。原water.tif未修改；每景water_polygon.json记录清理效果。',flush=True)
 
-if __name__=='__main__':main(sys.argv[1] if len(sys.argv)>1 else CONFIG_PATH)
+if __name__=='__main__':main(config_argument())

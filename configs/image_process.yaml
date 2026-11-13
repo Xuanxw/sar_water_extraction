@@ -41,7 +41,7 @@ run:
   # all/prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook
   MODE: all
   # 从总表选择批次；null读取全部，切换批次时同步修改输出路径。
-  PREPARE_BATCH: prepared_scenes_bat2
+  PREPARE_BATCH: null
 
 # 整景读写与有效值约定；0不自动作为无效。
 input:

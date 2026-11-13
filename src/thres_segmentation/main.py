@@ -1,19 +1,16 @@
-"""独立阈值入口；处理参数来自CONFIG_PATH指定的独立YAML。"""
+"""独立阈值入口；处理参数来自命令行指定的独立YAML。"""
 import sys
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from configuration import load_yaml
-
-# 唯一入口配置路径；数据路径和算法参数全部在YAML中修改。
-# 本次运行密云专项；切换通用val时改为configs/threshold_segmentation.yaml。
-CONFIG_PATH=Path(r'E:\Code_projects\sar_water_extraction\configs\北京密云区\threshold_segmentation_20261112.yaml')
+from configuration import load_yaml, config_argument
 
 
-def main(config_path=None):
+
+def main(config_path):
     """读取配置并传入现有处理流程；不读取train.yaml或image_process.yaml。"""
-    path=Path(config_path) if config_path is not None else CONFIG_PATH
+    path=Path(config_path).expanduser().resolve()
     config=load_yaml(path)
     if config['run']['mode']=='org_scenes':
         from thres_segmentation.org_pipeline import run_org_scenes
@@ -62,5 +59,5 @@ def main(config_path=None):
 
 
 if __name__=='__main__':
-    # 可选传入YAML路径；不传则沿用CONFIG_PATH。
-    main(sys.argv[1] if len(sys.argv)>1 else None)
+    # 第一个参数为YAML路径；未指定时只提示用法。
+    main(config_argument())

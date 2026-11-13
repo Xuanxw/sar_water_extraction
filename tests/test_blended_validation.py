@@ -12,6 +12,9 @@ from supervised import train
 import test_sar_scene_dataset as fixtures
 import test_resume_training
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class BlendedValidationTests(unittest.TestCase):
     def setUp(self):

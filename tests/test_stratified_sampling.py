@@ -9,6 +9,9 @@ import torch
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
                 str(Path(__file__).resolve().parents[1] / "scripts")]
 from supervised import train
+
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
 class StratifiedSamplingTests(unittest.TestCase):
     def test_current_training_group_counts_keep_budget_and_reproducibility(self):
         groups = torch.repeat_interleave(torch.arange(5), torch.tensor([62, 598, 435, 165, 45]))

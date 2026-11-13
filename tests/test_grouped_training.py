@@ -19,6 +19,9 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
 from supervised import train
 from datasets.dfc_sample.s1_dataset import WaterDataset, resolve_sample_path
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class TinyModel(nn.Module):
     """一层卷积足够检查训练数据流，extra_random 模拟新增模型层的随机初始化。"""

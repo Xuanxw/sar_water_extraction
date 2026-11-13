@@ -1,6 +1,6 @@
 # 独立阈值分割
 
-处理参数由入口`CONFIG_PATH`指定的YAML控制。通用离线val配置为`configs/threshold_segmentation.yaml`，本次密云ORG配置独立放在`configs/北京密云区/threshold_segmentation.yaml`。`main.py`只负责读取配置和调用流程，不再读取 `image_process.yaml`，也不依赖训练模型或checkpoint。旧的 `threshold_quality.yaml` 已合并删除。
+处理参数由命令行第一个参数指定的YAML控制，不再修改源码选择配置。通用离线val配置为`configs/threshold_segmentation.yaml`，本次密云ORG配置独立放在`configs/北京密云区/threshold_segmentation.yaml`。`main.py`只负责读取配置和调用流程，不再读取 `image_process.yaml`，也不依赖训练模型或checkpoint。旧的 `threshold_quality.yaml` 已合并删除。
 
 ## 启动
 
@@ -8,7 +8,7 @@
 
 ```powershell
 conda activate sar-water
-python src/thres_segmentation/main.py
+python src/thres_segmentation/main.py configs/threshold_segmentation.yaml
 ```
 
 配置按以下分组组织：
@@ -74,7 +74,7 @@ ORG批处理保留原分割栅格`water.tif`，水体矢量仅输出清理后的
 `polygon_output`配置依次控制：内部小孔填充、开闭运算、重新施加地形与土地覆盖排除、整景8连通小斑块筛除、面边界简化和平滑。
 默认孔洞上限200像素、3×3核、最小水体200像素、Chaikin平滑2次；小水体可能被删除，平滑后的面边界与栅格略有差别。
 `water_polygon.json`记录本次清理参数和数量；原`quality.json`仍对应原`water.tif`，不能当作新面成果的精度报告。
-已有成果可执行`python scripts/export_water_polygons.py [配置YAML]`补做，复用本地辅助缓存，不重新滤波或阈值分割。处理完成的景可续跑跳过。
+已有成果可执行`python scripts/export_water_polygons.py 配置.yaml`补做，复用本地辅助缓存，不重新滤波或阈值分割。处理完成的景可续跑跳过。
 `merge_water_shp.py`拼接逐景`water_polygon.shp`；输入内容更新后自动重做日期合并，原始逐景结果不变。
 
 ### 原GUI地形排除
@@ -89,8 +89,7 @@ ORG批处理保留原分割栅格`water.tif`，水体矢量仅输出清理后的
 
 ### 正式入口与成果一致性
 
-直接运行 `python src/thres_segmentation/main.py`。当前 `CONFIG_PATH` 指向密云案例的
-`configs/北京密云区/threshold_segmentation_20261112.yaml`，使用基础Q10、历史Q25及15°迎坡阈值。
+密云案例执行 `python src/thres_segmentation/main.py configs/北京密云区/threshold_segmentation_20261112.yaml`，使用该YAML中的参数；更换案例只更换命令行配置路径。
 正式流程依次完成XML几何读取、源码地形掩膜、分割与辅助修正、成面清理及最终TIFF/SHP输出。
 形态学清理后重新施加地形排除，避免填孔或闭运算把排除区域重新填成水体。
 

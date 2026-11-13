@@ -1,4 +1,4 @@
-"""独立后处理入口：修改configs/post_process.yaml，再手动运行本文件。"""
+"""独立后处理入口：运行 python src/supervised/post_process.py <配置.yaml>。"""
 import sys
 import shutil
 from datetime import datetime
@@ -6,15 +6,25 @@ from uuid import uuid4
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from configuration import load_yaml
+from configuration import load_yaml, config_argument
 
-CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "post_process.yaml"
-CONFIG = load_yaml(CONFIG_PATH)
-PATHS = CONFIG["paths"]
+CONFIG_PATH = CONFIG = None
 
 
-def main():
+def configure(config_path):
+    """显式加载本次YAML；导入模块时不读取文件或命令行参数。"""
+    global CONFIG_PATH, CONFIG, PATHS
+    CONFIG_PATH = Path(config_path).expanduser().resolve()
+    CONFIG = load_yaml(CONFIG_PATH)
+    PATHS = CONFIG["paths"]
+
+
+def main(config_path=None):
     """只读取已保存模型；后处理图件不覆盖训练每轮的验证图件。"""
+    if config_path is not None:
+        configure(config_path)
+    if CONFIG is None:
+        raise ValueError("请传入YAML路径，或先调用configure(config_path)")
     checkpoints = PATHS["POSTPROCESS_CHECKPOINTS"]
     if not checkpoints or any(not path.is_file() for path in checkpoints):
         raise FileNotFoundError("请在post_process.yaml中指定存在的POSTPROCESS_CHECKPOINTS")
@@ -41,4 +51,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(config_argument())

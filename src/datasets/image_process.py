@@ -43,74 +43,89 @@ from datasets.manifest_paths import source_path, relative_source, manifest_finge
 from supervised.load.sar_scene_dataset import SARSceneDataset
 
 # 参数统一在YAML维护；以下只将配置绑定到现有函数使用的变量。
-from configuration import load_yaml
-CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "image_process.yaml"
-CONFIG = load_yaml(CONFIG_PATH)
+from configuration import load_yaml, config_argument
+CONFIG_PATH = CONFIG = None
 
-MODE = CONFIG["run"]["MODE"]
-SPLIT_CSV = CONFIG["paths"]["SPLIT_CSV"]
-PREPARE_BATCH = CONFIG["run"]["PREPARE_BATCH"]
-IMAGE_ROOT = CONFIG["paths"]["IMAGE_ROOT"]
-LABEL_ROOT = CONFIG["paths"]["LABEL_ROOT"]
-OUTPUT_DIR = CONFIG["paths"]["OUTPUT_DIR"]
-CACHE_DIR = CONFIG["paths"]["CACHE_DIR"]
-BANDS = tuple(CONFIG["input"]["BANDS"])
-READ_WINDOW_SIZE = CONFIG["input"]["READ_WINDOW_SIZE"]
-INSPECT_SAMPLES = CONFIG["input"]["INSPECT_SAMPLES"]
-MAX_SCENES = CONFIG["input"]["MAX_SCENES"]
-INPUT_NODATA_VALUE = CONFIG["input"]["INPUT_NODATA_VALUE"]
-VALID_MASK_DIR = CONFIG["paths"]["VALID_MASK_DIR"]
-ALLOW_ALL_VALID_SOURCE = CONFIG["input"]["ALLOW_ALL_VALID_SOURCE"]
-CLASS_FIELD = CONFIG["labels"]["CLASS_FIELD"]
-CLASS_MAP = CONFIG["labels"]["CLASS_MAP"]
-OUTSIDE_LABEL = CONFIG["labels"]["OUTSIDE_LABEL"]
-SCENE_CLASS_RULES = CONFIG["labels"]["SCENE_CLASS_RULES"]
-ACCEPT_REVIEWED_GEOMETRY = CONFIG["labels"]["ACCEPT_REVIEWED_GEOMETRY"]
-SOURCE_OVERRIDES = CONFIG["paths"]["SOURCE_OVERRIDES"]
-AUDIT_OUTPUT_ROOT = CONFIG["paths"]["AUDIT_OUTPUT_ROOT"]
-BAND = CONFIG["inspection"]["BAND"]
-RADIOMETRY_WINDOW_SIZE = CONFIG["inspection"]["RADIOMETRY_WINDOW_SIZE"]
-GRID_SIZE = CONFIG["inspection"]["GRID_SIZE"]
-QUICKLOOK_IMAGE_ROOT = CONFIG["paths"]["QUICKLOOK_IMAGE_ROOT"]
-SPLITS = tuple(CONFIG["inspection"]["SPLITS"])
-Z_DISPLAY_RANGE = tuple(CONFIG["inspection"]["Z_DISPLAY_RANGE"])
-QUICKLOOK_LOOKS = CONFIG["inspection"]["QUICKLOOK_LOOKS"]
-QUICKLOOK_MAX_SIDE = CONFIG["inspection"]["QUICKLOOK_MAX_SIDE"]
-STRIPE_ROWS = CONFIG["inspection"]["STRIPE_ROWS"]
-PNG_COMPRESSION = CONFIG["inspection"]["PNG_COMPRESSION"]
-LABEL_RULE = CONFIG["labels"]["LABEL_RULE"]
-CALIBRATED_ROOT = CONFIG["paths"]["CALIBRATED_ROOT"]
-FILTERED_ROOT = CONFIG["paths"]["FILTERED_ROOT"]
-NORMALIZED_ROOT = CONFIG["paths"]["NORMALIZED_ROOT"]
-NORMALIZATION_REFERENCE = CONFIG["paths"].get("NORMALIZATION_REFERENCE")
-WINDOW_CACHE_DIR = CONFIG["paths"]["WINDOW_CACHE_DIR"]
-SNAP_GPT_PATH = CONFIG["paths"]["SNAP_GPT_PATH"]
-SNAP_CACHE_DIR = CONFIG["paths"]["SNAP_CACHE_DIR"]
-CLEAN_SNAP_CACHE_ON_SUCCESS = CONFIG["snap"]["CLEAN_SNAP_CACHE_ON_SUCCESS"]
-SNAP_WORK_DIR = CONFIG["paths"]["SNAP_WORK_DIR"]
-NORMALIZE_WORK_DIR = CONFIG["paths"]["NORMALIZE_WORK_DIR"]
-NORMALIZE_READ_SIZE = CONFIG["processing"]["NORMALIZE_READ_SIZE"]
-NORMALIZE_THREADS = CONFIG["processing"]["NORMALIZE_THREADS"]
-NORMALIZE_COMPRESSION_LEVEL = CONFIG["processing"]["NORMALIZE_COMPRESSION_LEVEL"]
-ENABLE_CALIBRATION = CONFIG["processing"]["ENABLE_CALIBRATION"]
-ENABLE_FILTER = CONFIG["processing"]["ENABLE_FILTER"]
-INPUT_DOMAIN = CONFIG["processing"]["INPUT_DOMAIN"]
-FILTER_WINDOW = CONFIG["processing"]["FILTER_WINDOW"]
-ENL = CONFIG["processing"]["ENL"]
-FILTER_INPUT_STAGE = CONFIG["processing"]["FILTER_INPUT_STAGE"]
-NORMALIZE_INPUT_STAGE = CONFIG["processing"]["NORMALIZE_INPUT_STAGE"]
-WINDOW_SIZE = CONFIG["processing"]["WINDOW_SIZE"]
-HALO = CONFIG["processing"]["HALO"]
-NORMALIZATION_WINDOWS = CONFIG["processing"]["NORMALIZATION_WINDOWS"]
-SEED = CONFIG["processing"]["SEED"]
-CALIBRATION_QUANTITY = CONFIG["processing"]["CALIBRATION_QUANTITY"]
-CALIBRATION_OUTPUT_DOMAIN = CONFIG["processing"]["CALIBRATION_OUTPUT_DOMAIN"]
-CALIBRATION_REFERENCE = CONFIG["processing"]["CALIBRATION_REFERENCE"]
-CALIBRATION_PRODUCTS_DIR = CONFIG["paths"]["CALIBRATION_PRODUCTS_DIR"]
-CALIBRATION_COMMAND = CONFIG["processing"]["CALIBRATION_COMMAND"]
-QUICKLOOK_BACKSCATTER_DB_RANGE = tuple(CONFIG["inspection"]["QUICKLOOK_BACKSCATTER_DB_RANGE"])
-SNAP_THREADS = CONFIG["snap"]["SNAP_THREADS"]
-SNAP_TILE_CACHE = CONFIG["snap"]["SNAP_TILE_CACHE"]
+
+def configure(config_path):
+    """显式加载本次YAML；导入模块时不读取文件或命令行参数。"""
+    global CONFIG_PATH, CONFIG, MODE, SPLIT_CSV, PREPARE_BATCH, IMAGE_ROOT, LABEL_ROOT, OUTPUT_DIR
+    global CACHE_DIR, BANDS, READ_WINDOW_SIZE, INSPECT_SAMPLES, MAX_SCENES, INPUT_NODATA_VALUE, VALID_MASK_DIR, ALLOW_ALL_VALID_SOURCE
+    global CLASS_FIELD, CLASS_MAP, OUTSIDE_LABEL, SCENE_CLASS_RULES, ACCEPT_REVIEWED_GEOMETRY, SOURCE_OVERRIDES, AUDIT_OUTPUT_ROOT, BAND
+    global RADIOMETRY_WINDOW_SIZE, GRID_SIZE, QUICKLOOK_IMAGE_ROOT, SPLITS, Z_DISPLAY_RANGE, QUICKLOOK_LOOKS, QUICKLOOK_MAX_SIDE, STRIPE_ROWS
+    global PNG_COMPRESSION, LABEL_RULE, CALIBRATED_ROOT, FILTERED_ROOT, NORMALIZED_ROOT, NORMALIZATION_REFERENCE, WINDOW_CACHE_DIR, SNAP_GPT_PATH
+    global SNAP_CACHE_DIR, CLEAN_SNAP_CACHE_ON_SUCCESS, SNAP_WORK_DIR, NORMALIZE_WORK_DIR, NORMALIZE_READ_SIZE, NORMALIZE_THREADS, NORMALIZE_COMPRESSION_LEVEL, ENABLE_CALIBRATION
+    global ENABLE_FILTER, INPUT_DOMAIN, FILTER_WINDOW, ENL, FILTER_INPUT_STAGE, NORMALIZE_INPUT_STAGE, WINDOW_SIZE, HALO
+    global NORMALIZATION_WINDOWS, SEED, CALIBRATION_QUANTITY, CALIBRATION_OUTPUT_DOMAIN, CALIBRATION_REFERENCE, CALIBRATION_PRODUCTS_DIR, CALIBRATION_COMMAND, QUICKLOOK_BACKSCATTER_DB_RANGE
+    global SNAP_THREADS, SNAP_TILE_CACHE
+    CONFIG_PATH = Path(config_path).expanduser().resolve()
+    CONFIG = load_yaml(CONFIG_PATH)
+
+    MODE = CONFIG["run"]["MODE"]
+    SPLIT_CSV = CONFIG["paths"]["SPLIT_CSV"]
+    PREPARE_BATCH = CONFIG["run"]["PREPARE_BATCH"]
+    IMAGE_ROOT = CONFIG["paths"]["IMAGE_ROOT"]
+    LABEL_ROOT = CONFIG["paths"]["LABEL_ROOT"]
+    OUTPUT_DIR = CONFIG["paths"]["OUTPUT_DIR"]
+    CACHE_DIR = CONFIG["paths"]["CACHE_DIR"]
+    BANDS = tuple(CONFIG["input"]["BANDS"])
+    READ_WINDOW_SIZE = CONFIG["input"]["READ_WINDOW_SIZE"]
+    INSPECT_SAMPLES = CONFIG["input"]["INSPECT_SAMPLES"]
+    MAX_SCENES = CONFIG["input"]["MAX_SCENES"]
+    INPUT_NODATA_VALUE = CONFIG["input"]["INPUT_NODATA_VALUE"]
+    VALID_MASK_DIR = CONFIG["paths"]["VALID_MASK_DIR"]
+    ALLOW_ALL_VALID_SOURCE = CONFIG["input"]["ALLOW_ALL_VALID_SOURCE"]
+    CLASS_FIELD = CONFIG["labels"]["CLASS_FIELD"]
+    CLASS_MAP = CONFIG["labels"]["CLASS_MAP"]
+    OUTSIDE_LABEL = CONFIG["labels"]["OUTSIDE_LABEL"]
+    SCENE_CLASS_RULES = CONFIG["labels"]["SCENE_CLASS_RULES"]
+    ACCEPT_REVIEWED_GEOMETRY = CONFIG["labels"]["ACCEPT_REVIEWED_GEOMETRY"]
+    SOURCE_OVERRIDES = CONFIG["paths"]["SOURCE_OVERRIDES"]
+    AUDIT_OUTPUT_ROOT = CONFIG["paths"]["AUDIT_OUTPUT_ROOT"]
+    BAND = CONFIG["inspection"]["BAND"]
+    RADIOMETRY_WINDOW_SIZE = CONFIG["inspection"]["RADIOMETRY_WINDOW_SIZE"]
+    GRID_SIZE = CONFIG["inspection"]["GRID_SIZE"]
+    QUICKLOOK_IMAGE_ROOT = CONFIG["paths"]["QUICKLOOK_IMAGE_ROOT"]
+    SPLITS = tuple(CONFIG["inspection"]["SPLITS"])
+    Z_DISPLAY_RANGE = tuple(CONFIG["inspection"]["Z_DISPLAY_RANGE"])
+    QUICKLOOK_LOOKS = CONFIG["inspection"]["QUICKLOOK_LOOKS"]
+    QUICKLOOK_MAX_SIDE = CONFIG["inspection"]["QUICKLOOK_MAX_SIDE"]
+    STRIPE_ROWS = CONFIG["inspection"]["STRIPE_ROWS"]
+    PNG_COMPRESSION = CONFIG["inspection"]["PNG_COMPRESSION"]
+    LABEL_RULE = CONFIG["labels"]["LABEL_RULE"]
+    CALIBRATED_ROOT = CONFIG["paths"]["CALIBRATED_ROOT"]
+    FILTERED_ROOT = CONFIG["paths"]["FILTERED_ROOT"]
+    NORMALIZED_ROOT = CONFIG["paths"]["NORMALIZED_ROOT"]
+    NORMALIZATION_REFERENCE = CONFIG["paths"].get("NORMALIZATION_REFERENCE")
+    WINDOW_CACHE_DIR = CONFIG["paths"]["WINDOW_CACHE_DIR"]
+    SNAP_GPT_PATH = CONFIG["paths"]["SNAP_GPT_PATH"]
+    SNAP_CACHE_DIR = CONFIG["paths"]["SNAP_CACHE_DIR"]
+    CLEAN_SNAP_CACHE_ON_SUCCESS = CONFIG["snap"]["CLEAN_SNAP_CACHE_ON_SUCCESS"]
+    SNAP_WORK_DIR = CONFIG["paths"]["SNAP_WORK_DIR"]
+    NORMALIZE_WORK_DIR = CONFIG["paths"]["NORMALIZE_WORK_DIR"]
+    NORMALIZE_READ_SIZE = CONFIG["processing"]["NORMALIZE_READ_SIZE"]
+    NORMALIZE_THREADS = CONFIG["processing"]["NORMALIZE_THREADS"]
+    NORMALIZE_COMPRESSION_LEVEL = CONFIG["processing"]["NORMALIZE_COMPRESSION_LEVEL"]
+    ENABLE_CALIBRATION = CONFIG["processing"]["ENABLE_CALIBRATION"]
+    ENABLE_FILTER = CONFIG["processing"]["ENABLE_FILTER"]
+    INPUT_DOMAIN = CONFIG["processing"]["INPUT_DOMAIN"]
+    FILTER_WINDOW = CONFIG["processing"]["FILTER_WINDOW"]
+    ENL = CONFIG["processing"]["ENL"]
+    FILTER_INPUT_STAGE = CONFIG["processing"]["FILTER_INPUT_STAGE"]
+    NORMALIZE_INPUT_STAGE = CONFIG["processing"]["NORMALIZE_INPUT_STAGE"]
+    WINDOW_SIZE = CONFIG["processing"]["WINDOW_SIZE"]
+    HALO = CONFIG["processing"]["HALO"]
+    NORMALIZATION_WINDOWS = CONFIG["processing"]["NORMALIZATION_WINDOWS"]
+    SEED = CONFIG["processing"]["SEED"]
+    CALIBRATION_QUANTITY = CONFIG["processing"]["CALIBRATION_QUANTITY"]
+    CALIBRATION_OUTPUT_DOMAIN = CONFIG["processing"]["CALIBRATION_OUTPUT_DOMAIN"]
+    CALIBRATION_REFERENCE = CONFIG["processing"]["CALIBRATION_REFERENCE"]
+    CALIBRATION_PRODUCTS_DIR = CONFIG["paths"]["CALIBRATION_PRODUCTS_DIR"]
+    CALIBRATION_COMMAND = CONFIG["processing"]["CALIBRATION_COMMAND"]
+    QUICKLOOK_BACKSCATTER_DB_RANGE = tuple(CONFIG["inspection"]["QUICKLOOK_BACKSCATTER_DB_RANGE"])
+    SNAP_THREADS = CONFIG["snap"]["SNAP_THREADS"]
+    SNAP_TILE_CACHE = CONFIG["snap"]["SNAP_TILE_CACHE"]
+
 
 SCENE_PATTERN = re.compile(r"(BC\d+)[_-]([A-Z]+)[_-](ORG)[_-](?:2S)?(VV|VH|HH|HV)[_-](\d{8}T\d{6})[_-](\d+)", re.I)
 MANIFEST_FIELDS = ("name", "label_name", "split", "active", "group_id", "scene_id", "scene",
@@ -409,17 +424,36 @@ def prepare_dataset(mode=None, reuse_complete=False):
     if OUTPUT_DIR.exists():
         if (complete_manifest.exists() and not reuse_complete) or (not complete_manifest.exists() and not partial.exists()):
             raise ValueError('prepare用于首次导入；此目录已完成或缺少续跑清单。仅重建已有标签请设置MODE="labels"')
-        # 说明和其他批次更新不影响续跑，仅比较本批的实际划分字段。
-        old_rows = read_split_rows(OUTPUT_DIR/'scene_split.csv')
-        keys = ('影像编号', '数据划分', '场景', '是否采用', '准备批次')
-        old_selection = sorted(tuple(r.get(k, '') for k in keys) for r in old_rows
-                               if PREPARE_BATCH is None or r.get('准备批次') == PREPARE_BATCH)
-        new_selection = sorted(tuple(r.get(k, '') for k in keys) for r in rows
-                               if PREPARE_BATCH is None or r.get('准备批次') == PREPARE_BATCH)
-        if old_selection != new_selection:
-            raise ValueError("本批划分清单已改变，请使用新输出目录")
         with (complete_manifest if complete_manifest.exists() else partial).open(encoding='utf-8-sig', newline='') as stream:
             existing = list(csv.DictReader(stream))
+        completed_ids = {tile['scene_id'] for tile in existing}
+        current_selection = {r['scene_id']: r for r in selected}
+        for tile in existing:
+            current = current_selection.get(tile['scene_id'])
+            if current is None or tile['split'] != current['split'] or any(
+                    tile.get(k) and tile[k] != current[k] for k in ('group_id', 'scene')):
+                raise ValueError(f"已完成场景的采用状态或划分已改变：{tile['scene_id']}，请使用新输出目录")
+        # 允许排除尚未完成的坏景；已完成成果及其划分不能随总表修改而失配。
+        # 备注和其他批次更新不参与比较；不需要手动覆盖旧scene_split.csv来绕过检查。
+        old_rows = read_split_rows(OUTPUT_DIR/'scene_split.csv')
+        keys = ('数据划分', '场景', '准备批次', 'group_id')
+        old_selection = {scene_id(r['影像编号']): r for r in old_rows
+                         if PREPARE_BATCH is None or r.get('准备批次') == PREPARE_BATCH}
+        new_selection = {scene_id(r['影像编号']): r for r in rows
+                         if PREPARE_BATCH is None or r.get('准备批次') == PREPARE_BATCH}
+        excluded = []
+        for identifier in sorted(old_selection.keys() | new_selection.keys()):
+            old, new = old_selection.get(identifier), new_selection.get(identifier)
+            same_fields = old is not None and new is not None and all(old.get(k, '') == new.get(k, '') for k in keys)
+            if same_fields and old['是否采用'] == new['是否采用']:
+                continue
+            if (identifier not in completed_ids and old is not None and old['是否采用'] in ('是', '已确认')
+                    and ((new is None and identifier not in names) or (same_fields and new['是否采用'] == '否'))):
+                excluded.append(identifier)
+                continue
+            raise ValueError(f"本批划分清单已改变：{identifier}；仅允许排除未完成场景，其他变更请使用新输出目录")
+        if excluded:
+            print(f"续跑清单更新：排除{len(excluded)}景尚未完成的数据：{', '.join(excluded)}", flush=True)
         if any(tile['name'] != tile['scene_id'] + '.tif' for tile in existing):
             raise ValueError('这是旧切片目录，请使用新的整景输出目录')
         for tile in existing:
@@ -579,9 +613,10 @@ def rebuild_scene(row, data_dir, read_window_size=1024):
     return updated
 
 
-def prepare_labels(data_dir=OUTPUT_DIR, read_window_size=READ_WINDOW_SIZE):
+def prepare_labels(data_dir=None, read_window_size=None):
     """逐景原位替换标签，最后同步清单计数；中断后重新运行即可。"""
-    data_dir = Path(data_dir)
+    data_dir = Path(OUTPUT_DIR if data_dir is None else data_dir)
+    read_window_size = READ_WINDOW_SIZE if read_window_size is None else read_window_size
     manifest = data_dir / 'split_manifest.csv'
     with manifest.open(encoding='utf-8-sig', newline='') as stream:
         reader = csv.DictReader(stream)
@@ -629,7 +664,7 @@ def prepare_labels(data_dir=OUTPUT_DIR, read_window_size=READ_WINDOW_SIZE):
         LABEL_RULE + '\n有效区域：水体1、非水体0；255仅为无效像素。\n'
         '色带0白、1黑，颜色不等于像素数值。原SAR、原SHP和地理分组不变。\n', encoding='utf-8')
     marker.unlink()
-    print(f'全部标签替换完成：{totals}\n请先运行src/datasets/image_process.py，再运行src/supervised/train.py。', flush=True)
+    print(f'全部标签替换完成：{totals}\n请先运行src/datasets/image_process.py <配置.yaml>，再运行src/supervised/train.py <配置.yaml>。', flush=True)
     return data_dir
 
 
@@ -681,9 +716,9 @@ def inspect_scene(image_path, label_path, band=1, window_size=256, grid_size=3):
     return result
 
 
-def audit(root=OUTPUT_DIR, output_dir=None):
+def audit(root=None, output_dir=None):
     """输出全部采用景，独立列出待读数/尺度审查项；不修改采用清单。"""
-    root=Path(root)
+    root=Path(OUTPUT_DIR if root is None else root)
     output=Path(output_dir) if output_dir else AUDIT_OUTPUT_ROOT/datetime.now().strftime('%Y%m%d_%H%M%S')
     output.mkdir(parents=True,exist_ok=False)
     with (root/'split_manifest.csv').open(encoding='utf-8-sig',newline='') as f:
@@ -1157,8 +1192,12 @@ def export_quicklooks():
     print(f'快视图完成：成功{len(files)-len(errors)}/{len(files)}',flush=True)
 
 
-def main():
-    """all顺序完成准备、预处理、快视图；不调用检查或标签重建模式。"""
+def main(config_path=None):
+    """按显式YAML执行；all串联准备、预处理和快视图。"""
+    if config_path is not None:
+        configure(config_path)
+    if CONFIG is None:
+        raise ValueError("请传入YAML路径，或先调用configure(config_path)")
     print(f"影像处理配置：{CONFIG_PATH}；模式：{MODE}", flush=True)
     if MODE == 'labels':
         prepare_labels(OUTPUT_DIR, READ_WINDOW_SIZE)
@@ -1197,4 +1236,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    main(config_argument())

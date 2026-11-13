@@ -17,6 +17,9 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
 from supervised.evaluation import postprocess
 from supervised import train
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class RasterResponse(BytesIO):
     def __init__(self, body):

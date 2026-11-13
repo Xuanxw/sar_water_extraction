@@ -1,4 +1,4 @@
-"""复用原GUI的GDAL坡度/坡向及局部几何分类；不是GAMMA射线遮挡模拟。"""
+"""GDAL坡度/坡向的局部地形分类，已修正照射方向；不包含远处山体遮挡搜索。"""
 import json,os,subprocess
 from pathlib import Path
 import numpy as np
@@ -6,6 +6,8 @@ import rasterio
 from rasterio.vrt import WarpedVRT
 from rasterio.enums import Resampling
 from rasterio.windows import Window
+
+TERRAIN_METHOD_VERSION='gui_local_ground_to_sensor_v2'
 
 
 def prepare_gui_layers(dem, executable):
@@ -26,9 +28,15 @@ def prepare_gui_layers(dem, executable):
 
 
 def classify_terrain(slope,aspect,heading,incidence,look_side,slope_threshold):
-    """逐式保留gis_worker.py原分类：0未知、1阴影、2叠掩、3高坡/收缩、4正常。"""
-    look=(heading+90)%360 if look_side=='right' else (heading-90)%360
-    phi=(aspect-look+180)%360-180
+    """GDAL坡向/入射角均为度：0未知、1局部阴影、2叠掩候选、3高坡、4正常。
+
+    坡向是下坡朝向，亦为向上地表法向的水平分量方向。法向点积必须使用地面→卫星。
+    此次只修正180度方向，保留总坡度阈值规则；它仍不是完整观测剖面模型。
+    """
+    if look_side not in ('left','right'):raise ValueError('look_side必须为left或right')
+    sensor_to_ground=(heading+90)%360 if look_side=='right' else (heading-90)%360
+    ground_to_sensor=(sensor_to_ground+180)%360
+    phi=(aspect-ground_to_sensor+180)%360-180
     rs=np.deg2rad(slope);rt=np.deg2rad(incidence)
     cosine=np.cos(rt)*np.cos(rs)+np.sin(rt)*np.sin(rs)*np.cos(np.deg2rad(phi))
     valid=np.isfinite(slope)&np.isfinite(aspect)&(slope>=0)&(slope<=90)&(aspect>=0)&(aspect<=360)&np.isfinite(cosine)
@@ -81,11 +89,13 @@ def generate_terrain_mask(reference,slope_path,aspect_path,metadata,folder,thres
             writers['layover_mask'].write(np.where(valid,cls==2,255).astype('uint8'),1,window=w)
             writers['shadow_mask'].write(np.where(valid,cls==1,255).astype('uint8'),1,window=w)
     for p in outputs.values():p.with_suffix('.partial.tif').replace(p)
-    report=dict(method='original_gui_local_geometry',heading_deg=heading,incidence_deg=theta,look_side=look,slope_threshold_deg=threshold,
+    sensor_to_ground=(heading+90)%360 if look=='right' else (heading-90)%360
+    report=dict(method=TERRAIN_METHOD_VERSION,heading_deg=heading,incidence_deg=theta,look_side=look,slope_threshold_deg=threshold,
+                sensor_to_ground_azimuth_deg=sensor_to_ground,ground_to_sensor_azimuth_deg=(sensor_to_ground+180)%360,
                 class_pixels=dict(zip(('unknown','shadow','layover','foreshortening','normal'),map(int,counts))),
-                note='源码局部坡度/坡向近似；没有沿视线搜索远处山体遮挡，不是gc_map2。')
+                note='已修正法向点积的180度方向错误；其余局部规则保留，没有沿视线搜索远处山体遮挡。')
     (folder/'terrain_geometry.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
-    print('  原GUI地形分类：'+str(report['class_pixels']),flush=True)
+    print('  方向修正后的局部地形分类：'+str(report['class_pixels']),flush=True)
     return outputs
 
 

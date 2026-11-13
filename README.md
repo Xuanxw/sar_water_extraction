@@ -12,15 +12,29 @@ README 只介绍通用用法。算法说明放在 `docs/`，实验分析放在 `
 conda activate sar-water
 cd E:\Code_projects\sar_water_extraction
 pip install -r E:\Code_projects\sar_water_extraction\requirements.txt
-python E:\Code_projects\sar_water_extraction\src\supervised\train.py
+python E:\Code_projects\sar_water_extraction\src\supervised\train.py E:\Code_projects\sar_water_extraction\configs\train.yaml
 ```
 
 已有环境无需每次重新安装依赖。训练自动选择 CUDA 或 CPU；`PRETRAINED=True` 使用编码器的 ImageNet 权重，首次使用可能需要下载。读取已有水体检查点时直接恢复保存的权重，不再下载编码器权重。
 
-训练、后处理和影像处理入口分别读取 `configs/train.yaml`、`configs/post_process.yaml`、`configs/image_process.yaml`，无需命令行参数。所有用户可修改的路径集中在 YAML 的 `paths` 分组，使用绝对路径；模型、训练、预处理开关放在对应参数组。其他独立工具仍使用顶部变量。代码中的模块导入路径、样本文件拼接和时间戳输出子目录不属于数据路径配置。
+所有使用 YAML 的命令行入口都必须通过第一个参数指定配置：`python 脚本.py 配置.yaml`。使用 `sys.argv`，不使用 argparse，也不在源码中指定默认 YAML。无参数时只显示用法；模块被导入时不加载配置。数据路径和算法参数仍在 YAML 中维护。
 
 
 ### YAML 使用约定
+
+在仓库根目录启动，不同服务器直接选择自己的配置文件：
+
+```bash
+python src/datasets/image_process.py configs/168/image_process.yaml
+python src/supervised/train.py configs/168/train.yaml
+python src/supervised/post_process.py configs/post_process.yaml
+python src/thres_segmentation/main.py configs/threshold_segmentation.yaml
+python src/sar_geometry/main.py configs/sar_geometry.yaml
+```
+
+`scripts/export_water_polygons.py`、`repair_gui_terrain.py`、`preview_org_coverage.py`、`history_threshold_comparison.py`、`slope_threshold_comparison.py`、`compare_gui_terrain_direction.py`同样要求第一个参数为对应YAML。`src/sar_geometry/validate_scene.py`可再接第二份YAML，作为已有粗采样成果的对照。
+
+从Python调用时使用`main(config_path)`；需要单独调用预处理任务或训练工厂时，先显式调用该模块的`configure(config_path)`。未使用YAML的独立工具仍保持原入口。
 
 - 数据搬迁：`image_process.yaml`、`train.yaml`、`threshold_segmentation.yaml` 的 `paths.DATA_ROOT` 指向“水体数据”根目录，其他数据路径相对于它解析。整体搬迁后修改这三个入口的 `DATA_ROOT`；仓库输出、SSD缓存和SNAP程序仍使用各自的绝对路径。
 - 三份“水体数据分组”CSV只记录景号、划分和批次名，不包含机器绝对路径。`split_manifest.csv` 的 `source_image/source_label` 相对于**清单所在目录**，因此复制到滤波/归一化子目录时必须重新计算相对路径，不能直接原样复制CSV。
@@ -31,7 +45,7 @@ python E:\Code_projects\sar_water_extraction\src\supervised\train.py
 - `post_process.yaml`：独立管理待评估检查点、后处理输出目录、阈值扫描和修正参数。
 - `image_process.yaml`：`paths` 管理源数据和各阶段目录；`run.MODE` 每次选一个任务；`processing` 管理滤波和归一化；`snap` 管理 GPT 线程、内存及成功后的缓存清理。
 - YAML 中使用 `null`、`true`、`false`，列表写成 `[1]` 或多行 `-`；不填写 Python 的 `Path(...)`、`None` 或元组语法。Windows 路径可不加引号或用单引号，避免双引号解析反斜杠。
-- 脚本按自身位置查找仓库内的配置，不依赖终端当前目录；运行命令不变。修改 YAML 后重新启动才生效，已运行的进程不会重新加载参数。
+- 配置文件路径由命令行显式提供，相对路径以终端当前目录为准；从其他目录启动时可填写绝对路径。YAML 内部的数据路径解析规则保持不变。修改 YAML 后重新启动才生效，已运行的进程不会重新加载参数。
 - SNAP 后端 `src/datasets/snap_preprocess.py` 只接收影像处理入口传来的路径，没有机器路径默认值；训练不读取 SNAP 配置。
 - 每次从训练入口启动时，将 YAML 快照保存到本次结果目录，续跑也保留先前快照。`train_end.pth` 从该轮验证开始；`last.pth` 从下一轮训练开始。
 
@@ -92,7 +106,7 @@ DFC 影像按 `POLARIZATION_BANDS={"VV":1,"VH":2}` 读取；BC 默认使用 `{"V
 运行独立准备入口，配置在 `configs/image_process.yaml`：
 
 ```powershell
-python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py
+python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py E:\Code_projects\sar_water_extraction\configs\image_process.yaml
 ```
 
 `MODE: labels` 仅重建已有标签；首次导入SAR时显式设置 `MODE="prepare"`，按整景输出，不裁剪、不缩放、不生成512×512小切片。`MODE="split"` 仅显示划分；`MODE="inspect"` 显示少量源文件的格式。输入清单由 YAML 的 `paths.SPLIT_CSV` 指定，沿用地理组及train/val归属。
@@ -135,7 +149,7 @@ prepared_scenes/
 停止读取此数据的训练/评价后，运行：
 
 ```powershell
-python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py
+python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py E:\Code_projects\sar_water_extraction\configs\image_process.yaml
 ```
 
 该入口读取 `I:\水体数据\prepared_scenes\split_manifest.csv` 中的原始SHP路径，按照对应SAR网格重新栅格化，直接替换 `prepared_scenes\labels\train` 和 `labels\val` 中的GeoTIFF。水体面内为1、面外为0，无效SAR位置为255（忽略）。色带0白、1黑，显示颜色不能用来判断像素值；不要对旧标签直接做 `1-label`。保留原SAR、原SHP、景号与train/val地理分组，不创建VRT或新版本数据目录。
@@ -213,8 +227,8 @@ SNAP GPT、缓存目录、窗口索引缓存、读写窗口和训练统计抽样
 重新生成正在使用的阶段前先停止读取该成果的训练。每个阶段的整景Float32影像需额外磁盘空间，未压缩约4字节×波段数×像素数，实际使用压缩。
 
 ```powershell
-python src/datasets/image_process.py
-python src/supervised/train.py
+python src/datasets/image_process.py configs/image_process.yaml
+python src/supervised/train.py configs/train.yaml
 ```
 
 检查点保存 `inputs_normalized` 和完整 `input_preprocessing`，包括原train均值、标准差、阶段参数和上游记录。
@@ -237,9 +251,9 @@ python src/supervised/train.py
 训练和后处理已经拆为两个入口，不再设置 `RUN_MODE`：
 
 ```powershell
-python E:\Code_projects\sar_water_extraction\src\supervised\train.py
+python E:\Code_projects\sar_water_extraction\src\supervised\train.py E:\Code_projects\sar_water_extraction\configs\train.yaml
 # 训练完成或已有模型后，按需单独运行：
-python E:\Code_projects\sar_water_extraction\src\supervised\post_process.py
+python E:\Code_projects\sar_water_extraction\src\supervised\post_process.py E:\Code_projects\sar_water_extraction\configs\post_process.yaml
 ```
 
 训练默认每轮验证生成全部验证景的质量概览，以及训练/验证loss、IoU、F1、Precision和Recall曲线。
@@ -271,7 +285,7 @@ python E:\Code_projects\sar_water_extraction\src\supervised\post_process.py
 在 `configs/train.yaml` 的 `paths` 中设置 `RESUME_CHECKPOINT` 为已有实验 `last.pth` 的绝对路径；设置为 `null` 表示新实验。随后仍运行同一个训练入口：
 
 ```powershell
-python E:\Code_projects\sar_water_extraction\src\supervised\train.py
+python E:\Code_projects\sar_water_extraction\src\supervised\train.py E:\Code_projects\sar_water_extraction\configs\train.yaml
 ```
 
 `EPOCHS` 表示总目标轮数：检查点完成第11轮、`EPOCHS=20` 时，从第12轮继续至第20轮。恢复模型、优化器、学习率调度器、AMP和最佳指标，保留原实验目录及此前日志。当前数据划分、波段、模型和训练配置需与检查点兼容；更换标签或算法方案应建立新实验。
@@ -367,10 +381,10 @@ python E:\Code_projects\sar_water_extraction\src\supervised\evaluation\model_eva
 ## 独立传统阈值分割
 
 ```powershell
-python E:\Code_projects\sar_water_extraction\src\thres_segmentation\main.py
+python E:\Code_projects\sar_water_extraction\src\thres_segmentation\main.py E:\Code_projects\sar_water_extraction\configs\threshold_segmentation.yaml
 ```
 
-这是独立入口，不加载模型检查点，也不读取train.yaml或image_process.yaml。处理参数全部来自入口`CONFIG_PATH`指定的YAML。
+这是独立入口，不加载模型检查点，也不读取train.yaml或image_process.yaml。处理参数全部来自命令行指定的YAML。
 
 - **密云ORG案例**：当前指向`configs/北京密云区/threshold_segmentation.yaml`。直接读取原始ORG，完成行政区裁剪、SNAP Lee、分位阈值及辅助修正，逐景输出SHP、质量JSON和人工核验点。支持按完成阶段续跑，不自动合并日期。操作见[案例说明](configs/北京密云区/README.md)。
 - **通用离线val**：切换到`configs/threshold_segmentation.yaml`。使用`paths.IMAGE_DIR/LABEL_DIR/SPLIT_MANIFEST`，复用已有离线滤波/归一化结果，不再次预处理。
@@ -476,7 +490,7 @@ Lee滤波保持独立实验；需要确认幅度/功率表达，不能代替辐�
 逐景数值审查：将 `configs/image_process.yaml` 中的 `run.MODE` 设为 `radiometry` 后运行：
 
 ```powershell
-python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py
+python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py E:\Code_projects\sar_water_extraction\configs\image_process.yaml
 ```
 
 默认每景3×3内部网格中心、256×256原分辨率抽样，输出到 `codex_analysis/radiometry_audit/`。
@@ -579,7 +593,7 @@ filtered影像旁的`*.copy_timing.json`记录缓存复制时间。历史成果�
 这些执行优化不改变融合协议，无需为此重新训练或另开实验目录；下次启动生效。
 推理按条带滚动缓存，不在内存中保存整景多窗口预测；窗口数约为旧步长的4倍，验证会更慢。
 
-设置 `paths.RESUME_CHECKPOINT` 后运行 `python src/supervised/train.py`。
+设置 `paths.RESUME_CHECKPOINT` 后运行 `python src/supervised/train.py configs/train.yaml`。
 `train_end.pth` 会先重跑该轮验证，再继续下一轮训练；`last.pth` 从下一轮训练开始。
 当检查点和当前配置的验证融合设置不一致时，程序在 `OUTPUT_DIR` 下新建实验目录，
 保留模型、优化器、学习率调度、AMP及随机数状态，重新建立新口径的best和指标记录。

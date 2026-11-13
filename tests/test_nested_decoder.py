@@ -18,6 +18,9 @@ from supervised.models.pvt import PVTUANet
 from supervised.models.checkpoint import load_model
 from supervised.models.losses import WaterSegmentationLoss
 
+# 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
+train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
+
 
 class NestedDecoderTests(unittest.TestCase):
     @classmethod

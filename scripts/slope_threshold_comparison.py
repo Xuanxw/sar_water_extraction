@@ -11,7 +11,7 @@ from pyproj import Transformer
 from shapely import transform as transform_geometry
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from configuration import load_yaml
+from configuration import load_yaml, config_argument
 from thres_segmentation.org_pipeline import SceneProgress, statistics, segment
 from thres_segmentation.product_layout import scene_product
 from thres_segmentation.org_io import read_aoi, prepare_auxiliary, export_water_polygon, write_json
@@ -19,7 +19,6 @@ from thres_segmentation.run_log import RunLog
 # 复用纯工具函数；导入不会启动历史阈值实验，也不会读取它的结果。
 from history_threshold_comparison import write_csv, compare_masks, sample_fixed_points
 
-CONFIG_PATH = Path(r'E:\Code_projects\sar_water_extraction\configs\北京密云区\slope_threshold_comparison.yaml')
 
 
 def save_comparison(filtered, masks, slopes, destination, max_side):
@@ -47,8 +46,8 @@ def save_comparison(filtered, masks, slopes, destination, max_side):
     fig.tight_layout(); fig.savefig(destination, dpi=120); fig.clear()
 
 
-def main(config_path=None):
-    options = load_yaml(config_path or CONFIG_PATH)
+def main(config_path):
+    options = load_yaml(config_path)
     paths, experiment = options['paths'], options['experiment']
     baseline, output, cache = paths['BASELINE_OUTPUT_DIR'], paths['OUTPUT_DIR'], paths['CACHE_DIR']
     # 防止实验覆盖原成果/缓存；续跑仍只依据本实验data_cache中的完成记录。
@@ -170,4 +169,4 @@ def main(config_path=None):
 
 
 if __name__ == '__main__':
-    main()
+    main(config_argument())

@@ -909,7 +909,7 @@ class SARWorker(QThread):
         ax_map.plot([x+bar_len_ratio, x+bar_len_ratio], [y-0.01, y+0.01], transform=ax_map.transAxes, color='black', lw=2, zorder=11)
         ax_map.text(x, y-0.025, '0', ha='center', va='top', fontsize=11, transform=ax_map.transAxes, zorder=11)
         ax_map.text(x+bar_len_ratio, y-0.025, f'{bar_len_km} km', ha='center', va='top', fontsize=11, fontweight='bold', transform=ax_map.transAxes, zorder=11)
-        # --- 航向与 LOS 箭头 ---
+        # 图上箭头表示卫星→地面的观测方向；分类点积使用相反的地面→卫星方向。
         heading_az = alpha % 360
         los_az = (alpha + 90) % 360 if look_dir.lower() == "right" else (alpha - 90) % 360
         origin_x, origin_y = 0.85, 0.85
@@ -926,7 +926,7 @@ class SARWorker(QThread):
         ax_map.text(origin_x + dx_h * 0.5 - 0.03, origin_y + dy_h * 0.5 + 0.02, '航向 (Heading)',
                     ha='center', va='center', fontsize=11, fontweight='bold', color='black',
                     bbox=dict(facecolor='white', edgecolor='none', alpha=0.8, pad=2), transform=ax_map.transAxes, zorder=12)
-        ax_map.text(origin_x + dx_l * 0.5 + 0.03, origin_y + dy_l * 0.5 - 0.02, 'LOS向 (Look)',
+        ax_map.text(origin_x + dx_l * 0.5 + 0.03, origin_y + dy_l * 0.5 - 0.02, '观测向 (星→地)',
                     ha='center', va='center', fontsize=11, fontweight='bold', color='red',
                     bbox=dict(facecolor='white', edgecolor='none', alpha=0.8, pad=2), transform=ax_map.transAxes, zorder=12)
         # --- 饼图 ---
@@ -1130,29 +1130,13 @@ class SARWorker(QThread):
                 del slope, aspect, slope_valid, aspect_valid, slope_ma, aspect_ma
                 # 4. 在SAR网格上计算局部入射角与畸变分类
                 self.log_signal.emit("📐 正在SAR网格上计算局部入射角...")
-                rad_alpha = np.deg2rad(alpha)
-                rad_theta = np.deg2rad(theta)
-                rad_aspect = np.deg2rad(aligned_aspect)
-                rad_slope = np.deg2rad(aligned_slope)
-                look_az = (alpha + 90) % 360 if look_dir.lower() == 'right' else (alpha - 90) % 360
-                # 将方向差规范到[-180°, 180°)，正确处理359°与1°跨北方向的情况。
-                phi = (aligned_aspect - look_az + 180.0) % 360.0 - 180.0
-                # 计算 cos_xi (局部入射角余弦)
-                cos_xi = (np.cos(rad_theta) * np.cos(rad_slope) +
-                        np.sin(rad_theta) * np.sin(rad_slope) * np.cos(np.deg2rad(phi)))
-                # 5. 生成高分辨率分类掩膜
-                classification = np.zeros(sar_shape, dtype=np.uint8)
-                valid_terrain = ((aligned_slope_valid == 1) &
-                                 (aligned_aspect_valid == 1) &
-                                 np.isfinite(aligned_slope) &
-                                 np.isfinite(aligned_aspect) &
-                                 np.isfinite(cos_xi))
-                classification[~valid_terrain] = 0  # 无效区
-                classification[valid_terrain & (cos_xi <= 0)] = 1  # 阴影
-                facing = (cos_xi > 0) & (np.abs(phi) <= 90)
-                classification[valid_terrain & facing & (aligned_slope > theta)] = 2  # 叠掩
-                classification[valid_terrain & facing & (aligned_slope <= theta) & (aligned_slope > cfg['slope_thresh'])] = 3  # 透视收缩/高坡度
-                classification[valid_terrain & (classification == 0)] = 4  # 正常可视区
+                # 与逐景阈值入口共用方向修正后的公式；未知DEM仍保持0，不参与排除。
+                from thres_segmentation.terrain_geometry import classify_terrain
+                classification = classify_terrain(
+                    np.where(aligned_slope_valid == 1, aligned_slope, np.nan),
+                    np.where(aligned_aspect_valid == 1, aligned_aspect, np.nan),
+                    alpha, theta, look_dir.lower(), cfg['slope_thresh'])
+                valid_terrain = classification > 0
                 # 6. 构建最终排除掩膜 (非正常区)
                 # 只允许“有有效 DEM 证据”的畸变/高坡区域参与排除。
                 # classification==0 表示 DEM 无值/未知，必须保留 SAR 提取结果。
@@ -1432,8 +1416,9 @@ class SARWorker(QThread):
                     f"〰️ 矢量边界平滑完成：{smoothed_count} 个曲线化，"
                     f"{smooth_fallback_count} 个因几何有效性回退为拓扑简化边界。")
             # 矢量输出后生成无真值核查包；沿用最终分类，不把外部参考当真值。
-            from thres_segmentation.quality_review import export_quality_review, load_review_options
-            review=dict(cfg.get('quality_review_options') or load_review_options())
+            from thres_segmentation.quality_review import export_quality_review
+            # 参数由入口/界面传入；未指定时使用函数默认值，不读取另一份隐藏YAML。
+            review=dict(cfg.get('quality_review_options') or {'enabled': True})
             if review.pop('enabled',False):
                 from datetime import datetime
                 review_dir=Path(cfg['output_dir'])/'quality_review'/datetime.now().strftime('%Y%m%d_%H%M%S_%f')

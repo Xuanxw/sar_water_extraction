@@ -2,7 +2,8 @@
 import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
-from thres_segmentation.main import main,CONFIG_PATH
+from thres_segmentation.main import main
+from configuration import config_argument
 
 if __name__=='__main__':
-    main(sys.argv[1] if len(sys.argv)>1 else CONFIG_PATH)
+    main(config_argument())

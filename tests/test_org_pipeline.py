@@ -205,7 +205,8 @@ class OrgProductionTests(unittest.TestCase):
 
     def test_inventory_is_dynamic_and_entry_uses_case_yaml(self):
         from thres_segmentation import main
-        self.assertTrue(main.CONFIG_PATH.is_file())
+        config_path=ROOT/'configs/北京密云区/threshold_segmentation_20261112.yaml'
+        self.assertTrue(config_path.is_file())
         with TemporaryDirectory() as temp:
             config=self.make_config(Path(temp))
             records=inventory(config['paths']['ORG_ROOT'],config['org'])
@@ -214,7 +215,7 @@ class OrgProductionTests(unittest.TestCase):
             (config['paths']['ORG_ROOT']/next(r['path'] for r in records if r['sensor']=='BC3')).unlink()
             self.assertEqual(len(inventory(config['paths']['ORG_ROOT'],config['org'])),1)
         with patch.object(pipeline,'run_org_scenes',return_value='selected') as run:
-            self.assertEqual(main.main(),'selected')
+            self.assertEqual(main.main(config_path),'selected')
             chosen=run.call_args.args[0]
             self.assertEqual(chosen['run']['mode'],'org_scenes')
             self.assertNotIn('expected_scenes',chosen['org'])
