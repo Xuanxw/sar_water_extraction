@@ -14,11 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from configuration import load_yaml, config_argument
 from thres_segmentation.org_pipeline import SceneProgress, statistics, segment
 from thres_segmentation.product_layout import scene_product
-from thres_segmentation.org_io import read_aoi, prepare_auxiliary, export_water_polygon, write_json
+from thres_segmentation.org_io import read_aoi, prepare_auxiliary, export_water_polygon
+from utils.files import write_json
 from thres_segmentation.run_log import RunLog
 # 复用纯工具函数；导入不会启动历史阈值实验，也不会读取它的结果。
 from history_threshold_comparison import write_csv, compare_masks, sample_fixed_points
-
 
 
 def save_comparison(filtered, masks, slopes, destination, max_side):
@@ -77,7 +77,7 @@ def main(config_path):
     log = RunLog(output, experiment['console_color'])
     with log.capture(), log.stage('00', '固定Q10/Q20的坡度对照'):
         output.mkdir(parents=True, exist_ok=True); cache.mkdir(parents=True, exist_ok=True)
-        write_json(output / 'experiment.json', options)
+        write_json(output / 'experiment.json', options, default=str)
         with log.stage('01', '复用行政区及辅助数据'):
             aoi, crs = read_aoi(config['paths']['AOI_PATH'], config['org']['output_crs'])
             auxiliary = prepare_auxiliary(config, aoi, crs)
@@ -101,13 +101,13 @@ def main(config_path):
                 else:
                     stats = statistics(filtered, scene_aoi, config, common_cache)
                     stats['history_percentile'] = 20
-                    write_json(stats_file, stats)
+                    write_json(stats_file, stats, default=str)
             reference = output / 'slope_20' / date / sid / 'water.tif'
             masks = []
             for slope in slopes:
                 name = f'slope_{slope:g}'
                 folder = output / name / date / sid; folder.mkdir(parents=True, exist_ok=True)
-                if scene_product(original,'metadata.json').exists():write_json(folder/'metadata.json',json.loads(scene_product(original,'metadata.json').read_text(encoding='utf-8')))
+                if scene_product(original,'metadata.json').exists():write_json(folder/'metadata.json',json.loads(scene_product(original,'metadata.json').read_text(encoding='utf-8')), default=str)
                 progress = SceneProgress(cache / name, sid, folder, paths['SNAP_CACHE_DIR'], experiment['resume'])
                 with log.stage('03', f'{name}分割/矢量/质量记录', sid) as step:
                     if progress.completed('complete') and (folder/'water_polygon.shp').exists():
@@ -117,7 +117,7 @@ def main(config_path):
                         trial['org']['postprocess']['max_slope_deg'] = slope
                         write_json(folder / 'parameters.json', {'source_run': str(baseline / 'run.json'),
                                    'base_percentile': 10, 'history_percentile': 20, 'max_slope_deg': slope,
-                                   'postprocess': trial['org']['postprocess'], 'filtered_image': str(filtered)})
+                                   'postprocess': trial['org']['postprocess'], 'filtered_image': str(filtered)}, default=str)
                         if not progress.completed('segment'):
                             products = segment(filtered, scene_aoi, auxiliary, trial, folder, stats, save_context=False)
                             progress.mark('segment', products)
@@ -146,7 +146,7 @@ def main(config_path):
                                                 'predictions': 'fixed_points_predictions.csv', 'resampled': False},
                                    'notes': ['增减像元相对于本实验Q10/Q20/坡度20度组，不是洪水变化或精度。',
                                              '原核验点及分层权重不变；source_production_pred来自原Q15生产结果。',
-                                             '坡度筛除不是真正的雷达阴影/叠掩判定；未生成新的风险面。']})
+                                             '坡度筛除不是真正的雷达阴影/叠掩判定；未生成新的风险面。']}, default=str)
                         progress.mark('complete', [folder / 'water.tif', folder / 'extraction.json'] +
                                       list(folder.glob('water_polygon.*')) + [folder / 'quality.json', points_file, folder / 'parameters.json'])
                     q = json.loads((folder / 'quality.json').read_text(encoding='utf-8'))

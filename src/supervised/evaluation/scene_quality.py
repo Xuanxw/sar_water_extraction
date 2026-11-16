@@ -137,6 +137,9 @@ def save_scene_figure(image_path, label_path, output_dir, scene, metrics, thresh
     fig.tight_layout()
     fig.savefig(output_dir/'figures'/(scene+'.png'), dpi=110)
     plt.close(fig)
+    from utils.water_presentation import save_water_presentation
+    save_water_presentation(sar, masks[1], output_dir/'presentation'/(scene+'.png'),
+                            f'{scene} | Postprocessed water | threshold={threshold:g}')
 
 
 def summarize(output, scenes, thresholds, radii, precision_targets, recall_targets):

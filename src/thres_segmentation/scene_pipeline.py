@@ -19,11 +19,7 @@ from supervised.evaluation.boundary_eval import boundary_regions, confusion_coun
 from supervised.evaluation.metrics import metrics_from_counts
 
 
-def windows(source, size):
-    """整景核心窗口互不重叠；分块只控制I/O，不改变像元网格。"""
-    for top in range(0, source.height, size):
-        for left in range(0, source.width, size):
-            yield Window(left, top, min(size, source.width-left), min(size, source.height-top))
+from utils.raster import windows
 
 
 def read_window(source, band, core, halo=0):
@@ -78,6 +74,7 @@ def filtered_windows(source, band, size, segmenter, median, variance):
 def scene_threshold(source, band, size, segmenter, scratch):
     """两遍扫描：原始全景统计→Lee后全景分位数；临时值缓冲逐阶段复用。"""
     buffer = Path(scratch)/"valid_values.bin"
+    histogram_percentiles = segmenter.otsu_histogram_percentiles or []
     if segmenter.preprocessing == 'offline_normalized':
         # 一遍写入有效z-score；全景只计算决策百分位，免去旧Lee的两遍统计。
         count = 0
@@ -88,7 +85,14 @@ def scene_threshold(source, band, size, segmenter, scratch):
                 values.tofile(stream)
                 count += len(values)
         quantile = segmenter.water_percent if segmenter.mode == 'bottom' else 100-segmenter.water_percent
-        threshold = float(disk_percentiles(buffer, count, [quantile])[0][0])
+        quantiles = disk_percentiles(buffer, count, [quantile, *histogram_percentiles])[0]
+        percentile_threshold = float(quantiles[0])
+        histogram_range = quantiles[1:].tolist() if histogram_percentiles else None
+        values = np.memmap(buffer, dtype='float64', mode='r', shape=(count,))
+        try:
+            threshold = segmenter.select_threshold(values, percentile_threshold, histogram_range)
+        finally:
+            del values
         buffer.unlink()
         print(f"  有效SAR像素={count}；复用离线滤波/z-score，仅计算全景阈值", flush=True)
         return 0., 0., None, None, threshold
@@ -112,11 +116,23 @@ def scene_threshold(source, band, size, segmenter, scratch):
         for _, data, valid in filtered_windows(source, band, size, segmenter, median, variance):
             data[valid].tofile(stream)
     quantile = segmenter.water_percent if segmenter.mode == "bottom" else 100-segmenter.water_percent
-    percentile, lo, hi, fraction = disk_percentiles(buffer, count, [*segmenter.stretch, quantile])
+    percentile, lo, hi, fraction = disk_percentiles(buffer, count, [*segmenter.stretch, quantile, *histogram_percentiles])
     low, high = percentile[:2]
     # 在归一化后的两个相邻秩上插值，保持裁剪后的百分位定义，包括并列值和端点。
     scale = lambda x: np.clip((x-low)/(high-low+1e-6), 0, 1)
-    threshold = float(scale(lo[2])+(scale(hi[2])-scale(lo[2]))*fraction[2])
+    percentile_threshold = float(scale(lo[2])+(scale(hi[2])-scale(lo[2]))*fraction[2])
+    # legacy只在已有0～1决策域做Otsu；分块重写临时缓冲，不加载整景。
+    if segmenter.method == 'otsu':
+        values = np.memmap(buffer, dtype='float64', mode='r+', shape=(count,))
+        try:
+            for start in range(0, count, 1024 * 1024):
+                values[start:start + 1024 * 1024] = scale(values[start:start + 1024 * 1024])
+            histogram_range = scale(percentile[3:]).tolist() if histogram_percentiles else None
+            threshold = segmenter.select_threshold(values, percentile_threshold, histogram_range)
+        finally:
+            del values
+    else:
+        threshold = segmenter.select_threshold(np.empty(0), percentile_threshold)
     buffer.unlink()
     return median, variance, float(low), float(high), threshold
 
@@ -157,7 +173,7 @@ def run_scene_segmentation(image_dir, label_dir, split_manifest, output_dir, ban
     cache_dir.mkdir(parents=True,exist_ok=True)
     write_csv(output_dir/'files.csv',records)
     write_csv(output_dir/'methods.csv',[dict(method='threshold_'+name,band=band,parameters=str(vars(segmenter)),
-        input_domain='z_score' if preprocessing else 'legacy_stretched_0_1', threshold_scope='whole_scene_exact_percentile', block_size=block_size,
+        input_domain='z_score' if preprocessing else 'legacy_stretched_0_1', threshold_scope='whole_scene', block_size=block_size,
         boundary_radii=str(boundary_radii), preview_size=preview_size, scene_prefix=scene_prefix) for name,band in bands.items()])
     all_counts, all_boundary, rows, boundary_rows, metadata_rows = {}, {}, [], [], []
     print(f"BC整景阈值：{len(records)}景；{bands}；meta沿source_image读取；不使用checkpoint",flush=True)
@@ -235,6 +251,7 @@ def run_scene_segmentation(image_dir, label_dir, split_manifest, output_dir, ban
                     # 4. 评价与输出：统计使用原生像元；阶段2同步累计标签计数以避免重复整景读取。
                     row=dict(name=name,method=method,decision_threshold=threshold,threshold_domain="z_score" if preprocessing else "legacy_stretched_0_1",stretch_low=low,stretch_high=high,
                              image_valid_pixels=image_count,predicted_water_pixels=water_count)
+                    row.update(segmenter.threshold_report)
                     row['water_area_m2'] = (analysis['current_water']['m2'] if analysis['current_water'] else None)
                     row['area_status'] = analysis['status']
                     if truth:

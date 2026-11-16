@@ -158,7 +158,7 @@ YAML 的 `paths.OUTPUT_DIR` 指定原位替换目录，`READ_WINDOW_SIZE` 控制
 
 标签替换后，先运行image_process.py的preprocess模式，重建对应处理成果、窗口索引和训练统计，无须手动删除缓存；训练读取已完成缓存并计算类别权重。重新开始训练，不续训旧标签下的水体模型。旧BC/V2入口已合并移除。
 
-**整景训练使用 `src/supervised/load/sar_scene_dataset.py`**，整景模式不使用S1读取器。`src/supervised/train.py` 默认读取 `I:\水体数据\processed_scenes\normalized\images` 和 `labels`，使用单VV PVT＋DeepLabv3+风格模型、BCE、batch size 2。旧DFC实验只有显式选择`DATA_LAYOUT="patch"`并恢复数据路径/波段配置才使用旧读取器。
+**整景训练使用 `src/supervised/load/sar_scene_dataset.py`**，整景模式不使用S1读取器。`src/supervised/train.py` 默认读取 `I:\水体数据\processed_power\normalized\images` 和 `labels`，使用单VV PVT＋DeepLabv3+风格模型、BCE、batch size 2。旧DFC实验只有显式选择`DATA_LAYOUT="patch"`并恢复数据路径/波段配置才使用旧读取器。
 
 整景读取参数位于`SCENE_OPTIONS`：
 
@@ -204,7 +204,7 @@ YAML 的 `paths.OUTPUT_DIR` 指定原位替换目录，`READ_WINDOW_SIZE` 控制
 默认 `METHOD="deeplabv3"` 使用 PVT-v2-B2 编码器、ASPP 和浅层跳连，单头 BCE，解码通道256、浅层投影48、空洞率 `(3,6,9)`。输入512×512时，深层16×16特征经过ASPP，与128×128浅层特征融合，最后恢复到512×512。它是输出步长32、普通卷积的 DeepLabv3+ 风格适配，不是原论文完整配置。
 
 图像预处理统一通过 `src/datasets/image_process.py` 手动运行。正式训练读取
-`I:\水体数据\processed_scenes\normalized\images` 与 `labels`；不执行校正、滤波或标准化。
+`I:\水体数据\processed_power\normalized\images` 与 `labels`；不执行校正、滤波或标准化。
 原始SAR仍保存在 `I:\水体数据\prepared_scenes`，所有处理阶段保持原始尺寸、坐标系、仿射网格与train/val划分。
 
 ```yaml
@@ -214,11 +214,12 @@ run:
 processing:
   ENABLE_CALIBRATION: false
   ENABLE_FILTER: true
+  INPUT_DOMAIN: intensity
   FILTER_INPUT_STAGE: org
   NORMALIZE_INPUT_STAGE: filtered
 ```
 
-默认链路为ORG幅度→SNAP功率域Lee→恢复幅度→使用train统计做z-score→保存浮点GeoTIFF。
+默认链路为ORG线性功率→SNAP功率域Lee→使用train统计做z-score→保存浮点GeoTIFF。
 SNAP GPT、缓存目录、窗口索引缓存、读写窗口和训练统计抽样参数均在configs/image_process.yaml中配置。
 每景输出与完成记录匹配时复用；失败景重做，已完成景不重复执行。处理未完成时目录保留
 `.preprocessing_incomplete`，正式训练拒绝读取；全部成功后发布 `preprocessing.json` 和窗口索引。
@@ -233,7 +234,7 @@ python src/supervised/train.py configs/train.yaml
 
 检查点保存 `inputs_normalized` 和完整 `input_preprocessing`，包括原train均值、标准差、阶段参数和上游记录。
 训练、验证、BN校准和质量输出会检查输入状态并跳过重复标准化。改变处理协议后应从头训练，
-不能把旧原幅度模型直接续跑到新的离线标准化数据上。保留旧检查点的原始输入路径供历史复评。
+旧幅度假设下的滤波结果、均值/标准差与检查点属于另一组实验。功率实验从 prepared_scenes 重新滤波，使用 train 窗口重新估计统计，并在新目录训练。保留旧检查点的原始输入路径供历史复评。
 
 其他方法可这样选择：
 
@@ -524,7 +525,7 @@ python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py E:\Co
 - 或 `CALIBRATION_COMMAND`：可执行参数列表，支持 `{input}`、`{output}`、`{scene_id}`
   和WSL的 `{input_wsl}`、`{output_wsl}` 占位符。不经shell拼接；外部流程必须输出同网格GeoTIFF。
 
-当前BC ORG只有幅度，缺少可核验校正参数。未配置时calibrate明确停止，不产生伪校正影像。
+当前BC ORG像元是未校正的线性功率，缺少可核验校正参数。未配置时calibrate明确停止，不产生伪校正影像。
 幅度平方只转换到功率，不是辐射校正；当前默认关闭校正。
 开启完整校正链时设置 `ENABLE_CALIBRATION=True`、`FILTER_INPUT_STAGE="calibrated"`。
 
@@ -543,7 +544,7 @@ python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py E:\Co
 输出 `quicklooks/景号.quick_overview.png`，2×2依次为原图、校正、滤波、归一化；
 缺少成果或阶段未完成时明确标记Not generated，不用原图代替。
 概览按有效像素均值降采样，0参与平均、无效值不参与，保留边缘余块。
-ORG幅度固定0..255直接量化，不自动拉伸；有明确后向散射物理量的阶段用固定dB范围显示，
+ORG线性功率固定0..255直接量化，不自动拉伸；有明确后向散射物理量的阶段用固定dB范围显示，
 归一化阶段直接用已保存z值、固定范围显示，不再计算一次标准化。显示变换不修改训练影像。
 快视图无需检查点；参数或源成果改变时重新生成，匹配时复用。
 

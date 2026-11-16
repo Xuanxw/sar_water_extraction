@@ -4,7 +4,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from configuration import load_yaml, config_argument
-from thres_segmentation.org_io import export_water_polygon,write_json,read_aoi,prepare_auxiliary
+from thres_segmentation.org_io import export_water_polygon, read_aoi, prepare_auxiliary
+from utils.files import write_json
 
 
 def main(config_path):
@@ -24,14 +25,14 @@ def main(config_path):
         if record.get('status')!='complete':continue
         print(f'[{index}/{len(scenes)}] {record["scene_id"]}',flush=True)
         destination=export_water_polygon(path.parent/'water.tif',**kwargs)
-        record['water_polygon_shp']=str(destination.resolve());record['water_shp']=str(destination.resolve());write_json(path,record)
+        record['water_polygon_shp']=str(destination.resolve());record['water_shp']=str(destination.resolve());write_json(path,record, default=str)
         completed[record['scene_id']]=str(destination.resolve())
     summary=root/'results.json'
     if summary.exists():
         rows=json.loads(summary.read_text(encoding='utf-8'))
         for row in rows:
             if row['scene_id'] in completed:row.update(water_polygon_shp=completed[row['scene_id']],water_shp=completed[row['scene_id']])
-        write_json(summary,rows)
+        write_json(summary,rows, default=str)
     if config['org'].get('archive_intermediates',False):arrange_intermediates(config)
     print(f'全部完成：{len(completed)}景。原water.tif未修改；每景water_polygon.json记录清理效果。',flush=True)
 

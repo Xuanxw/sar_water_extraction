@@ -10,12 +10,17 @@ import torch
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from supervised.evaluation.metrics import metrics_from_counts
+from utils.water_presentation import save_water_presentation
 
 
-def save_prediction_figure(*args, **kwargs):
+def save_prediction_figure(image, label, probability, prediction, counts, path, title):
     """每景结束及时回收Figure/Canvas循环引用，避免图件内存跨景累积。"""
     try:
-        _render_prediction_figure(*args, **kwargs)
+        _render_prediction_figure(image, label, probability, prediction, counts, path, title)
+        # 保留五联诊断图，另存三联展示图；共用预测，不重新推理。
+        path = Path(path)
+        save_water_presentation(image, prediction, path.parent.parent / "presentation" / path.name,
+                                title, "Model input band 1")
     finally:
         gc.collect()
 

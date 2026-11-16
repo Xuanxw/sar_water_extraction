@@ -51,7 +51,11 @@ Result solve(const Model& m,Vec p,Vec n) {
     double nan=std::numeric_limits<double>::quiet_NaN();
     Result out{nan,nan,nan,nan,0,InvalidInput,nan,nan};
     if (!std::isfinite(norm(p)) || norm(p)<1) return out;
-    double t=m.time0+0.5*(m.rows-1)*m.line_time;
+    double first=std::max(m.time0,m.orbit.front().time);
+    double last=std::min(m.time0+(m.rows-1)*m.line_time,m.orbit.back().time);
+    if(last<first){out[5]=OrbitBounds;return out;}
+    // 初值取成像/轨道交集中点，避免影像中点本身位于轨道记录之外。
+    double t=first+0.5*(last-first);
     for (int iteration=1;iteration<=static_cast<int>(m.max_iterations);++iteration) {
         out[2]=t;out[4]=iteration;
         if (t<m.orbit.front().time || t>m.orbit.back().time) {out[5]=OrbitBounds;return out;}
@@ -72,8 +76,13 @@ Result solve(const Model& m,Vec p,Vec n) {
                 out[6]=std::acos(std::clamp(dot(n,mul(l,-1))/(norm(n)*r),-1.0,1.0))*180/std::numbers::pi;
             return out;
         }
-        // 大步长限幅不改变最终成功条件，也不将越界解夹到合法时间上。
-        t+=std::clamp(step,-m.max_step_seconds,m.max_step_seconds);
+        // 越界试探先在轨道端点重新评价残差；若在端点仍要求向外走，才拒绝。
+        // 端点只有同时满足原残差/步长条件才可成功，不能把域外根夹成有效解。
+        double next=t+std::clamp(step,-m.max_step_seconds,m.max_step_seconds);
+        if ((t==m.orbit.back().time && next>t) || (t==m.orbit.front().time && next<t)) {
+            out[5]=OrbitBounds;return out;
+        }
+        t=std::clamp(next,m.orbit.front().time,m.orbit.back().time);
     }
     out[5]=NotConverged;return out;
 }

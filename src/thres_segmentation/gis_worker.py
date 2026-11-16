@@ -1131,8 +1131,8 @@ class SARWorker(QThread):
                 # 4. 在SAR网格上计算局部入射角与畸变分类
                 self.log_signal.emit("📐 正在SAR网格上计算局部入射角...")
                 # 与逐景阈值入口共用方向修正后的公式；未知DEM仍保持0，不参与排除。
-                from thres_segmentation.terrain_geometry import classify_terrain
-                classification = classify_terrain(
+                from thres_segmentation.terrain_geometry import classify_local_radar_terrain
+                classification = classify_local_radar_terrain(
                     np.where(aligned_slope_valid == 1, aligned_slope, np.nan),
                     np.where(aligned_aspect_valid == 1, aligned_aspect, np.nan),
                     alpha, theta, look_dir.lower(), cfg['slope_thresh'])

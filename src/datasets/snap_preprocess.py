@@ -1,4 +1,4 @@
-"""SNAP GPT 整景斑点滤波：ORG已确认是线性幅度，不执行辐射校正。
+"""SNAP GPT 整景斑点滤波：BC训练ORG使用线性功率，不执行辐射校正。
 
 由image_process.py显式生成独立缓存，训练/验证/推理只读复用。源影像和标签不改写。
 仅临时补充真实的波段单位，不伪造SLC、卫星类型或校正LUT。
@@ -212,15 +212,18 @@ class SnapSpeckleFilter:
                                filterSizeY=self.config['window_size'], estimateENL='false',
                                enl=self.config['enl']).items():
             ET.SubElement(lee, key).text = str(value)
-        restored = ET.SubElement(node('Restore', 'BandMaths', 'Lee'), 'targetBands')
-        for index in range(1, count+1):
-            name = f'power_{index}'
-            expression = f'sqrt({name})' if amplitude else name
-            band = ET.SubElement(restored, 'targetBand')
-            for key, value in dict(name=f'sar_{index}', type='float32', unit=self.config['input_domain'],
-                                   expression=f'{name} < 0 ? -9999 : {expression}', noDataValue='-9999').items():
-                ET.SubElement(band, key).text = value
-        write = node('Write', 'Write', 'Restore')
+        # 线性功率可直接写出Lee结果。其他显式幅度工作流仍需恢复原单位。
+        last_node = 'Lee'
+        if amplitude:
+            restored = ET.SubElement(node('Restore', 'BandMaths', 'Lee'), 'targetBands')
+            for index in range(1, count+1):
+                name = f'power_{index}'
+                band = ET.SubElement(restored, 'targetBand')
+                for key, value in dict(name=f'sar_{index}', type='float32', unit='amplitude',
+                                       expression=f'{name} < 0 ? -9999 : sqrt({name})', noDataValue='-9999').items():
+                    ET.SubElement(band, key).text = value
+            last_node = 'Restore'
+        write = node('Write', 'Write', last_node)
         ET.SubElement(write, 'file').text = str(output)
         ET.SubElement(write, 'formatName').text = 'GeoTIFF-BigTIFF'
         ET.indent(graph)

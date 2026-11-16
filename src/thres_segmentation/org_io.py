@@ -1,5 +1,4 @@
 """ORG逐景生产的输入、空间范围、辅助缓存与矢量输出；不依赖训练目录。"""
-import hashlib
 import json
 import math
 import re
@@ -29,26 +28,8 @@ from filelock import FileLock
 from thres_segmentation.auxiliary_data import tile_specs, download_tile
 
 
-def write_json(path, content):
-    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
-    pending=path.with_suffix(path.suffix+'.partial')
-    pending.write_text(json.dumps(content,ensure_ascii=False,indent=2,default=str,allow_nan=False),encoding='utf-8')
-    pending.replace(path)
-
-
-def stamp(path):
-    path=Path(path);stat=path.stat()
-    return {'path':str(path.resolve()),'size':stat.st_size,'mtime_ns':stat.st_mtime_ns}
-
-
-def signature(value):
-    return hashlib.sha256(json.dumps(value,sort_keys=True,default=str).encode()).hexdigest()[:20]
-
-
-def windows(src, size):
-    for top in range(0,src.height,size):
-        for left in range(0,src.width,size):
-            yield Window(left,top,min(size,src.width-left),min(size,src.height-top))
+from utils.files import write_json, stamp, signature
+from utils.raster import windows
 
 
 def inventory(root, options):
@@ -223,7 +204,7 @@ def crop_org(source, destination, aoi, aoi_crs, band, buffer_m, nodata_value, bl
     with rasterio.open(source) as src:
         if not src.crs:raise ValueError(f'ORG缺少地理坐标系：{source}')
         if band not in src.indexes:raise ValueError(f'影像不存在波段{band}：{source}')
-        if np.dtype(src.dtypes[band-1]).kind=='c':raise ValueError('ORG应为实数幅度，不能输入复数SLC')
+        if np.dtype(src.dtypes[band-1]).kind=='c':raise ValueError('ORG应为实数线性幅度或功率，不能输入复数SLC')
         region=transform_geometry(aoi.buffer(buffer_m),Transformer.from_crs(aoi_crs,src.crs,always_xy=True).transform,interleaved=False,include_z=None)
         try:win=geometry_window(src,[mapping(region)])
         except rasterio.errors.WindowError:return None
@@ -237,7 +218,7 @@ def crop_org(source, destination, aoi, aoi_crs, band, buffer_m, nodata_value, bl
                 values=src.read(band,window=source_win,masked=True,out_dtype='float32')
                 valid=~np.ma.getmaskarray(values)&np.isfinite(values.data)
                 if nodata_value is not None:valid &= values.data!=nodata_value
-                if np.any(values.data[valid]<0):raise ValueError('幅度存在有效负值，请核对NoData/输入域')
+                if np.any(values.data[valid]<0):raise ValueError('线性幅度/功率存在有效负值，请核对NoData/输入域')
                 dst.write(np.where(valid,values.data,np.nan),1,window=part)
         pending.replace(destination)
     return Path(destination)

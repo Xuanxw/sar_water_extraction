@@ -261,6 +261,10 @@ def save_result_figure(image_path, label, valid, probability, corrected, thresho
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=140)
     plt.close(fig)
+    from utils.water_presentation import save_water_presentation
+    save_water_presentation(np.where(valid, sar[0], np.nan), np.where(valid, corrected, -1),
+                            output_path.parent.parent/'presentation'/output_path.name,
+                            f'{image_path.stem} | Postprocessed water | threshold={threshold:g}')
 
 
 def run_postprocess(checkpoint_paths, image_dir=None, label_dir=None,

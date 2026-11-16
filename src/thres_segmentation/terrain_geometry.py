@@ -27,7 +27,7 @@ def prepare_gui_layers(dem, executable):
     return result
 
 
-def classify_terrain(slope,aspect,heading,incidence,look_side,slope_threshold):
+def classify_local_radar_terrain(slope,aspect,heading,incidence,look_side,slope_threshold):
     """GDAL坡向/入射角均为度：0未知、1局部阴影、2叠掩候选、3高坡、4正常。
 
     坡向是下坡朝向，亦为向上地表法向的水平分量方向。法向点积必须使用地面→卫星。
@@ -80,7 +80,7 @@ def generate_terrain_mask(reference,slope_path,aspect_path,metadata,folder,thres
                 maximum=90 if name=='slope' else 360
                 a[~np.isfinite(footprint)|(footprint<0)|(footprint>maximum)]=np.nan
                 values[name]=a
-            cls=classify_terrain(values['slope'],values['aspect'],heading,theta,look,threshold)
+            cls=classify_local_radar_terrain(values['slope'],values['aspect'],heading,theta,look,threshold)
             valid=src.read_masks(1,window=w)>0
             counts+=np.bincount(cls[valid],minlength=5)
             excluded=np.isin(cls,(1,2,3)).astype('uint8')

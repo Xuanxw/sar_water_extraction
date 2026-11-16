@@ -16,8 +16,8 @@ from shapely import transform as transform_geometry, from_wkb, to_wkb, get_parts
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from thres_segmentation.run_log import RunLog
 
-INPUT_ROOT=Path(r'E:\InSAR\水体提取\北京密云区\outputs\thres_seg_base_q30_20261112')
-OUTPUT_DIR=Path(r'E:\InSAR\水体提取\北京密云区\outputs\thres_seg_base_q30_20261112\merged')
+INPUT_ROOT=Path(r'E:\InSAR\水体提取\北京密云区\outputs\thres_seg_profiles_otsu_20261113')
+OUTPUT_DIR=INPUT_ROOT/'merged'  # 跟随输入目录，避免合并到另一轮实验。
 TARGET_CRS='EPSG:32650'
 ROI_PATH=Path(r'E:\InSAR\水体提取\北京密云区\密云区行政划分.shp')  # 可设None。
 SAVE_QUICKLOOK=True
@@ -170,6 +170,9 @@ def save_quicklook(water_path,roi_path,destination,title,target,max_side):
 
 def merge_results(input_root,output_dir,target_crs,roi_path=None,save_previews=True,preview_size=1600,dissolve=False):
     """默认追加；并集使用独立文件名和分批缓存，两种结果可以共存。"""
+    input_root=Path(input_root)
+    if not input_root.is_dir():
+        raise FileNotFoundError(f'合并输入目录不存在：{input_root}；请检查INPUT_ROOT')
     output_dir=Path(output_dir);target=CRS.from_user_input(target_crs)
     method='geometric_union' if dissolve else 'feature_append'
     mode='几何并集（消除重叠）' if dissolve else '追加要素（保留重叠）'
@@ -190,7 +193,12 @@ def merge_results(input_root,output_dir,target_crs,roi_path=None,save_previews=T
                 record['water_shp']=str(water)
                 grouped.setdefault(record['date'],[]).append(record)
             print(f'{len(grouped)}日期，{sum(map(len,grouped.values()))}景',flush=True)
-        if not grouped:raise ValueError('没有已完成的逐景水体SHP')
+        if not grouped:
+            raise ValueError(
+                f'在 {input_root} 下没有找到已完成的逐景水体SHP。'
+                '请将INPUT_ROOT设为本次处理的成果根目录；'
+                '预期结构为 日期/景号/scene.json 和 water_polygon.shp。'
+            )
         roi_output=None
         if roi_path is not None:
             roi_output=output_dir/'roi.shp'

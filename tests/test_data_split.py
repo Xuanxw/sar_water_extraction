@@ -12,7 +12,8 @@ import rasterio
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
                 str(Path(__file__).resolve().parents[1] / "scripts")]
-from prepare_train_val_split import assign_split, file_hash, move_split, scan_samples, write_csv
+from utils.files import sha256
+from prepare_train_val_split import assign_split, move_split, scan_samples, write_csv
 
 
 class DataSplitTests(unittest.TestCase):
@@ -52,7 +53,7 @@ class DataSplitTests(unittest.TestCase):
                                count=1, dtype="uint8") as target:
                 target.write(label, 1)
             catalog.append(dict(name=name, water_context_scene="建成区" if index == 11 else "农田",
-                                label_sha256=file_hash(label_path)))
+                                label_sha256=sha256(label_path)))
         scene_csv = root / "scenes.csv"
         write_csv(scene_csv, catalog)
         return root, scene_csv
@@ -84,7 +85,7 @@ class DataSplitTests(unittest.TestCase):
             self.assertGreater(sum(r["active"] for r in rows if r["split"] == "val"), 0)
             # 场景标签文件哈希过期时不沿用旧标签场景。
             scene_text = scene_csv.read_text(encoding="utf-8-sig")
-            scene_csv.write_text(scene_text.replace(file_hash(root / "labels/11.png"), "stale"), encoding="utf-8-sig")
+            scene_csv.write_text(scene_text.replace(sha256(root / "labels/11.png"), "stale"), encoding="utf-8-sig")
             changed = {r["name"]: r for r in scan_samples(root, scene_csv)}
             self.assertEqual(changed["11.tif"]["scene"], "unknown")
 
@@ -94,7 +95,7 @@ class DataSplitTests(unittest.TestCase):
             manifest = root / "plan/split_manifest.csv"
             rows = assign_split(scan_samples(root, scene_csv))
             write_csv(manifest, rows)
-            before = {p.relative_to(root).as_posix(): file_hash(p)
+            before = {p.relative_to(root).as_posix(): sha256(p)
                       for directory in (root / "images", root / "labels") for p in directory.iterdir()}
             move_split(manifest, root)
             move_split(manifest, root)  # 原计划重复执行不再次划分。
@@ -102,10 +103,10 @@ class DataSplitTests(unittest.TestCase):
             self.assertEqual(len(list((root / "labels").rglob("*.png"))), 12)
             self.assertTrue((root / "split_manifest.csv").exists())
             for row in rows:
-                self.assertEqual(file_hash(root / "images" / row["image_relative"]), row["image_file_sha256"])
-                self.assertEqual(file_hash(root / "labels" / row["label_relative"]), row["label_file_sha256"])
+                self.assertEqual(sha256(root / "images" / row["image_relative"]), row["image_file_sha256"])
+                self.assertEqual(sha256(root / "labels" / row["label_relative"]), row["label_file_sha256"])
             move_split(manifest, root, restore=True)
-            after = {p.relative_to(root).as_posix(): file_hash(p)
+            after = {p.relative_to(root).as_posix(): sha256(p)
                      for directory in (root / "images", root / "labels") for p in directory.iterdir()}
             self.assertEqual(before, after)
             self.assertTrue(manifest.exists())

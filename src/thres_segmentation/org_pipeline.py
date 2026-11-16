@@ -17,10 +17,13 @@ from shapely import transform as transform_geometry
 from scipy.ndimage import binary_opening, binary_closing
 from filelock import FileLock
 
-from thres_segmentation.org_io import (write_json,inventory,read_aoi,prepare_auxiliary,
-    local_source,crop_org,export_water_polygon,windows)
+from thres_segmentation.org_io import inventory, read_aoi, prepare_auxiliary, local_source, crop_org, export_water_polygon
+from utils.files import write_json
+from utils.raster import windows
+from utils.water_presentation import save_raster_water_presentation
 from thres_segmentation.metadata import read_source_metadata
 from thres_segmentation.scene_pipeline import disk_percentiles
+from thres_segmentation.threshold import select_otsu_or_percentile
 from thres_segmentation.quality_review import export_quality_review
 from thres_segmentation.water_analysis import pixel_areas,area_sum
 
@@ -57,18 +60,28 @@ class SceneProgress:
                 records.append({'root':root_name,'path':relative.as_posix()});break
             else:raise ValueError(f'阶段产物不在配置的缓存或成果目录内：{path}')
         self.state['stages'][name]={'complete':True,'files':records}
-        write_json(self.path,self.state)
+        write_json(self.path,self.state, default=str)
 
 
 def statistics(filtered, aoi, config, folder, history_percentiles=None):
-    """只在AOI有效观测内估计整景分位数；磁盘缓冲避免整景数组和重复滤波。"""
+    """AOI有效观测内统一估计阈值；Otsu不满足判据时回退原百分位方案。"""
     settings=config['org'];base=float(config['threshold']['water_percent'])
+    input_domain=settings['filter']['input_domain']
+    requested_domain=config['threshold'].get('otsu_domain','linear')
+    expected={'log_amplitude':'amplitude','log_intensity':'intensity'}.get(requested_domain)
+    if expected is not None and expected!=input_domain:
+        raise ValueError(f'Otsu域{requested_domain}与滤波输入域{input_domain}不一致')
     delta=settings['sensitivity_delta_percent'];relax=settings['postprocess']['history_relax_percent']
     percentages=[base,max(0,base-delta),min(100,base+delta),min(100,base+relax)]
     # 对照实验可一次计算多个历史水体分位；原生产入口仍使用原来的四个值。
     extra=[] if history_percentiles is None else list(history_percentiles)
     percentages.extend(extra)
     if config['threshold']['mode']=='top':percentages=[100-p for p in percentages]
+    histogram_percentiles=config['threshold'].get('otsu_histogram_percentiles')
+    if histogram_percentiles is not None:
+        if len(histogram_percentiles)!=2 or not 0<=histogram_percentiles[0]<histogram_percentiles[1]<=100:
+            raise ValueError('otsu_histogram_percentiles需为0～100内递增的两个百分位')
+        percentages.extend(histogram_percentiles)
     count=0;total=square=0.
     with TemporaryDirectory(prefix='quantile_',dir=folder) as temp:
         buffer=Path(temp)/'values.bin'
@@ -81,28 +94,58 @@ def statistics(filtered, aoi, config, folder, history_percentiles=None):
                 values.tofile(stream);count+=values.size;total+=float(values.sum());square+=float(np.square(values).sum())
         if not count:raise ValueError('行政区相交范围没有有效SAR像元')
         thresholds=disk_percentiles(buffer,count,percentages)[0].tolist()
+        # 百分位保留为回退及敏感性/历史阈值；Otsu只替换基础决策阈值。
+        values=np.memmap(buffer,dtype='float64',mode='r',shape=(count,))
+        try:
+            selected,selection=select_otsu_or_percentile(
+                values,thresholds[0],config['threshold'].get('method','percentile'),
+                config['threshold'].get('otsu_bins',1024),
+                config['threshold'].get('otsu_min_separability',0.5),
+                config['threshold'].get('otsu_min_class_fraction',0.001),
+                thresholds[-2:] if histogram_percentiles is not None else None,
+                config['threshold'].get('otsu_domain','linear'),
+                config['threshold'].get('otsu_log_floor',1e-6))
+            selection['histogram_percentiles']=histogram_percentiles
+        finally:
+            del values
+        thresholds[0]=selected
+        if selection['method_used']=='otsu':
+            # Otsu敏感性按相邻直方图边界扰动，不误用回退Q30附近的Q28/Q32。
+            # 对数等宽bin在幅度域不等宽，使用已还原的相邻边界，不能直接加减dB宽度。
+            neighbors=[selection['otsu_lower_neighbor'],selection['otsu_upper_neighbor']]
+            thresholds[1:3]=neighbors if config['threshold']['mode']=='bottom' else neighbors[::-1]
     mean=total/count;std=max(0.,square/count-mean**2)**.5
+    # 保留既有JSON键名；数值单位由input_domain/threshold_units明确，不把功率转换成幅度。
     result={'thresholds_amplitude':thresholds[:4],'water_percent':base,'valid_pixels':count,
-            'mean':mean,'std':std,'normalization':settings['normalization'],
+            'mean':mean,'std':std,'normalization':settings['normalization'],'threshold_selection':selection,
+            'sensitivity_basis':'otsu_one_histogram_bin' if selection['method_used']=='otsu' else 'percentile_delta',
+            'input_domain':input_domain,'threshold_units':'linear_'+input_domain,
             'decision_threshold':(thresholds[0]-mean)/max(std,1e-6) if settings['normalization']=='scene_zscore' else thresholds[0]}
     if extra:result['history_thresholds_amplitude']=dict(zip(map(str,extra),thresholds[4:]))
     return result
 
 
-def segment(filtered, aoi, auxiliary, config, folder, stats, save_context=True):
-    """分块加halo完成形态学；辅助缺测处不排除、不强制恢复，原始未知保持255。"""
+def segment(filtered, aoi, auxiliary, config, folder, stats, save_context=True, terrain_products=None):
+    """分块分割，未知保持255；阈值对照可通过terrain_products固定既有地形掩膜。"""
     post=config['org']['postprocess'];size=config['processing']['block_size']
     radius=post['opening_radius_px']+post['closing_radius_px'];halo=2*radius
     totals={'raw_area_m2':0.,'final_area_m2':0.,'valid_area_m2':0.,'landcover_removed_m2':0.,
             'terrain_removed_m2':0.,'auxiliary_unknown_m2':0.,'sensitivity_area_m2':[0.,0.,0.]}
     files=[]
-    geometry_mode=post['terrain_enabled'] and post.get('terrain_method','slope_only')=='gui_geometry'
+    geometry_mode=post['terrain_enabled'] and post.get('terrain_method','slope_only') in ('gui_geometry','radar_profiles')
     if geometry_mode:
-        from thres_segmentation.terrain_geometry import generate_terrain_mask
-        meta=json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
-        terrain=generate_terrain_mask(filtered,auxiliary['slope'],auxiliary['aspect'],meta,folder,post['max_slope_deg'])
+        if terrain_products is not None:
+            # 改变输入域阈值时保持同一几何判断，不重新估计阴影与叠掩。
+            terrain=terrain_products
+        elif post['terrain_method']=='radar_profiles':
+            from thres_segmentation.profile_terrain import generate_profile_terrain
+            terrain=generate_profile_terrain(filtered,config,folder)
+        else:
+            from thres_segmentation.terrain_geometry import generate_terrain_mask
+            meta=json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
+            terrain=generate_terrain_mask(filtered,auxiliary['slope'],auxiliary['aspect'],meta,folder,post['max_slope_deg'])
         auxiliary={**auxiliary,'terrain_exclusion':terrain['terrain_exclusion']}
-        terrain_files=[*terrain.values(),folder/'terrain_geometry.json']
+        terrain_files=[] if terrain_products is not None else [*terrain.values(),folder/'terrain_geometry.json']
     with ExitStack() as stack:
         src=stack.enter_context(rasterio.open(filtered));profile=src.profile.copy()
         profile.update(dtype='uint8',nodata=255,count=1)
@@ -186,7 +229,7 @@ def segment(filtered, aoi, auxiliary, config, folder, stats, save_context=True):
                 value=final if i==0 else correct(t)
                 totals['sensitivity_area_m2'][i]+=area_sum(value[crop],areas)
     for path in files:path.with_suffix('.partial.tif').replace(path)
-    write_json(folder/'extraction.json',{'statistics':stats,**totals})
+    write_json(folder/'extraction.json',{'statistics':stats,**totals}, default=str)
     return files+[folder/'extraction.json']+(terrain_files if geometry_mode else [])
 
 
@@ -203,6 +246,9 @@ def save_preview(image_path,mask_path,destination,max_side):
     ax[1].imshow(water,cmap='Blues',vmin=0,vmax=1);ax[1].set_title('Final water (1=water; masked=unknown)')
     for a in ax:a.axis('off')
     fig.tight_layout();fig.savefig(destination,dpi=110)
+    fig.clear()
+    save_raster_water_presentation(image_path, mask_path,
+                                  Path(destination).parent/'presentation'/'water_overlay.png', max_side)
 
 
 def run_org_scenes(config, config_path=None):
@@ -222,11 +268,17 @@ def _run_org_scenes(config,log):
     from datasets.speckle import SpeckleFilter
     with log.stage('01','扫描ORG及读取行政区'):
         paths=config['paths'];options=config['org'];size=config['processing']['block_size']
+        if config['threshold'].get('method','percentile') not in ('otsu','percentile'):
+            raise ValueError('threshold.method使用otsu或percentile')
         if config['threshold']['mode'] not in ('bottom','top') or not 0<=config['threshold']['water_percent']<=100:
             raise ValueError('ORG阈值mode为bottom/top，water_percent为0～100')
         if options['normalization'] not in ('none','scene_zscore'):raise ValueError('normalization为none/scene_zscore')
         if options['filter']['method'] not in ('none','snap_lee'):raise ValueError('滤波为none/snap_lee')
-        if options['filter']['input_domain']!='amplitude':raise ValueError('本ORG流程要求线性幅度输入')
+        if options['filter']['input_domain'] not in ('amplitude','intensity'):
+            raise ValueError('ORG输入域需明确为线性幅度amplitude或线性功率intensity')
+        expected={'log_amplitude':'amplitude','log_intensity':'intensity'}.get(config['threshold'].get('otsu_domain','linear'))
+        if expected is not None and expected!=options['filter']['input_domain']:
+            raise ValueError('Otsu对数域与滤波输入物理量不一致，请核对配置')
         post=options['postprocess'];aux=options['auxiliary']
         if size<1 or options['crop_buffer_m']<0 or aux['buffer_m']<0:
             raise ValueError('分块大小需为正，缓冲距离不能为负')
@@ -249,8 +301,8 @@ def _run_org_scenes(config,log):
         archive=options.get('archive_intermediates',False)
         if archive:arrange_intermediates(config,restore=True)
         # run.json仅记录当前参数，不再承担续跑validation。
-        write_json(root/'run.json',{'config':config,'aoi_area_m2':aoi.area,'merge_by_date':False})
-        write_json(root/'inventory.json',records)
+        write_json(root/'run.json',{'config':config,'aoi_area_m2':aoi.area,'merge_by_date':False}, default=str)
+        write_json(root/'inventory.json',records, default=str)
         print(f'ORG逐景处理：{len(records)}景，{len({r["date"] for r in records})}日期；输出：{root}',flush=True)
         with log.stage('02','辅助数据下载/复用与空间对齐'):
             auxiliary=prepare_auxiliary(config,aoi,crs)
@@ -278,6 +330,12 @@ def _run_org_scenes(config,log):
                     method=json.loads(terrain_record.read_text(encoding='utf-8')).get('method') if terrain_record.exists() else None
                     if method!=TERRAIN_METHOD_VERSION:
                         for stage in ('mask','vector','quality','preview','complete'):progress.state['stages'].pop(stage,None)
+                elif options['postprocess'].get('terrain_method')=='radar_profiles':
+                    from thres_segmentation.profile_terrain import PROFILE_METHOD_VERSION
+                    terrain_record=folder/'terrain_geometry.json'
+                    method=json.loads(terrain_record.read_text(encoding='utf-8')).get('method') if terrain_record.exists() else None
+                    if method!=PROFILE_METHOD_VERSION:
+                        for stage in ('mask','vector','quality','preview','complete'):progress.state['stages'].pop(stage,None)
                 if progress.completed('complete'):
                     scene_stage['status']='reused'
                     log.message('复用已完成的本景成果/覆盖检查','REUSED')
@@ -286,17 +344,26 @@ def _run_org_scenes(config,log):
                         polygon=export_water_polygon(folder/'water.tif',**polygon_options)
                         had_polygon=(summary.get('water_polygon_shp')==str(polygon.resolve()) and summary.get('water_shp')==str(polygon.resolve()))
                         summary.update(water_shp=str(polygon.resolve()),water_polygon_shp=str(polygon.resolve()),quality_json=str((folder/'quality.json').resolve()))
-                        if not had_polygon:write_json(folder/'scene.json',summary)
+                        if not had_polygon:write_json(folder/'scene.json',summary, default=str)
+                        # 补展示图只消费已有底图和最终掩膜，不重新分割或改变完成记录。
+                        presentation = folder/'presentation'/'water_overlay.png'
+                        if options['save_quicklook'] and not presentation.exists():
+                            if progress.completed('filter') and (folder/'water_polygon.tif').is_file():
+                                save_raster_water_presentation(progress.files('filter')[0],
+                                    folder/'water_polygon.tif', presentation, config['output']['preview_size'])
+                                log.message(f'已补水体叠加图：{presentation}')
+                            else:
+                                log.message('未补叠加图：滤波底图缓存或最终水体栅格缺失；保留既有成果。')
                     rows.append(summary);continue
-                write_json(folder/'input.json',record)
-                crop=progress.folder/'amplitude.tif'
+                write_json(folder/'input.json',record, default=str)
+                crop=progress.folder/('intensity.tif' if options['filter']['input_domain']=='intensity' else 'amplitude.tif')
                 with log.stage('04','原始元数据/解压与行政区裁剪',record['scene_id']) as step:
                     if progress.completed('crop'):
                         step['status']='reused'
                     else:
-                        print('  裁剪原始幅度及追溯元数据',flush=True)
+                        print('  裁剪原始线性SAR及追溯元数据',flush=True)
                         meta,_,xml=read_source_metadata(record['path'])
-                        write_json(folder/'metadata.json',meta)
+                        write_json(folder/'metadata.json',meta, default=str)
                         if xml:(folder/'source.xml').write_bytes(xml)
                         source=local_source(record,paths['CACHE_DIR'])
                         cropped=crop_org(source,crop,aoi,crs,band,options['crop_buffer_m'],options['input_nodata_value'],size)
@@ -304,7 +371,7 @@ def _run_org_scenes(config,log):
                             step['status']='skipped';scene_stage['status']='skipped'
                             log.message('与行政区外扩范围无相交，跳过','SKIPPED')
                             summary={**record,'status':'outside_aoi'}
-                            write_json(folder/'scene.json',summary)
+                            write_json(folder/'scene.json',summary, default=str)
                             progress.mark('complete',[folder/'scene.json'])
                             rows.append(summary);continue
                         progress.mark('crop',[crop,folder/'metadata.json'])
@@ -320,13 +387,17 @@ def _run_org_scenes(config,log):
                         log.message(f'SNAP内部计时：{filtered.parent / "timings.json"}')
                 with rasterio.open(crop) as source:
                     scene_aoi=transform_geometry(aoi,Transformer.from_crs(crs,source.crs,always_xy=True).transform,interleaved=False,include_z=None)
-                with log.stage('06','AOI内整景分位阈值统计',record['scene_id']) as step:
+                with log.stage('06','AOI内整景阈值统计',record['scene_id']) as step:
                     stats_file=progress.folder/'statistics.json'
                     if progress.completed('statistics'):
                         stats=json.loads(stats_file.read_text(encoding='utf-8'));step['status']='reused'
                     else:
                         stats=statistics(filtered,scene_aoi,config,progress.folder)
-                        write_json(stats_file,stats);progress.mark('statistics',[stats_file])
+                        write_json(stats_file,stats, default=str);progress.mark('statistics',[stats_file])
+                    selection=stats.get('threshold_selection',{'method_used':'percentile','fallback_reason':None})
+                    reason=selection['fallback_reason']
+                    log.message(f"阈值方法：{selection['method_used']}；{options['filter']['input_domain']}阈值={stats['thresholds_amplitude'][0]:.6g}；"
+                                f"回退原因={reason or '无'}",'WARNING' if reason else 'INFO')
                 with log.stage('07','阈值分割及辅助修正',record['scene_id']) as step:
                     if progress.completed('mask'):step['status']='reused'
                     else:
@@ -364,7 +435,7 @@ def _run_org_scenes(config,log):
                         quality['correction_policy']=options['postprocess']
                         quality['not_evaluated']=['overlap_consistency','temporal_change','ray_traced_radar_occlusion']
                         if (folder/'terrain_geometry.json').exists():quality['terrain_geometry']=json.loads((folder/'terrain_geometry.json').read_text(encoding='utf-8'))
-                        write_json(folder/'quality.json',quality)
+                        write_json(folder/'quality.json',quality, default=str)
                         if enabled:
                             # 每景仅保留一份简洁质量JSON；矢量仍在review/下。
                             (review_dir/'quality.json').unlink()
@@ -372,7 +443,12 @@ def _run_org_scenes(config,log):
                         progress.mark('quality',files)
                 with log.stage('10','输出快视图',record['scene_id']) as step:
                     if not options['save_quicklook']:step['status']='skipped'
-                    elif progress.completed('preview'):step['status']='reused'
+                    elif progress.completed('preview'):
+                        step['status']='reused'
+                        presentation = folder/'presentation'/'water_overlay.png'
+                        if not presentation.exists():
+                            save_raster_water_presentation(filtered, folder/'water_polygon.tif',
+                                                          presentation, config['output']['preview_size'])
                     else:
                         # 展示正式交付的清理后栅格，与water_polygon.shp保持同一处理阶段。
                         save_preview(filtered,folder/'water_polygon.tif',folder/'quicklook.png',config['output']['preview_size'])
@@ -384,12 +460,14 @@ def _run_org_scenes(config,log):
                         progress.mark('preview',previews)
                 with log.stage('11','保存逐景完成记录',record['scene_id']):
                     summary={**record,'status':'complete','water_shp':str(shp.resolve()),'water_polygon_shp':str((folder/'water_polygon.shp').resolve()),'quality_json':str((folder/'quality.json').resolve())}
-                    write_json(folder/'scene.json',summary)
-                    files=[p for p in folder.rglob('*') if p.is_file() and '.partial' not in p.name and p.name!='complete.done.json']
+                    write_json(folder/'scene.json',summary, default=str)
+                    # 展示图是可补充产品，缺失不能使已完成的水体处理失效。
+                    files=[p for p in folder.rglob('*') if p.is_file() and '.partial' not in p.name
+                           and p.name!='complete.done.json' and p.parent!=folder/'presentation']
                     progress.mark('complete',files)
                     rows.append(summary)
-                    write_json(root/'progress.json',{'completed':len(rows),'total':len(records),'last_scene':record['scene_id']})
-        write_json(root/'results.json',rows)
+                    write_json(root/'progress.json',{'completed':len(rows),'total':len(records),'last_scene':record['scene_id']}, default=str)
+        write_json(root/'results.json',rows, default=str)
         if archive:arrange_intermediates(config)
         print(f'逐景处理完成：{root}；未按日期合并。',flush=True)
     return root

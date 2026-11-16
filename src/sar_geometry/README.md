@@ -24,7 +24,7 @@ python src/sar_geometry/main.py configs/sar_geometry.yaml
 |---|---|---|
 | `mode: inspect` | 读取XML或ZIP注释，输出`metadata_inspection.json`和日志 | 默认模式；不解压或读取SLC像元 |
 | `mode: nominal` | 在DEM原生网格计算LUT、状态、覆盖和局部入射角 | 明确DEM、确认雷达网格、Doppler约定及椭球高；核心已编译 |
-| `core.classify_profile()` | 对已构造的同观测剖面计算阴影及叠掩 | 仅实验接口；调用者提供完整支持域、地表顺序、斜距及有向角 |
+| `core.compute_radar_shadow_layover()` | 对已构造的同观测剖面计算阴影及叠掩 | 仅实验接口；调用者提供完整支持域、地表顺序、斜距及有向角 |
 | `mode: visibility` | 整景零Doppler观测剖面、阴影、叠掩和联合掩膜 | 输出独立米制地理网格；不修改水体 |
 | `validate_scene.py` | 同网格旧GUI对照、方向诊断、角点检查、快视图和性能记录 | 读取原地形成果；没有真值时不报告精度提升 |
 | 非零Doppler剖面、生产水体修正 | 尚未实现 | 不自动把斜视改成零Doppler，不以几何有效性替代排除掩膜 |
@@ -196,7 +196,7 @@ x_r=\frac{R-R_0}{\Delta R},\qquad y_a=\frac{t-t_0}{\Delta t}.
 已实现核心接口：
 
 ```text
-core.solve_points(executable, model, points, normals)
+core.solve_range_doppler_points(executable, model, points, normals)
     -> N×8: range_pixel, azimuth_pixel, time_s, residual_hz,
             iterations, status, local_incidence_deg, step_pixels
 ```
@@ -236,7 +236,7 @@ LUT的合法(0,0)坐标必须保留，不能以零坐标替代有效性掩膜。
 当前实验接口（阴影和叠掩一次返回）：
 
 ```text
-core.classify_profile(executable, points, support_complete,
+core.compute_radar_shadow_layover(executable, points, support_complete,
                       angle_epsilon=1e-10, range_epsilon=1e-6)
     points: N×4，单调地表s、斜距米、向上有向仰角弧度、有效标记
     -> N×2，阴影/叠掩，各自0/1/255
@@ -250,7 +250,7 @@ core.classify_profile(executable, points, support_complete,
 
 不能只标记陡坡种子，也不能仅统计某距离箱收到两个相邻DEM点就判为叠掩；正常有限采样也会产生多点落箱。需要区分正常连续采样与不同地面分支重叠。
 
-当前与上述`classify_profile()`共用剖面输入；后续整景支持网格再调用它。概念接口：
+当前与上述`compute_radar_shadow_layover()`共用剖面输入；后续整景支持网格再调用它。概念接口：
 
 ```text
 layover_profile(surface_order, slant_ranges, sampling)
@@ -343,3 +343,9 @@ GAMMA参考运行采用明确版本和相同参数；调用本地授权环境由
 逆向未完全确认的内部网格尺度、Euler约定、插值边界、编码及所有斜视模式，不作为已完成能力。必要时继续对指定二进制做有针对性的逆向核查，并将新增证据与独立设计区分记录。
 
 独立名义几何和单景零Doppler观测方向掩膜均已接通。当前已完成的是数值/工程验证与新旧结果差异检查；下一步应确认真实成像约定并使用独立参考核查地形分类，完成前不替换密云水体成果。
+
+## 公共工具与算法接口
+
+通用文件工具集中在`src/utils/files.py`：`sha256`、`write_json`、`stamp`、`signature`。栅格窗口遍历在`src/utils/raster.py`。算法模块直接导入，不转导或保留旧兼容函数。
+
+Python采用清楚的算法名称、逐步语句和必要中文说明；核心仍通过`core.py`调用已编译C++，当前尚未切换纯Python数值内核。

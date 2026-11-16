@@ -10,7 +10,7 @@ import rasterio
 from rasterio.transform import from_origin
 
 ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT/'src'))
-from thres_segmentation.terrain_geometry import classify_terrain
+from thres_segmentation.terrain_geometry import classify_local_radar_terrain
 
 GDALDEM=Path(os.environ.get('GDALDEM_PATH',r'E:\Code_projects\tools\libs\gdal_3.8.5\bin\gdaldem.exe'))
 
@@ -26,7 +26,7 @@ class DirectionTests(unittest.TestCase):
                 normal=np.column_stack((np.sin(b)*np.sin(a),np.sin(b)*np.cos(a),np.cos(b)))
                 los=np.array([np.sin(theta)*np.sin(np.deg2rad(sensor)),np.sin(theta)*np.cos(np.deg2rad(sensor)),np.cos(theta)])
                 np.testing.assert_allclose(normal@los,[np.cos(np.deg2rad(20)),np.cos(np.deg2rad(100))],atol=1e-14)
-                np.testing.assert_array_equal(classify_terrain(slope,aspects,heading,40,side,15),[2,1])
+                np.testing.assert_array_equal(classify_local_radar_terrain(slope,aspects,heading,40,side,15),[2,1])
 
     def test_gdal_actual_dem_planes(self):
         """实际运行项目GDAL 3.8.5，在四种解析坡面确认其输出是下坡朝向。"""
@@ -47,11 +47,11 @@ class DirectionTests(unittest.TestCase):
                 self.assertAlmostEqual(beta,60,places=3)
                 # 雷达位于该坡面朝向一侧；航向由左视几何反推。
                 heading=(direction-90)%360
-                self.assertEqual(classify_terrain(np.array([beta]),np.array([observed]),heading,40,'left',15)[0],2)
+                self.assertEqual(classify_local_radar_terrain(np.array([beta]),np.array([observed]),heading,40,'left',15)[0],2)
 
     def test_flat_unknown_and_both_sides(self):
-        np.testing.assert_array_equal(classify_terrain(np.array([0.,np.nan,20.,20.]),np.array([0,0,270,90]),0,40,'right',15),[4,0,3,4])
-        with self.assertRaises(ValueError):classify_terrain(np.array([0.]),np.array([0.]),0,40,'unknown',15)
+        np.testing.assert_array_equal(classify_local_radar_terrain(np.array([0.,np.nan,20.,20.]),np.array([0,0,270,90]),0,40,'right',15),[4,0,3,4])
+        with self.assertRaises(ValueError):classify_local_radar_terrain(np.array([0.]),np.array([0.]),0,40,'unknown',15)
 
 
 if __name__=='__main__':unittest.main()

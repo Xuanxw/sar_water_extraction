@@ -3,7 +3,6 @@
 from math import log
 from pathlib import Path
 import csv
-import hashlib
 import sys
 import json
 from time import perf_counter
@@ -181,18 +180,7 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
     return rows
 
 
-def file_hash(path):
-    """流式指纹：防止 train_end 被覆盖后，续跑混入另一轮权重。"""
-    with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def write_json(path, record):
-    """先写临时文件再替换，中断时保留上一次完整记录。"""
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+from utils.files import sha256, write_json
 
 
 def prepare_scan(checkpoints, expected_epochs=None, image_dir=None, label_dir=None):
@@ -218,7 +206,7 @@ def prepare_scan(checkpoints, expected_epochs=None, image_dir=None, label_dir=No
         if manifest_fingerprint(root / 'split_manifest.csv') != checkpoint['split_manifest_sha256']:
             raise ValueError('验证清单与检查点不同')
         revision = checkpoint.get('label_revision_sha256')
-        if revision and file_hash(root / 'revision_settings.json') != revision:
+        if revision and sha256(root / 'revision_settings.json') != revision:
             raise ValueError('标签版本与检查点不同')
         with (root / 'split_manifest.csv').open(encoding='utf-8-sig', newline='') as stream:
             active = [r for r in csv.DictReader(stream) if int(r['active']) == 1]
@@ -254,7 +242,7 @@ def prepare_scan(checkpoints, expected_epochs=None, image_dir=None, label_dir=No
         if reference is not None and protocol != reference:
             raise ValueError(f'{name}的验证数据或推理协议与其他模型不同')
         reference = protocol
-        models[name] = dict(path=str(Path(path).resolve()), sha256=file_hash(path), epoch=checkpoint['epoch'])
+        models[name] = dict(path=str(Path(path).resolve()), sha256=sha256(path), epoch=checkpoint['epoch'])
         print(f"核查通过：{name}，epoch={checkpoint['epoch']}，val={len(scenes)}景", flush=True)
         del checkpoint
     return dict(protocol=reference, models=models, scenes=scenes)
@@ -364,7 +352,7 @@ def run_threshold_scan(checkpoints=SCAN_CHECKPOINTS, thresholds=SCAN_THRESHOLDS,
     protocol, scenes = metadata['protocol'], metadata['scenes']
     metadata.update(thresholds=thresholds, precision_targets=list(targets), recall_targets=list(recall_targets),
                     device=str(device), algorithm='fused_logit_histogram_v1',
-                    code_hash=file_hash(__file__), inference_code_hash=file_hash(
+                    code_hash=sha256(__file__), inference_code_hash=sha256(
                         Path(__file__).with_name('sliding_inference.py')))
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -375,7 +363,7 @@ def run_threshold_scan(checkpoints=SCAN_CHECKPOINTS, thresholds=SCAN_THRESHOLDS,
     else:
         if any(output_dir.iterdir()):
             raise ValueError('输出目录非空且缺少扫描协议，请换新目录')
-        write_json(manifest, metadata)
+        write_json(manifest, metadata, allow_nan=True)
     # sigmoid单调，比较logit与log(t/(1-t))等价，避免半精度概率舍入。
     edges = np.log(np.asarray(thresholds, np.float64) / (1 - np.asarray(thresholds, np.float64)))
     all_rows, scene_rows, denominators = [], [], {}
@@ -400,7 +388,7 @@ def run_threshold_scan(checkpoints=SCAN_CHECKPOINTS, thresholds=SCAN_THRESHOLDS,
                         raise ValueError(f'景缓存阈值不一致：{destination}')
             else:
                 if model is None:
-                    if file_hash(path) != metadata['models'][name]['sha256']:
+                    if sha256(path) != metadata['models'][name]['sha256']:
                         raise ValueError('检查点在扫描期间被修改')
                     checkpoint = torch.load(path, map_location='cpu', weights_only=True)
                     model = load_model(checkpoint).to(device).eval()
@@ -443,7 +431,7 @@ def run_threshold_scan(checkpoints=SCAN_CHECKPOINTS, thresholds=SCAN_THRESHOLDS,
             print(f"  {'复用' if reused else '完成'} {name} {number}/{len(scenes)}景：{row['scene_id']}", flush=True)
             write_json(output_dir / 'progress.json', dict(complete=False, model=name,
                 model_number=model_number, model_count=len(checkpoints), completed_scenes=number,
-                total_scenes=len(scenes), scene_id=row['scene_id'], invocation_seconds=perf_counter()-start))
+                total_scenes=len(scenes), scene_id=row['scene_id'], invocation_seconds=perf_counter()-start), allow_nan=True)
         for subset, counts in totals.items():
             if numbers[subset]:
                 for threshold, count in zip(thresholds, counts):
@@ -465,7 +453,7 @@ def run_threshold_scan(checkpoints=SCAN_CHECKPOINTS, thresholds=SCAN_THRESHOLDS,
             torch.cuda.empty_cache()
         save_scan_tables(output_dir, all_rows, scene_rows, targets, recall_targets)
     write_json(output_dir / 'progress.json', dict(complete=True, models=list(checkpoints),
-        total_scenes=len(scenes), invocation_seconds=perf_counter()-start))
+        total_scenes=len(scenes), invocation_seconds=perf_counter()-start), allow_nan=True)
     print(f'扫描完成：{output_dir}；阈值由val选取，泛化仍需独立测试集。', flush=True)
     return output_dir
 

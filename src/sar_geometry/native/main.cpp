@@ -27,7 +27,7 @@ int main(int argc,char** argv) {
         std::ios::sync_with_stdio(false);std::cin.tie(nullptr);
         if (argc!=2) throw std::runtime_error("usage: sar_geometry_core solve|visibility|version");
         std::string command=argv[1];
-        if (command=="version") {std::cout<<"sar_geometry_core 0.2 protocol=1 openmp\n";return 0;}
+        if (command=="version") {std::cout<<"sar_geometry_core 0.3 protocol=1 openmp\n";return 0;}
         if constexpr (std::endian::native!=std::endian::little) throw std::runtime_error("little endian host required");
 #ifdef _WIN32
         _setmode(_fileno(stdin),_O_BINARY);_setmode(_fileno(stdout),_O_BINARY);

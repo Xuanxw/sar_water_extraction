@@ -114,6 +114,23 @@ class ImageProcessTests(unittest.TestCase):
                     broken=dict(first,complete=False);reference.write_text(json.dumps(broken),encoding='utf-8')
                     with self.assertRaisesRegex(ValueError,'尚未完整完成'):tools.process_stage('normalized')
 
+    def test_legacy_amplitude_product_cannot_be_normalized(self):
+        with TemporaryDirectory() as temp:
+            opts = self.options(Path(temp))
+            fixture.SceneDatasetTests().prepare(opts['OUTPUT_DIR'])
+            old = opts['FILTERED_ROOT']
+            old.mkdir(parents=True)
+            receipt = old/'preprocessing.json'
+            before = json.dumps(dict(complete=True, stage='filtered', output_domain='amplitude'))
+            receipt.write_text(before, encoding='utf-8')
+            with patch.multiple(tools, **opts):
+                with self.assertRaisesRegex(ValueError, '上游'):
+                    tools.process_stage('normalized')
+                with self.assertRaisesRegex(ValueError, '独立输出目录'):
+                    tools.process_stage('filtered')
+            self.assertEqual(receipt.read_text(encoding='utf-8'), before)
+            self.assertFalse(opts['NORMALIZED_ROOT'].exists())
+
     def options(self, root):
         return dict(OUTPUT_DIR=root/'raw',CALIBRATED_ROOT=root/'processed/calibrated',
                     FILTERED_ROOT=root/'processed/filtered',NORMALIZED_ROOT=root/'processed/normalized',
@@ -128,6 +145,8 @@ class ImageProcessTests(unittest.TestCase):
         shutil.copyfile(source,output)
 
     def test_offline_values_resume_preview_and_training_evaluation(self):
+        from supervised import train
+        train.configure(Path(__file__).resolve().parents[1] / "configs/train.yaml")
         torch.set_num_threads(2)
         with TemporaryDirectory() as temp:
             root=Path(temp); opts=self.options(root)
@@ -141,6 +160,8 @@ class ImageProcessTests(unittest.TestCase):
                     self.assertEqual(hashlib.sha256(cached.read_bytes()).digest(),hashlib.sha256(result.read_bytes()).digest())
                 record=tools.process_stage('normalized')
                 self.assertTrue(record['complete'])
+                self.assertEqual(record['bc_org_domain'], 'intensity')
+                self.assertEqual(record['upstream']['filter']['input_domain'], 'intensity')
                 self.assertLess(record['mean'][0],3)  # val=1000不参与统计。
                 for split in ('train','val'):
                     with rasterio.open(opts['NORMALIZED_ROOT']/'images'/split/(split+'.tif')) as f:
@@ -159,7 +180,7 @@ class ImageProcessTests(unittest.TestCase):
                 normal=opts['NORMALIZED_ROOT']
                 kwargs=dict(model_class=lambda **kw:fixture.TinySceneNet(),model_kwargs={"num_classes":1},model_info=dict(model_name='tiny'),
                     image_dir=normal/'images',label_dir=normal/'labels',output_dir=root/'runs',
-                    bands=(1,),batch_size=2,epochs=1,loss_name='bce',require_normalized=True,require_preprocessed=True,
+                    bands=(1,),batch_size=2,epochs=1,loss_name='bce',require_normalized=True,require_preprocessed=True,require_bc_power=True,
                     scene_options=dict(cache_dir=root/'windows',window_size=32,halo=8,num_workers=0,windows_per_epoch=2))
                 trainer=WaterSegmentationTrainer(**kwargs)
                 trainer.train();trainer.dataset.close()
@@ -262,7 +283,7 @@ class ImageProcessTests(unittest.TestCase):
     def test_fast_normalization_matches_old_block_formula_exactly(self):
         with TemporaryDirectory() as temp:
             root=Path(temp);source=root/'input.tif'
-            values=np.random.default_rng(42).normal(15,7,(2,513,777)).astype('float32')
+            values=np.random.default_rng(42).gamma(4, 4, (2,513,777)).astype('float32')
             values[0,0,0]=0.;values[1,12,19]=np.nan;values[0,512,776]=np.inf
             transform=rasterio.transform.from_origin(100,200,3,3)
             with rasterio.open(source,'w',driver='GTiff',count=2,width=777,height=513,dtype='float32',nodata=np.nan,crs='EPSG:32650',transform=transform) as dst:

@@ -15,9 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from configuration import load_yaml, config_argument
 from thres_segmentation.org_pipeline import SceneProgress, statistics, segment
 from thres_segmentation.product_layout import scene_product
-from thres_segmentation.org_io import read_aoi, prepare_auxiliary, export_water_polygon, windows, write_json
+from thres_segmentation.org_io import read_aoi, prepare_auxiliary, export_water_polygon
+from utils.files import write_json
+from utils.raster import windows
 from thres_segmentation.run_log import RunLog
-
 
 
 def write_csv(path, rows):
@@ -110,7 +111,7 @@ def main(config_path):
     log = RunLog(output, experiment['console_color'])
     with log.capture(), log.stage('00', '历史水体阈值对照'):
         output.mkdir(parents=True, exist_ok=True); cache.mkdir(parents=True, exist_ok=True)
-        write_json(output / 'experiment.json', options)
+        write_json(output / 'experiment.json', options, default=str)
         with log.stage('01', '复用行政区及辅助数据'):
             aoi, crs = read_aoi(config['paths']['AOI_PATH'], config['org']['output_crs'])
             auxiliary = prepare_auxiliary(config, aoi, crs)
@@ -133,12 +134,12 @@ def main(config_path):
                     stats = json.loads(stats_file.read_text(encoding='utf-8'))
                 else:
                     stats = statistics(filtered, scene_aoi, config, common_cache, percentiles)
-                    write_json(stats_file, stats)
+                    write_json(stats_file, stats, default=str)
             masks = []
             for percentile in percentiles:
                 name = f'history_{percentile:g}'
                 folder = output / name / date / sid;folder.mkdir(parents=True, exist_ok=True)
-                if scene_product(original,'metadata.json').exists():write_json(folder/'metadata.json',json.loads(scene_product(original,'metadata.json').read_text(encoding='utf-8')))
+                if scene_product(original,'metadata.json').exists():write_json(folder/'metadata.json',json.loads(scene_product(original,'metadata.json').read_text(encoding='utf-8')), default=str)
                 progress = SceneProgress(cache / name, sid, folder, paths['SNAP_CACHE_DIR'], experiment['resume'])
                 with log.stage('03', f'{name}分割/矢量/质量记录', sid) as step:
                     if progress.completed('complete') and (folder/'water_polygon.shp').exists():
@@ -151,7 +152,7 @@ def main(config_path):
                         trial_stats['history_percentile'] = percentile
                         write_json(folder / 'parameters.json', {'source_run': str(baseline / 'run.json'),
                                    'base_percentile': 10, 'history_percentile': percentile,
-                                   'postprocess': trial['org']['postprocess'], 'filtered_image': str(filtered)})
+                                   'postprocess': trial['org']['postprocess'], 'filtered_image': str(filtered)}, default=str)
                         products = segment(filtered, scene_aoi, auxiliary, trial, folder, trial_stats, save_context=False)
                         differences = compare_masks(folder / 'water.tif', scene_product(original,'water.tif'), config['processing']['block_size'])
                         if percentile == 15 and differences['different_pixels']:
@@ -168,7 +169,7 @@ def main(config_path):
                                    'sampling': {'source': str(original / 'review/review.gpkg'),
                                                 'predictions': 'fixed_points_predictions.csv', 'resampled': False},
                                    'notes': ['新增/减少像元相对于Q15实验基线，不是相对历史水体的洪水变化。',
-                                             '沿用原核验点；未生成新的风险图层，原风险面不代表本组已确认错误。']})
+                                             '沿用原核验点；未生成新的风险图层，原风险面不代表本组已确认错误。']}, default=str)
                         progress.mark('complete', products + list(folder.glob('water_polygon.*')) +
                                       [folder / 'quality.json', folder / 'fixed_points_predictions.csv', folder / 'parameters.json'])
                     q = json.loads((folder / 'quality.json').read_text(encoding='utf-8'))

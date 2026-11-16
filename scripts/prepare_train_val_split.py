@@ -41,13 +41,9 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def file_hash(path):
-    """文件字节哈希用于搬迁完整性；它与解码后的内容哈希用途不同。"""
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from utils.files import sha256
 
 
 def array_hash(data, mask):
@@ -76,7 +72,7 @@ def scan_samples(data_dir, scene_csv):
     warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
     for number, path in enumerate(paths, 1):
         label_path = labels / path.with_suffix(".png").name
-        label_file_sha = file_hash(label_path)
+        label_file_sha = sha256(label_path)
         with rasterio.open(path) as source:
             data = source.read(masked=True)
         with rasterio.open(label_path) as source:
@@ -111,7 +107,7 @@ def scan_samples(data_dir, scene_csv):
                          label_sha256=array_hash(label.data, np.ma.getmaskarray(label)),
                          all_bands_sha256=array_hash(data.data, np.ma.getmaskarray(data)),
                          auxiliary_sha256=aux_hash, dem3_unique=dem_unique[0], dem4_unique=dem_unique[1],
-                         image_file_sha256=file_hash(path), label_file_sha256=label_file_sha))
+                         image_file_sha256=sha256(path), label_file_sha256=label_file_sha))
         if number % 100 == 0:
             print(f"读取与哈希：{number}/{len(paths)}", flush=True)
     return rows
@@ -233,7 +229,7 @@ def move_split(manifest=MANIFEST, data_dir=DATA_DIR, restore=False):
     manifest, data_dir = Path(manifest).resolve(), Path(data_dir).resolve()
     rows = read_csv(manifest)
     installed_manifest = data_dir / "split_manifest.csv"
-    if installed_manifest.exists() and file_hash(installed_manifest) != file_hash(manifest):
+    if installed_manifest.exists() and sha256(installed_manifest) != sha256(manifest):
         raise ValueError("data 内已有不同划分清单，拒绝覆盖。")
     operations, unique_paths = [], set()
     group_sides, input_sides = defaultdict(set), defaultdict(set)
@@ -262,7 +258,7 @@ def move_split(manifest=MANIFEST, data_dir=DATA_DIR, restore=False):
             if source.exists() and destination.exists():
                 raise FileExistsError(f"源和目标同时存在，拒绝覆盖：{source} -> {destination}")
             existing = source if source.exists() else destination
-            if not existing.is_file() or file_hash(existing) != row[hash_key]:
+            if not existing.is_file() or sha256(existing) != row[hash_key]:
                 raise ValueError(f"文件缺失或哈希已变化：{existing}")
             operations.append((source, destination, row[hash_key]))
     if any(len(sides) > 1 for sides in list(group_sides.values()) + list(input_sides.values())):
@@ -281,7 +277,7 @@ def move_split(manifest=MANIFEST, data_dir=DATA_DIR, restore=False):
                 if destination.exists():
                     raise FileExistsError(destination)
                 source.rename(destination)
-                if file_hash(destination) != expected_sha:
+                if sha256(destination) != expected_sha:
                     raise IOError(f"搬迁后哈希不符，请根据日志恢复：{destination}")
                 writer.writerow(dict(source=str(source), destination=str(destination), sha256=expected_sha, status="verified"))
                 stream.flush()

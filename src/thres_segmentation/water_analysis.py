@@ -26,10 +26,7 @@ DEPTH_CLASSES = {0: "outside_target", 1: "estimated", 2: "missing_elevation",
                  7: "unknown_history", 255: "invalid_current"}
 
 
-def windows(source, size):
-    for row in range(0, source.height, size):
-        for col in range(0, source.width, size):
-            yield Window(col, row, min(size, source.width-col), min(size, source.height-row))
+from utils.raster import windows
 
 
 def pixel_areas(crs, transform, shape):

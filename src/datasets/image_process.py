@@ -1,4 +1,5 @@
 """整景SAR数据准备与检查：MODE选择首次导入、标签重建、清单检查、辐射统计或快视图。
+BC ORG 像元为未校正的线性功率（intensity）。
 不生成训练切片；滤波、归一化与阶段快视图均由本入口按MODE执行。
 """
 from collections import Counter
@@ -109,6 +110,8 @@ def configure(config_path):
     ENABLE_CALIBRATION = CONFIG["processing"]["ENABLE_CALIBRATION"]
     ENABLE_FILTER = CONFIG["processing"]["ENABLE_FILTER"]
     INPUT_DOMAIN = CONFIG["processing"]["INPUT_DOMAIN"]
+    if INPUT_DOMAIN != 'intensity':
+        raise ValueError('BC ORG 为线性功率，请在当前 YAML 设置 processing.INPUT_DOMAIN: intensity。')
     FILTER_WINDOW = CONFIG["processing"]["FILTER_WINDOW"]
     ENL = CONFIG["processing"]["ENL"]
     FILTER_INPUT_STAGE = CONFIG["processing"]["FILTER_INPUT_STAGE"]
@@ -302,6 +305,7 @@ def prepare_scene(row, image_file, label_file, output, cache_root, *, bands, rea
             label_dst.write_colormap(1, {0: (255,255,255,255), 1: (0,0,0,255), 255: (128,128,128,0)})
             label_dst.update_tags(class_0='non_water', class_1='water', class_255='invalid_or_unknown')
             for channel, band in enumerate(bands, 1):
+                image_dst.set_band_unit(channel, 'intensity')
                 image_dst.set_band_description(channel, source.descriptions[band-1] or f"source_band_{band}")
             for top in range(0, source.height, read_window_size):
                 for left in range(0, source.width, read_window_size):
@@ -315,6 +319,8 @@ def prepare_scene(row, image_file, label_file, output, cache_root, *, bands, rea
                     if mask_source:
                         coverage = mask_source.read(1, window=window, masked=True)
                         valid &= ~np.ma.getmaskarray(coverage) & (coverage.data == 1)
+                    if np.any(data.data[:, valid] < 0):
+                        raise ValueError(f'有效线性功率出现负值，请核对 NoData 或输入单位：{image_file}')
                     selected = tree.query(box(*bounds(window, source.transform)))
                     masks = []
                     for category in (0, 1):
@@ -735,7 +741,7 @@ def audit(root=None, output_dir=None):
             print(f'读取异常：{r["scene_id"]}：{e}',flush=True)
         rows.append(row)
         if i%25==0 or i==len(scenes):
-            print(f'幅度分布审查：{i}/{len(scenes)}',flush=True)
+            print(f'功率分布审查：{i}/{len(scenes)}',flush=True)
             save_csv(output/'scene_statistics.partial.csv',rows)
     train=[r for r in rows if r['split']=='train' and r['status']=='ok']
     for row in rows:
@@ -788,7 +794,7 @@ def display_bytes(values, valid, low, high):
 
 
 def read_overview(src):
-    """分块平均幅度生成概览；忽略无效/非有限值，合法0参与平均，边缘保留。"""
+    """分块平均线性功率生成概览；忽略无效/非有限值，合法0参与平均，边缘保留。"""
     looks = max(QUICKLOOK_LOOKS, (max(src.width, src.height) + QUICKLOOK_MAX_SIDE - 1) // QUICKLOOK_MAX_SIDE)
     height = (src.height + looks - 1) // looks
     width = (src.width + looks - 1) // looks
@@ -872,13 +878,16 @@ def write_normalized_scene(source, pending, bands, mean, std):
                         timings['read_seconds']+=time.perf_counter()-started
                         started=time.perf_counter()
                         valid=~np.ma.getmaskarray(raw).any(axis=0)&np.isfinite(raw.data).all(axis=0)
+                        if np.any(raw.data[:, valid] < 0):
+                            raise ValueError(f'标准化前的有效线性功率出现负值：{source}')
                         values=(raw.data-mean)/std
                         values=np.where(valid[None],values,np.nan).astype('float32')
                         timings['calculate_seconds']+=time.perf_counter()-started
                         started=time.perf_counter()
                         dst.write(values,window=win)
                         timings['write_compress_seconds']+=time.perf_counter()-started
-                dst.update_tags(input_stage='normalized', statistics='train_only', source=str(source))
+                dst.update_tags(input_stage='normalized', input_domain='intensity', output_domain='standardized',
+                                statistics='train_only', source=str(source))
                 started=time.perf_counter()
             # 多线程压缩剩余任务在关闭文件时完成，也计入写入时间。
             timings['write_compress_seconds']+=time.perf_counter()-started
@@ -942,6 +951,12 @@ def process_stage(stage):
     rows = [r for r in all_rows if int(r['active']) == 1]
     source_bands = BANDS if source_root == OUTPUT_DIR else tuple(range(1,len(BANDS)+1))
     parent = stage_record(source_root)
+    # prepared_scenes 保存原始 DN，可直接复用；离线衍生阶段须来自功率处理链。
+    if source_root != OUTPUT_DIR and (parent.get('bc_org_domain'), parent.get('output_domain')) != ('intensity', 'intensity'):
+        raise ValueError(f'上游未记录 BC ORG 功率来源，请从 prepared_scenes 重做预处理：{source_root}')
+    previous = stage_record(target)
+    if previous and previous.get('bc_org_domain') != 'intensity':
+        raise ValueError(f'目录中已有旧处理结果，请给功率结果指定独立输出目录：{target}')
     label_stamps = [file_stamp(OUTPUT_DIR/'labels'/r['split']/r['label_name']) for r in rows]
     label_fingerprint = hashlib.sha256(json.dumps(label_stamps,sort_keys=True).encode()).hexdigest()
     if source_root != OUTPUT_DIR and parent.get('source_label_fingerprint') != label_fingerprint:
@@ -958,14 +973,14 @@ def process_stage(stage):
             raise ValueError('辐射校正尚未配置：需厂商系数/LUT或已校正成果，明确CALIBRATION_QUANTITY和CALIBRATION_REFERENCE；幅度平方不是辐射校正')
         if CALIBRATION_COMMAND is None and CALIBRATION_PRODUCTS_DIR is None:
             raise ValueError('请配置CALIBRATION_COMMAND参数列表，或CALIBRATION_PRODUCTS_DIR已有校正成果')
-        if CALIBRATION_OUTPUT_DOMAIN not in ('amplitude', 'intensity'):
-            raise ValueError('校正输出域需明确为amplitude或intensity')
+        if CALIBRATION_OUTPUT_DOMAIN != 'intensity':
+            raise ValueError('BC 训练链要求校正产品同样使用线性功率 intensity')
         domain, quantity = CALIBRATION_OUTPUT_DOMAIN, CALIBRATION_QUANTITY
     if stage == 'filtered':
         snap_preprocess.configure_paths(SNAP_GPT_PATH, SNAP_CACHE_DIR, SNAP_WORK_DIR,
                                         threads=SNAP_THREADS, tile_cache=SNAP_TILE_CACHE)
         filtering = SpeckleFilter(dict(method='snap_lee', input_domain=domain, window_size=FILTER_WINDOW, enl=ENL))
-    parameters = dict(stage=stage, bands=list(BANDS), input_domain=parent.get('output_domain', INPUT_DOMAIN),
+    parameters = dict(stage=stage, bc_org_domain='intensity', bands=list(BANDS), input_domain=parent.get('output_domain', INPUT_DOMAIN),
                       output_domain='standardized' if stage == 'normalized' else domain, quantity=quantity,
                       source_root=str(source_root), source_manifest_sha256=manifest_fingerprint(manifest),
                       filter=filtering.config if filtering else None,
@@ -980,6 +995,8 @@ def process_stage(stage):
             if not reference.get('complete') or reference.get('stage') != 'normalized' or (reference_path.parent/'.preprocessing_incomplete').exists():
                 raise ValueError('参考归一化阶段尚未完整完成')
             # 仅复用已完成训练统计；不同滤波/物理量不能混用同一标准化尺度。
+            if reference.get('bc_org_domain') != 'intensity':
+                raise ValueError('归一化参考必须来自 BC ORG 功率处理链，请重新计算 train 统计')
             keys = ('stage','bands','input_domain','output_domain','quantity','filter','calibration_reference')
             reference_parent = reference.get('upstream',{})
             if any(reference_parent.get(k) != parent.get(k) for k in keys) or reference.get('bands') != list(BANDS):
@@ -1112,9 +1129,9 @@ def export_scene(path):
                                 for stage in ('calibrated','filtered','normalized')]]
     available = []
     for stage, candidate, record in sources:
-        ready = stage == 'org' or (record.get('complete') and not (stage_root(stage)/'.preprocessing_incomplete').exists())
+        ready = stage == 'org' or (record.get('bc_org_domain') == 'intensity' and record.get('complete') and not (stage_root(stage)/'.preprocessing_incomplete').exists())
         available.append(candidate.exists() and ready)
-    signature = dict(version=5, looks=QUICKLOOK_LOOKS, max_side=QUICKLOOK_MAX_SIDE,
+    signature = dict(version=6, bc_org_domain=INPUT_DOMAIN, looks=QUICKLOOK_LOOKS, max_side=QUICKLOOK_MAX_SIDE,
                      band=BAND, z_range=list(Z_DISPLAY_RANGE), db_range=list(QUICKLOOK_BACKSCATTER_DB_RANGE),
                      sources=[dict(stage=stage, files=file_stamp(candidate) if ok else [], record=record)
                               for (stage,candidate,record),ok in zip(sources,available)])
@@ -1136,12 +1153,12 @@ def export_scene(path):
             display = f'fixed z range {Z_DISPLAY_RANGE}'
         elif record.get('quantity') in ('sigma0','beta0','gamma0'):
             positive = valid & (values > 0)
-            db = (20 if record['output_domain']=='amplitude' else 10) * np.log10(np.maximum(values,1e-30))
+            db = 10 * np.log10(np.maximum(values,1e-30))
             gray = display_bytes(db, positive, *QUICKLOOK_BACKSCATTER_DB_RANGE)
             display = f'{record["quantity"]}; fixed dB {QUICKLOOK_BACKSCATTER_DB_RANGE}; zero black'
         else:
             gray = np.where(valid,np.clip(values,0,255),0).astype('uint8')
-            display = 'amplitude mean; direct gray [0,255], no stretch'
+            display = 'linear power mean (DN); direct gray [0,255], no stretch'
         panels.append((gray,display))
     shape = panels[0][0].shape
     col,row_height = max(shape[1],620), shape[0]+72

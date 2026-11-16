@@ -10,7 +10,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from configuration import config_argument
 from sar_geometry.main import load_config
 from sar_geometry.scene_validation import compare_scene,warped_array
-from sar_geometry.terrain_io import sha256,write_json
+from utils.files import sha256, write_json
 from thres_segmentation.terrain_geometry import generate_terrain_mask
 
 OUTPUT_DIR=Path(r'E:\Code_projects\sar_water_extraction\codex_analysis\sar_geometry\gui_direction_corrected_025242')

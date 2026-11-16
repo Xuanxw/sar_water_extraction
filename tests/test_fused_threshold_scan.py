@@ -55,7 +55,7 @@ class ScanTests(unittest.TestCase):
             ckpt = dict(model_state_dict=model.state_dict(), data_layout='full_scene',
                 image_dir=str(root/'images'), label_dir=str(root/'labels'), bands=(1,),
                 window_size=32, window_halo=8, val_scene_files=['val.tif', 'second.tif'], val_files=['saved_window'],
-                split_manifest_sha256=scan.file_hash(manifest), mean=torch.tensor([0.]), std=torch.tensor([1.]),
+                split_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(), mean=torch.tensor([0.]), std=torch.tensor([1.]),
                 batch_size=2, epoch=6, validation_inference=dict(stride=8, blend='hann', num_workers=0))
             checkpoints = {}
             for name, epoch in (('six',6), ('seven',7), ('bn',7)):

@@ -220,7 +220,7 @@ class WaterSegmentationTrainer:
         sampling="random", hard_warmup_epochs=2, hard_sample_ratio=0.5, hard_pool_ratio=0.25,
         low_water_pool_ratio=0.20, head_loss_weights=None, scene_options=None, class_weight_mode="none",
         resume_checkpoint=None, speckle=None, require_preprocessed=False, output_dir_is_final=False, require_normalized=False,
-        quality_options=None, validation_inference=None,
+        quality_options=None, validation_inference=None, require_bc_power=False,
     ):
         """准备固定划分、输入统计量、模型、优化器和实验目录。"""
         self.validation_inference = dict(validation_inference or {})
@@ -299,6 +299,14 @@ class WaterSegmentationTrainer:
             if workers:
                 self.loader_options.update(persistent_workers=True, prefetch_factor=2)
             manifests = options.pop('manifest_paths', None)
+            if require_bc_power:
+                # 在建立窗口索引前核查每个清单，避免用旧幅度统计启动功率实验。
+                for manifest in manifests or [self.image_dir.parent/'split_manifest.csv']:
+                    receipt = Path(manifest).parent/'preprocessing.json'
+                    record = json.loads(receipt.read_text(encoding='utf-8')) if receipt.is_file() else {}
+                    if (record.get('bc_org_domain'), record.get('input_domain'), record.get('output_domain'),
+                        record.get('stage'), record.get('complete')) != ('intensity','intensity','standardized','normalized',True):
+                        raise ValueError(f'BC训练需要已完成的功率域标准化数据，请用新版image_process.py生成：{receipt}')
             if manifests is not None:
                 data_root = merge_scene_manifests(manifests, bands=bands, seed=seed, speckle=self.speckle,
                                                   require_prepared=require_preprocessed, **options)
@@ -1224,6 +1232,7 @@ def create_trainer(method=None):
         resume_checkpoint=RESUME_CHECKPOINT,
         require_preprocessed=DATA_LAYOUT == "full_scene",
         require_normalized=DATA_LAYOUT == "full_scene",
+        require_bc_power=DATA_LAYOUT == "full_scene",
         output_dir_is_final=OUTPUT_DIR is not None,
         quality_options=VALIDATION_QUALITY_OPTIONS,
         validation_inference=CONFIG.get('validation_inference') if DATA_LAYOUT == 'full_scene' else None,

@@ -6,13 +6,13 @@ paths:
   # 数据搬迁后只修改本项；其余相对路径以此目录为基准。
   DATA_ROOT: I:\水体数据
   RESUME_CHECKPOINT: null
-  IMAGE_DIR: processed_scenes\normalized\images
-  LABEL_DIR: processed_scenes\normalized\labels
+  IMAGE_DIR: processed_power\normalized\images
+  LABEL_DIR: processed_power\normalized\labels
   # 多个目录依次添加；只有处理协议和归一化统计一致时才能合并。
   MANIFEST_PATHS:
-  - processed_scenes\normalized\split_manifest.csv
+  - processed_power\normalized\split_manifest.csv
   OUTPUT_ROOT: E:\Code_projects\sar_water_extraction\outputs
-  OUTPUT_DIR: E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_full_train_bc_scenes_overlap
+  OUTPUT_DIR: E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_power_full_train_bc_scenes_overlap
   WINDOW_CACHE_DIR: E:\Code_projects\sar_water_extraction\data_cache\bc_scenes
 # 执行模式与批次/实验输出。
 run:

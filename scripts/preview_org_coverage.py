@@ -21,7 +21,8 @@ import matplotlib
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from configuration import load_yaml, config_argument
-from thres_segmentation.org_io import read_aoi, signature
+from thres_segmentation.org_io import read_aoi
+from utils.files import signature
 from thres_segmentation.water_analysis import pixel_areas, area_sum
 
 # 执行设置：只导出指定景，不扫描并批量生成全部影像。

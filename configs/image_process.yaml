@@ -1,9 +1,9 @@
 # 本文件为唯一参数来源；修改后重新启动对应脚本。null表示关闭/未指定。
-# 每次一个MODE：prepare首次导入；labels重建标签；split检查划分；inspect抽查格式；radiometry统计幅度。
+# 每次一个MODE：prepare首次导入；labels重建标签；split检查划分；inspect抽查格式；radiometry统计功率。
 # calibrate/filter/normalize各执行单阶段；preprocess按开关串联校正、滤波、归一化。
 # preprocess不包括prepare/labels/检查/快视图；quicklook只读取已有成果。
 # all：prepare → 按开关预处理 → quicklook；不执行split/inspect/radiometry/labels。
-# 当前处理batch 2；批次输出独立，归一化复用batch 1训练统计。
+# 使用已准备的合批整景，功率滤波与标准化写入独立目录。
 
 # 相对数据路径以DATA_ROOT为基准；软件和仓库路径保留绝对路径。
 paths:
@@ -13,23 +13,23 @@ paths:
   IMAGE_ROOT: SAR影像_卫星环境应用中心
   LABEL_ROOT: 水体提取结果_卫星环境应用中心
   # 当前整景数据根目录。
-  OUTPUT_DIR: prepared_scenes_bat2
+  OUTPUT_DIR: prepared_scenes
   # ZIP逐景展开，单景结束即清理临时影像。
-  CACHE_DIR: prepare_cache_bat2
+  CACHE_DIR: prepare_cache
   # 可选：DATA_ROOT下相对目录或绝对目录，文件名为完整景号.tif/.tiff，1有效、0无效。
   VALID_MASK_DIR: null
   # 例如：完整景号: {image: SAR影像目录/原始.zip, label: 标签目录/水体.shp}；相对DATA_ROOT。
   SOURCE_OVERRIDES: {}
   AUDIT_OUTPUT_ROOT: E:\Code_projects\sar_water_extraction\codex_analysis\radiometry_audit
-  QUICKLOOK_IMAGE_ROOT: prepared_scenes_bat2\images
-  CALIBRATED_ROOT: processed_scenes_bat2\calibrated
-  FILTERED_ROOT: processed_scenes_bat2\filtered
-  NORMALIZED_ROOT: processed_scenes_bat2\normalized
+  QUICKLOOK_IMAGE_ROOT: prepared_scenes\images
+  CALIBRATED_ROOT: processed_power\calibrated
+  FILTERED_ROOT: processed_power\filtered
+  NORMALIZED_ROOT: processed_power\normalized
   # null则由本批train重新统计；batch 2复用batch 1，保持多批输入尺度一致。
-  NORMALIZATION_REFERENCE: processed_scenes\normalized\preprocessing.json
+  NORMALIZATION_REFERENCE: null
   WINDOW_CACHE_DIR: E:\Code_projects\sar_water_extraction\data_cache\bc_scenes
   SNAP_GPT_PATH: D:\SNAP\esa-snap\bin\gpt.exe
-  SNAP_CACHE_DIR: snap_lee_cache_bat2
+  SNAP_CACHE_DIR: snap_lee_cache_power
   # SSD临时工作区；I盘缓存保持原位置。
   SNAP_WORK_DIR: E:\Code_projects\sar_water_extraction\data_cache\snap_work_bat2
   NORMALIZE_WORK_DIR: E:\Code_projects\sar_water_extraction\data_cache\normalize_work_bat2
@@ -39,7 +39,7 @@ paths:
 # 执行模式与批次/实验输出。
 run:
   # all/prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook
-  MODE: all
+  MODE: preprocess
   # 从总表选择批次；null读取全部，切换批次时同步修改输出路径。
   PREPARE_BATCH: null
 
@@ -82,7 +82,7 @@ inspection:
   Z_DISPLAY_RANGE:
   - -1.0
   - 3.0
-  # 显示时按8×8有效幅度取均值；不是功率域物理多视。
+  # 显示时按8×8有效功率取均值；不是功率域物理多视。
   QUICKLOOK_LOOKS: 8
   # 单面板最长边；大景自动增大平均窗口。
   QUICKLOOK_MAX_SIDE: 1600
@@ -112,8 +112,8 @@ processing:
   # 未取得BC校正系数/厂商流程，保持关闭。
   ENABLE_CALIBRATION: false
   ENABLE_FILTER: true
-  # 原始ORG已确认为幅度。
-  INPUT_DOMAIN: amplitude
+  # 原始ORG已确认为功率。
+  INPUT_DOMAIN: intensity
   FILTER_WINDOW: 3
   ENL: 1.0
   # org/calibrated；需与其数据域匹配。

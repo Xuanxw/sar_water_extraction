@@ -34,7 +34,34 @@ python src/thres_segmentation/main.py configs/threshold_segmentation.yaml
 
 `offline_normalized`要求输入已有完整离线预处理记录：ORG幅度平方→SNAP Lee功率域滤波→恢复幅度→统一训练统计z-score。本入口不再滤波、标准化或调用SNAP；负z-score及合法0保留。预处理需先单独运行image_process，已经完成则无需重复。
 
-`water_percent: 10`是整景暗值侧第10百分位，不是Otsu、概率0.1或精度目标。`mode: bottom`取暗侧，`top`取亮侧。分块只限制内存，不逐块计算不同阈值。精确百分位使用临时磁盘缓冲，所需空间与有效像元数有关。
+`threshold.method`选择`otsu`或`percentile`；旧配置未指定时继续使用百分位，保持已有实验可复现。`mode: bottom`取暗侧，`top`取亮侧。分块只限制内存，整景共用一个阈值。精确百分位使用临时磁盘缓冲，所需空间与有效像元数有关。
+
+### Otsu优先、百分位回退
+
+当前密云功率ORG的独立配置为`configs/北京密云区/threshold_segmentation_profiles_otsu_power_log_20261116.yaml`（旧20261113配置保留当时幅度假设，仅作历史对照）：
+
+```powershell
+python src/thres_segmentation/main.py configs/北京密云区/threshold_segmentation_profiles_otsu_power_log_20261116.yaml
+```
+
+```yaml
+threshold:
+  method: otsu
+  water_percent: 30
+  mode: bottom
+  otsu_bins: 1024
+  otsu_min_separability: 0.5
+  otsu_min_class_fraction: 0.001
+  otsu_histogram_percentiles: null  # null保持原min/max；例如[0.1,99.9]限定统计范围。
+```
+
+默认linear模式在滤波后、行政区内的有效原输入域累计等宽直方图；当前密云功率配置使用log_intensity。两者均通过最大化类间方差选择阈值，不执行辐射校正。这里用NumPy累计直方图和计算方差，无新增依赖；算法定义可参见[scikit-image官方说明](https://scikit-image.org/docs/stable/api/skimage.filters.html#skimage.filters.threshold_otsu)。离线归一化整景入口则在已有z-score域计算，旧legacy入口在原有0～1决策域计算。
+
+以下情况回退为原百分位方法：常量影像、直方图无法形成两个非空类别、非有限候选阈值、类间方差/总方差小于0.5，或任一类别占比小于0.1%。后两项为可调统计判据，不能证明两类对应水体/非水体，也不能识别所有错误分割。没有有效SAR像元、文件读写失败、内存不足或配置错误时直接报错，不产生伪成果。
+
+`water_percent: 30`仅指定回退Q30，不限制Otsu必须提取30%的像元。密云新配置关闭历史放宽，保持SNAP Lee、现有剖面地形掩膜、土地覆盖及面清理参数；Otsu成功和回退均使用相同后处理。结果写入独立`thres_seg_profiles_otsu_20261113`目录，复用共享滤波和几何缓存，支持中断后续跑。修改算法参数时另设成果及阶段缓存目录，避免复用旧分类结果。
+
+日志输出每景实际方法、阈值和回退原因；ORG的`quality.json → extraction → statistics → threshold_selection`保存候选Otsu阈值、Q30阈值、可分性及两类占比。离线评价的`per_image.csv`也记录相应字段。Otsu成功时，敏感性面积使用候选阈值±一个直方图bin宽度；回退时使用Q30±原配置百分位差，`sensitivity_basis`区分两者。敏感性、面积变化和可分性均不是真值精度。
 
 BC整景没有内置土地覆盖波段，`landcover.enabled`必须关闭。`auxiliary`下载的历史水体/DSM当前用于面积变化和几何水深分析，并不自动修正分割。原始WorldCover水体类为80；下载器生成的二值历史mask使用1水体/0非水体，参考编码需要与输入一致。
 
@@ -98,3 +125,15 @@ ORG批处理保留原分割栅格`water.tif`，水体矢量仅输出清理后的
 `scripts/repair_gui_terrain.py`只转调正式入口，不再维护另一套处理算法；按日期合并仍单独运行。
 保持输入、辅助数据和配置一致即可复现同一处理结果；修改参数后需设置`resume: false`重新计算，
 不能把旧参数的已完成缓存当作新结果。
+
+`otsu_histogram_percentiles`只限制直方图范围：范围外样本计入首尾bin，不删除有效像元，不改写原始数值，最终阈值仍应用于完整有效影像。ORG和离线整景入口通过磁盘缓冲计算精确分位数；阈值及受限样本数写入threshold_selection。范围退化时按原规则回退百分位。
+
+### 功率ORG与对数功率Otsu
+
+当前密云ORG已由用户最终确认为线性功率。使用`org.filter.input_domain: intensity`，SNAP直接对功率执行Lee，不平方、不恢复开方。原始XML的Intensity与此口径一致；历史amplitude配置仅作为当时假设的记录，不能继续作为当前功率数据基线。
+
+`threshold.otsu_domain`支持`linear`、`log_amplitude`、`log_intensity`。功率使用`log_intensity`，即10log10(max(I,floor))；幅度使用`log_amplitude`，即20log10(max(A,floor))。估计后均还原到原输入单位分类，失败时直接回退原输入域百分位。仅适用于ORG明确的非负线性输入，不用于已标准化的z-score。合法0参与最低bin，`otsu_log_floor: 1.0e-6`是数值下限，不是NoData或辐射校正。
+
+对数等宽bin在原输入域不等宽；敏感性统计使用还原后的相邻边界。`otsu_bin_width`的单位随`otsu_domain`变化，报告同时保留`histogram_axis_min/max`、`otsu_threshold_axis`、`log_coefficient`和原输入域的`otsu_threshold`。既有`thresholds_amplitude`键名沿用，但列表数值始终处在原输入域；新记录的`input_domain/threshold_units`明确表示功率或幅度，不把功率值冒充幅度。
+
+单景诊断：`python scripts/inspect_otsu_outliers.py configs/北京密云区/otsu_power_domain_comparison.yaml`。它显式重建/复用所选景相同参数的功率Lee缓存，再比较两个域与三个范围；不输出生产SHP。整批处理独立配置为`configs/北京密云区/threshold_segmentation_profiles_otsu_power_log_20261116.yaml`。两者写入新目录，不覆盖历史实验；整批处理由用户手动启动。

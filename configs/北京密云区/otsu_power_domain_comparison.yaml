@@ -1,0 +1,16 @@
+paths:
+  BASELINE_OUTPUT_DIR: E:/InSAR/水体提取/北京密云区/outputs/thres_seg_profiles_q30_20261113
+  SOURCE_CACHE_DIR: E:/Code_projects/sar_water_extraction/codex_analysis/otsu_power_domain_20261116/source_cache
+  OUTPUT_DIR: E:/Code_projects/sar_water_extraction/codex_analysis/otsu_power_domain_20261116
+audit:
+  prepare_source: true  # 仅重建scene_ids所选景，复用冻结运行中的裁剪/Lee参数；完整阶段可续跑。
+  input_domain: intensity  # 用户最终确认：ORG为线性功率；直接Lee，不平方、不恢复开方。
+  otsu_domains: [linear, log_intensity]
+  otsu_log_floor: 1.0e-6
+  scene_ids: ['BC5-SM-ORG-VV-20250725T135519-002331-000048-00091B-01']
+  block_size: 1024
+  patch_size: 256
+  max_patches: 3
+  preview_size: 1600
+  # null重现旧Otsu；另外两组只收窄直方图范围，其他接受判据不变。
+  histogram_ranges: [null, [0.1, 99.9], [0.5, 99.5]]

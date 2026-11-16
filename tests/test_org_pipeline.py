@@ -98,12 +98,22 @@ class OrgProductionTests(unittest.TestCase):
                     self.assertEqual(layer.schema['geometry'],'Polygon')
                     self.assertTrue(all(shape(f['geometry']).is_valid for f in layer))
                 self.assertTrue((folder/'quicklook.png').exists())
+                self.assertTrue((folder/'presentation/water_overlay.png').is_file())
             # 修改显示设置不能导致已有水体产品重算。
             config['logging']['console_color']=False
             before={p:p.stat().st_mtime_ns for row in rows for p in Path(row['water_shp']).parent.rglob('*') if p.is_file()}
             with patch.object(pipeline,'crop_org',side_effect=AssertionError('crop repeated')),patch.object(pipeline,'segment',side_effect=AssertionError('segment repeated')):
                 pipeline.run_org_scenes(config)
             self.assertEqual(before,{p:p.stat().st_mtime_ns for p in before})
+            # 缺少新增展示图时只补图，既有栅格、矢量和诊断图保持不变。
+            presentation = Path(rows[0]['water_shp']).parent/'presentation/water_overlay.png'
+            presentation.unlink()
+            kept = {p: p.stat().st_mtime_ns for p in before if p != presentation}
+            with patch.object(pipeline,'crop_org',side_effect=AssertionError('crop repeated')), \
+                 patch.object(pipeline,'segment',side_effect=AssertionError('segment repeated')):
+                pipeline.run_org_scenes(config)
+            self.assertTrue(presentation.is_file())
+            self.assertEqual(kept, {p: p.stat().st_mtime_ns for p in kept})
             for row in rows:
                 Path(row['water_polygon_shp']).unlink()
             with patch.object(pipeline,'segment',side_effect=AssertionError('must not segment')):

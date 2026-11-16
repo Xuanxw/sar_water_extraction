@@ -1,0 +1,133 @@
+# 用户最终确认：ORG为线性功率。直接功率Lee，再做10log10(I)域Otsu。
+# 不对输入平方，不恢复开方，不进行辐射校正；与旧幅度假设结果分开存放。
+# 密云候选重处理：观测剖面替代局部地形硬排除，不采用15度坡度硬剔除。
+# 本轮先用全范围对数功率Otsu；范围收窄在单景对照中独立测试。
+# 独立Otsu成果及阶段缓存；SNAP、辅助数据和剖面几何缓存继续复用。
+# 这是零Doppler候选模型；水库岸线和临界阴影需人工核验，不宣称真值精度已通过。
+paths:
+  CACHE_DIR: E:/InSAR/水体提取/北京密云区/data_cache/threshold_profiles_otsu_power_log_20261116
+  AUXILIARY_CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\auxiliary
+  OUTPUT_ROOT: E:/InSAR/水体提取/北京密云区/outputs/thres_seg_profiles_otsu_power_log_20261116
+  OUTPUT_DIR: E:/InSAR/水体提取/北京密云区/outputs/thres_seg_profiles_otsu_power_log_20261116
+  ORG_ROOT: E:\InSAR\水体提取\北京密云区\ORG
+  AOI_PATH: E:\InSAR\水体提取\北京密云区\密云区行政划分.shp
+  LANDCOVER_PATH: null
+  ORG_HISTORY_PATH: null
+  GDALDEM_PATH: D:\Miniconda\envs\insar_env\Library\bin\gdaldem.exe
+  SNAP_GPT_PATH: D:\SNAP\esa-snap\bin\gpt.exe
+  SNAP_CACHE_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_snap
+  SNAP_WORK_DIR: E:\InSAR\水体提取\北京密云区\data_cache\threshold_snap_work
+  PROFILE_GEOMETRY_CACHE_DIR: E:/InSAR/水体提取/北京密云区/data_cache/geometry_profiles_20261113
+  GEOMETRY_CORE_PATH: E:/Code_projects/sar_water_extraction/build/sar_geometry/sar_geometry_core.exe
+  PROFILE_DEM_TILES:
+  - E:/InSAR/水体提取/北京密云区/data_cache/auxiliary/tiles/copernicus/Copernicus_DSM_COG_10_N40_00_E116_00_DEM.tif
+  - E:/InSAR/水体提取/北京密云区/data_cache/auxiliary/tiles/copernicus/Copernicus_DSM_COG_10_N40_00_E117_00_DEM.tif
+run:
+  mode: org_scenes
+input:
+  bands:
+    VV: 1
+threshold:
+  method: otsu  # otsu优先；percentile直接使用原百分位方法。
+  otsu_domain: log_intensity  # 10log10(max(I,floor))中估计Otsu，阈值还原为功率再分类。
+  otsu_log_floor: 1.0e-6  # 仅用于log数值稳定，合法0不删除；不是辐射校正或NoData设置。
+  water_percent: 30  # Otsu失败时的回退Q；不是Otsu自身的水体占比约束。
+  mode: bottom
+  otsu_bins: 1024  # 对数功率轴等宽，不做百分位显示拉伸。
+  otsu_histogram_percentiles: null  # 先单独测试域变换；范围收窄作为独立对照，不同时叠加。
+  otsu_min_separability: 0.5  # 类间方差/总方差不足时回退；不是精度指标。
+  otsu_min_class_fraction: 0.001  # 任一类少于0.1%时回退，避免由极少异常值决定阈值。
+processing:
+  block_size: 1024
+output:
+  preview_size: 1200
+quality_review:
+  enabled: true
+  points_per_stratum: 50
+  boundary_radius_px: 5
+  seed: 42
+  block_size: 1024
+  slope_threshold_deg: 15.0
+org:
+  filename_timezone: UTC
+  date_timezone: Asia/Shanghai
+  output_crs: EPSG:32650
+  crop_buffer_m: 150.0
+  input_nodata_value: null
+  normalization: none
+  resume: true
+  save_quicklook: true
+  archive_intermediates: true
+  filter:
+    method: snap_lee
+    input_domain: intensity
+    window_size: 7
+    enl: 1.0
+  snap_threads: 4
+  snap_tile_cache: 512M
+  sensitivity_delta_percent: 2.0
+  auxiliary:
+    download_missing: true
+    worldcover_year: 2021
+    buffer_m: 1000.0
+    max_tiles: 16
+    max_mosaic_pixels: 100000000
+    timeout: 60
+    retries: 3
+    landcover_resolution_m: 10.0
+    dem_resolution_m: 30.0
+    elevation_scale: 1.0
+  postprocess:
+    landcover_enabled: true
+    excluded_cover_classes:
+    - 50
+    terrain_enabled: true
+    terrain_method: radar_profiles
+    max_slope_deg: 15.0
+    history_enabled: false
+    history_relax_percent: 0.0  # 沿用20261112的Q30方案：关闭历史放宽分支。
+    history_water_values:
+    - 1
+    history_dry_values:
+    - 0
+    opening_radius_px: 0
+    closing_radius_px: 0
+  profile_geometry:
+    model:
+      radar_grid_confirmed: false
+      doppler_mode: zero
+      doppler_sign: null
+      height_datum: EGM2008
+      max_iterations: 40
+      tolerance_hz: 0.01
+      tolerance_pixels: 0.0001
+      max_step_seconds: 2.0
+    scene:
+      allow_unconfirmed_geometry: true
+      geometry_assumption_note: BC SM按零Doppler候选模型进行对照，时间原点取imageInformation；尚无独立GAMMA或控制点验证。
+      output_crs: EPSG:32650
+      resolution_m: 30
+      azimuth_step_m: 7.5
+      range_step_m: 7.5
+      support_buffer_m: 20000
+      height_bounds_m:
+      - -12000
+      - 10000
+      height_tolerance_m: 0.05
+      org_nodata: null
+      max_profile_points: 80000000
+    execution:
+      threads: 4
+      profile_batch_rows: 32
+      map_block_rows: 64
+      block_rows: 64
+      resume: true
+      time_budget_seconds: 180
+    geoid_url: /vsicurl/https://cdn.proj.org/us_nga_egm08_25.tif
+logging:
+  console_color: true
+polygon_output:
+  hole_max_pixels: 200
+  morph_kernel_size: 3
+  min_water_pixels: 200
+  smooth_iterations: 2

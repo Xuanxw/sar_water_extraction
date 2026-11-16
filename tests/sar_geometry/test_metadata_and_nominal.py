@@ -18,10 +18,10 @@ from pyproj import Transformer
 import yaml
 
 ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT/'src'))
-from sar_geometry.metadata import read_bc_metadata,make_model
-from sar_geometry.terrain_io import surface_block,run_nominal
+from sar_geometry.metadata import read_bc_metadata,build_bc_range_doppler_model
+from sar_geometry.terrain_io import read_dem_ecef_surface_block,run_range_doppler_lut
 from sar_geometry.main import main
-from sar_geometry.core import solve_points
+from sar_geometry.core import solve_range_doppler_points
 CORE=Path(os.environ.get('SAR_GEOMETRY_CORE',str(ROOT/'build/sar_geometry'/('sar_geometry_core.exe' if os.name=='nt' else 'sar_geometry_core'))))
 
 
@@ -65,11 +65,11 @@ class MetadataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             c=setup(Path(tmp));m=read_bc_metadata(c['paths']['XML_PATH']);settings=copy.deepcopy(c['model'])
             settings['radar_grid_confirmed']=False
-            with self.assertRaisesRegex(ValueError,'radar_grid_confirmed'):make_model(m,settings)
+            with self.assertRaisesRegex(ValueError,'radar_grid_confirmed'):build_bc_range_doppler_model(m,settings)
             settings['radar_grid_confirmed']=True;settings['doppler_mode']=None
-            with self.assertRaisesRegex(ValueError,'doppler_mode'):make_model(m,settings)
+            with self.assertRaisesRegex(ValueError,'doppler_mode'):build_bc_range_doppler_model(m,settings)
             settings['doppler_mode']='metadata';settings['doppler_sign']=None
-            with self.assertRaisesRegex(ValueError,'Doppler符号'):make_model(m,settings)
+            with self.assertRaisesRegex(ValueError,'Doppler符号'):build_bc_range_doppler_model(m,settings)
             c['paths']['XML_PATH'].write_text(xml_text('2017-01-01T00:00:00'),encoding='utf-8')
             with self.assertRaisesRegex(ValueError,'闰秒'):read_bc_metadata(c['paths']['XML_PATH'])
 
@@ -78,7 +78,7 @@ class MetadataTests(unittest.TestCase):
             c=setup(Path(tmp))
             with rasterio.open(c['paths']['DEM_PATH']) as src:
                 t=Transformer.from_crs(4979,4978,always_xy=True)
-                p,n=surface_block(src,Window(0,0,7,7),t)
+                p,n=read_dem_ecef_surface_block(src,Window(0,0,7,7),t)
             self.assertTrue(np.isnan(p[0,0]).all());self.assertTrue(np.isnan(n[0,3]).all())
             lat,lon=np.deg2rad(.0965),np.deg2rad(.0035)
             expected=[np.cos(lat)*np.cos(lon),np.cos(lat)*np.sin(lon),np.sin(lat)]
@@ -97,27 +97,27 @@ class NominalTests(unittest.TestCase):
                 self.assertEqual((dst.shape,dst.transform,dst.crs),(src.shape,src.transform,src.crs))
                 self.assertEqual(dst.count,2);self.assertTrue(np.isnan(dst.read()[:,0,0]).all())
             before={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (root/'result').glob('*.tif')}
-            with patch('sar_geometry.terrain_io.solve_points',side_effect=AssertionError('must reuse')):main(path)
+            with patch('sar_geometry.terrain_io.solve_range_doppler_points',side_effect=AssertionError('must reuse')):main(path)
             after={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (root/'result').glob('*.tif')}
             self.assertEqual(before,after)
 
     def test_interrupted_block_and_block_size_consistency(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp);c=setup(root,rows=2);metadata=read_bc_metadata(c['paths']['XML_PATH']);model=make_model(metadata,c['model'])
+            root=Path(tmp);c=setup(root,rows=2);metadata=read_bc_metadata(c['paths']['XML_PATH']);model=build_bc_range_doppler_model(metadata,c['model'])
             calls=0
             def interrupted(*args,**kwargs):
                 nonlocal calls
                 calls+=1
                 if calls==2:raise RuntimeError('simulated interruption')
-                return solve_points(*args,**kwargs)
-            with patch('sar_geometry.terrain_io.solve_points',side_effect=interrupted),self.assertRaisesRegex(RuntimeError,'simulated'):
-                run_nominal(c,metadata,model,lambda x:None)
+                return solve_range_doppler_points(*args,**kwargs)
+            with patch('sar_geometry.terrain_io.solve_range_doppler_points',side_effect=interrupted),self.assertRaisesRegex(RuntimeError,'simulated'):
+                run_range_doppler_lut(c,metadata,model,lambda x:None)
             self.assertFalse((root/'result/geometry_quality.json').exists())
             state=json.loads((root/'result/data_cache/progress.json').read_text())
             self.assertEqual(state['next_row'],2);self.assertFalse(state['complete'])
-            report=run_nominal(c,metadata,model,lambda x:None)
+            report=run_range_doppler_lut(c,metadata,model,lambda x:None)
             c['paths']['OUTPUT_DIR']=root/'other';c['execution']['block_rows']=7
-            second=run_nominal(c,metadata,model,lambda x:None)
+            second=run_range_doppler_lut(c,metadata,model,lambda x:None)
             self.assertEqual(report['counts'],second['counts'])
             for p in (root/'result').glob('*.tif'):
                 with rasterio.open(p) as a,rasterio.open(root/'other'/p.name) as b:
@@ -125,9 +125,9 @@ class NominalTests(unittest.TestCase):
 
     def test_no_silent_height_conversion(self):
         with tempfile.TemporaryDirectory() as tmp:
-            c=setup(Path(tmp));m=read_bc_metadata(c['paths']['XML_PATH']);model=make_model(m,c['model'])
+            c=setup(Path(tmp));m=read_bc_metadata(c['paths']['XML_PATH']);model=build_bc_range_doppler_model(m,c['model'])
             c['model']['height_datum']='EGM2008'
-            with self.assertRaisesRegex(ValueError,'椭球高'):run_nominal(c,m,model)
+            with self.assertRaisesRegex(ValueError,'椭球高'):run_range_doppler_lut(c,m,model)
 
 
 if __name__=='__main__':unittest.main()

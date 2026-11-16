@@ -12,9 +12,9 @@ import rasterio
 from rasterio.transform import from_origin
 
 ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT/'src'))
-from sar_geometry.core import classify_profiles, solve_points, orbit_states
-from sar_geometry.profiles import build_profiles, TO_GEODETIC
-from sar_geometry.scene import run_visibility, combine_masks
+from sar_geometry.core import compute_radar_shadow_layover_batch, solve_range_doppler_points, interpolate_hermite_orbit_states
+from sar_geometry.profiles import build_zero_doppler_terrain_profiles, TO_GEODETIC
+from sar_geometry.scene import run_zero_doppler_terrain_visibility, combine_shadow_layover_masks
 from sar_geometry.metadata import read_bc_metadata
 from test_geometry_core import straight_model, CORE
 from test_metadata_and_nominal import xml_text
@@ -27,32 +27,32 @@ class FlatTerrain:
 class ProfileGridTests(unittest.TestCase):
     def test_surface_observation_plane_and_roundtrip(self):
         model=straight_model();theta=np.linspace(.05,.08,200);times=np.array([0.,2.,4.])
-        masks,points,good,error=build_profiles(CORE,model,FlatTerrain(),times,theta,[-100,1000])
+        masks,points,good,error=build_zero_doppler_terrain_profiles(CORE,model,FlatTerrain(),times,theta,[-100,1000])
         self.assertTrue(good.all());self.assertLess(error,.05)
-        states=orbit_states(CORE,model['orbit'],times)
+        states=interpolate_hermite_orbit_states(CORE,model['orbit'],times)
         plane=np.sum((points-states[:,None,:3])*states[:,None,3:],axis=-1)
         np.testing.assert_allclose(plane,0,atol=1e-3)
         _,_,h=TO_GEODETIC.transform(points[...,0],points[...,1],points[...,2])
         np.testing.assert_allclose(h,100,atol=.05)
-        result=solve_points(CORE,model,points.reshape(-1,3))
+        result=solve_range_doppler_points(CORE,model,points.reshape(-1,3))
         np.testing.assert_allclose(result[:,2].reshape(3,200),np.broadcast_to(times[:,None],(3,200)),atol=1e-7)
         self.assertFalse(np.any(masks==1))
-        other,_,_,_=build_profiles(CORE,model,FlatTerrain(),times[1:],theta,[-100,1000])
+        other,_,_,_=build_zero_doppler_terrain_profiles(CORE,model,FlatTerrain(),times[1:],theta,[-100,1000])
         np.testing.assert_array_equal(other,masks[1:])
 
     def test_unknown_boundaries_threads_and_holes(self):
         p=np.array([[0,100,-.5,0],[1,110,-.4,1],[2,120,-.2,1],[3,130,-.3,1],[4,140,0,1],[5,150,.1,0]],float)
         batch=np.stack([p,p]);bounds=np.array([[-.25,115,145]]*2)
-        with patch.dict(os.environ,{'OMP_NUM_THREADS':'1'}):one=classify_profiles(CORE,batch,bounds)
-        with patch.dict(os.environ,{'OMP_NUM_THREADS':'4'}):many=classify_profiles(CORE,batch,bounds)
+        with patch.dict(os.environ,{'OMP_NUM_THREADS':'1'}):one=compute_radar_shadow_layover_batch(CORE,batch,bounds)
+        with patch.dict(os.environ,{'OMP_NUM_THREADS':'4'}):many=compute_radar_shadow_layover_batch(CORE,batch,bounds)
         np.testing.assert_array_equal(one,many)
         self.assertEqual(one[0,1,0],255);self.assertEqual(one[0,2,0],0)
         self.assertEqual(one[0,3,0],1);self.assertEqual(one[0,1,1],255)
-        batch[:,3,3]=0;hole=classify_profiles(CORE,batch,bounds)
+        batch[:,3,3]=0;hole=compute_radar_shadow_layover_batch(CORE,batch,bounds)
         self.assertTrue(np.all(hole[:,:,1]==255));self.assertEqual(hole[0,4,0],255)
 
     def test_union_keeps_unknown(self):
-        np.testing.assert_array_equal(combine_masks(np.array([0,255,1,255]),np.array([0,0,255,1])),[0,255,1,1])
+        np.testing.assert_array_equal(combine_shadow_layover_masks(np.array([0,255,1,255]),np.array([0,0,255,1])),[0,255,1,1])
 
 
 def scene_config(root):
@@ -73,7 +73,7 @@ def scene_config(root):
 
 class SceneTests(unittest.TestCase):
     def test_resume_and_chunk_equivalence(self):
-        from sar_geometry.profiles import build_profiles as real
+        from sar_geometry.profiles import build_zero_doppler_terrain_profiles as real
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);config=scene_config(root);meta=read_bc_metadata(config['paths']['XML_PATH']);calls=0
             def interrupt(*args,**kw):
@@ -81,20 +81,20 @@ class SceneTests(unittest.TestCase):
                 calls+=1
                 if calls==2:raise RuntimeError('test interruption')
                 return real(*args,**kw)
-            with patch('sar_geometry.scene.build_profiles',side_effect=interrupt),self.assertRaisesRegex(RuntimeError,'interruption'):
-                run_visibility(config,meta,lambda x:None)
+            with patch('sar_geometry.scene.build_zero_doppler_terrain_profiles',side_effect=interrupt),self.assertRaisesRegex(RuntimeError,'interruption'):
+                run_zero_doppler_terrain_visibility(config,meta,lambda x:None)
             state=json.loads((root/'out/data_cache/scene_progress.json').read_text())
             self.assertEqual(state['next_profile'],7);self.assertFalse(state['complete'])
-            run_visibility(config,meta,lambda x:None)
+            run_zero_doppler_terrain_visibility(config,meta,lambda x:None)
             other=copy.deepcopy(config);other['paths']['OUTPUT_DIR']=root/'other'
             other['execution'].update(profile_batch_rows=40,map_block_rows=40,threads=1)
-            run_visibility(other,meta,lambda x:None)
+            run_zero_doppler_terrain_visibility(other,meta,lambda x:None)
             for path in (root/'out').glob('*.tif'):
                 with rasterio.open(path) as a,rasterio.open(root/'other'/path.name) as b:
                     self.assertEqual((a.transform,a.crs,a.shape),(b.transform,b.crs,b.shape))
                     np.testing.assert_array_equal(a.read(),b.read())
-            with patch('sar_geometry.scene.build_profiles',side_effect=AssertionError('must reuse')):
-                report=run_visibility(config,meta,lambda x:None)
+            with patch('sar_geometry.scene.build_zero_doppler_terrain_profiles',side_effect=AssertionError('must reuse')):
+                report=run_zero_doppler_terrain_visibility(config,meta,lambda x:None)
             self.assertTrue(report['complete'])
 
 

@@ -13,6 +13,14 @@
 - 路径与用户可调参数集中在执行入口或YAML；库函数不硬编码盘符。简单脚本不默认增加argparse和大量验证框架。
 - 新的C++核心使用标准C++、RAII和标准容器，不依赖SPHERE插件或Qt界面。平台差异仅限独立I/O或构建层，明确Windows/Linux验证状态。
 
+## 算法代码写法
+
+- 参考MintPy科学计算脚本的可读性：顺序表达处理步骤，每行一个操作，避免分号连写和单行条件分支。
+- 算法函数名应明确数学模型及任务，例如`solve_range_doppler_points`、`build_zero_doppler_terrain_profiles`、`compute_radar_shadow_layover`；避免`execute`、`classify_profile`等过于宽泛的算法接口名。
+- 参数、返回值和注释写清坐标系、单位、数组形状及未知值。通用文件函数保留常用名称，如`sha256`、`write_json`。
+- 通用文件和窗口工具直接从`utils.files`、`utils.raster`导入；不再经算法模块转导工具函数，不保留重复实现或旧名称兼容包装。
+- 只提取职责稳定、真正复用的工具，不把一两行专用算法再拆成大量小函数，也不为了分层增加继承。
+
 ## SAR科学计算
 
 - 区分幅度、功率、dB、标准化及辐射校正；记录单位、成像几何、坐标/时间原点、DEM高程基准和有效范围。

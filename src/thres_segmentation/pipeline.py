@@ -66,6 +66,15 @@ def save_figure(image, band_names, label, valid, predictions, rows, output_path,
     figure.tight_layout()
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=110, bbox_inches="tight")
+    figure.clear()
+    from utils.water_presentation import save_water_presentation
+    # 多方法分别输出，与诊断图使用完全相同的预测及影像有效范围。
+    for method, prediction in predictions.items():
+        method_name = str(method).replace('/', '_').replace(chr(92), '_')
+        target = Path(output_path).parent.parent/'presentation'/method_name/Path(output_path).name
+        save_water_presentation(np.where(image_valid, image[0], np.nan),
+                                np.where(image_valid, prediction, -1), target,
+                                f'{Path(output_path).stem} | {method}', str(band_names[0]))
 
 
 def run_segmentation(image_dir, label_dir=None, bands=None, output_dir=None,
@@ -130,17 +139,19 @@ def run_segmentation(image_dir, label_dir=None, bands=None, output_dir=None,
                     raise ValueError(f"{name}：标签与影像尺寸不一致")
                 valid = image_valid & ~np.ma.getmaskarray(truth) & np.isin(truth.data, (0, 1))
                 label = np.where(valid, truth.data, -1)
-            predictions, thresholds = {}, {}
+            predictions, thresholds, threshold_reports = {}, {}, {}
             # 2. 离线模式直接按z-score阈值预测；legacy保留旧滤波/逐图拉伸。
             for band_index, band_name in enumerate(bands):
                 method = f"threshold_{band_name}"
                 predictions[method], _, thresholds[method] = segmenter.predict(image[band_index], image_valid)
+                threshold_reports[method] = segmenter.threshold_report.copy()
             # 3.1 辅助修正：保留原始预测，内置土地覆盖补水作为独立_esa方法。
             if use_landcover:
                 cover, cover_valid = read_landcover(image_path, landcover_band)
                 for method, prediction in list(predictions.items()):
                     predictions[method + "_esa"] = merge_landcover(prediction, cover, cover_valid, image_valid)
                     thresholds[method + "_esa"] = thresholds[method]
+                    threshold_reports[method + "_esa"] = threshold_reports[method]
             # 3.2 水体分析：每种方法独立统计面积/变化/水深；外部参考默认只对比。
             # 不保存掩膜时使用临时栅格，避免分析功能受SAVE_MASKS影响。
             from tempfile import TemporaryDirectory
@@ -161,6 +172,7 @@ def run_segmentation(image_dir, label_dir=None, bands=None, output_dir=None,
             image_rows = {}
             for method, prediction in predictions.items():
                 row = dict(name=name, method=method, decision_threshold=thresholds[method])
+                row.update(threshold_reports[method])
                 if label is not None:
                     confusion = confusion_counts(label, prediction, valid)
                     counts[method] = counts.get(method, np.zeros(4, dtype=np.int64)) + confusion
