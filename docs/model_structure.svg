@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title">
+<title id="title">SAR segmentation: active PVT DeepLabv3+ baseline, U-Net skips and UAFNet refinement</title>
+<defs><marker id="tip" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#415364"/></marker></defs>
+<style>text{font-family:Arial,Helvetica,sans-serif;fill:#243645}.h{font-size:22px;font-weight:bold}.s{font-size:15px}.n{font-size:16px;font-weight:bold}</style>
+<rect width="1200" height="630" fill="white"/>
+<text x="24" y="35" text-anchor="start" class="h">A   PVT-v2-B2 with DeepLabv3+ decoder</text>
+<text x="24" y="60" text-anchor="start" class="s">BC baseline   /   Single-channel VV   /   Example input 512 × 512</text>
+<rect x="25" y="125" width="80" height="50" rx="3" fill="#f3f5f6" stroke="#627888"/>
+<text x="65" y="155" text-anchor="middle" class="n">VV</text>
+<path d="M105 150H140" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<rect x="150" y="103" width="54" height="83" fill="#9fbed4" stroke="#627888"/>
+<rect x="144" y="108" width="54" height="83" rx="3" fill="#deebf5" stroke="#627888"/>
+<text x="171" y="154.5" text-anchor="middle" class="n">C1</text>
+<text x="171" y="215" text-anchor="middle" class="s">128² × 64</text>
+<rect x="256" y="130" width="50" height="66" fill="#9fbed4" stroke="#627888"/>
+<rect x="250" y="135" width="50" height="66" rx="3" fill="#deebf5" stroke="#627888"/>
+<text x="275" y="173" text-anchor="middle" class="n">C2</text>
+<text x="275" y="225" text-anchor="middle" class="s">64² × 128</text>
+<rect x="360" y="152" width="46" height="58" fill="#9fbed4" stroke="#627888"/>
+<rect x="354" y="157" width="46" height="58" rx="3" fill="#deebf5" stroke="#627888"/>
+<text x="377" y="191" text-anchor="middle" class="n">C3</text>
+<text x="377" y="239" text-anchor="middle" class="s">32² × 320</text>
+<rect x="470" y="179" width="42" height="40" fill="#9fbed4" stroke="#627888"/>
+<rect x="464" y="184" width="42" height="40" rx="3" fill="#deebf5" stroke="#627888"/>
+<text x="485" y="209" text-anchor="middle" class="n">C4</text>
+<text x="485" y="248" text-anchor="middle" class="s">16² × 512</text>
+<path d="M204 148H247" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<path d="M306 167H351" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<path d="M406 192H461" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<path d="M512 204H554" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<rect x="557" y="178" width="160" height="52" rx="3" fill="#dbede3" stroke="#627888"/>
+<text x="637" y="209" text-anchor="middle" class="n">ASPP</text>
+<text x="638" y="258" text-anchor="middle" class="s">1×1 · atrous 3/6/9 · pool</text>
+<path d="M717 205H754V145H805" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<text x="756" y="228" text-anchor="middle" class="s">↑ to 128²</text>
+<path d="M172 101V82H742V119H805" fill="none" stroke="#415364" stroke-width="1.7" stroke-dasharray="5 3" marker-end="url(#tip)"/>
+<text x="525" y="105" text-anchor="middle" class="s">C1 skip · 1×1 projection to 48 channels</text>
+<rect x="808" y="102" width="150" height="60" rx="3" fill="#f8e8cf" stroke="#627888"/>
+<text x="883" y="137" text-anchor="middle" class="n">Concatenate</text>
+<path d="M958 130H986" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<rect x="989" y="104" width="179" height="54" rx="3" fill="#f8e8cf" stroke="#627888"/>
+<text x="1078.5" y="136" text-anchor="middle" class="n">2 × Conv 3×3</text>
+<path d="M1079 158V193" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<rect x="997" y="195" width="165" height="45" rx="3" fill="#e9e1f1" stroke="#627888"/>
+<text x="1079.5" y="222.5" text-anchor="middle" class="n">1×1 → 1 logit</text>
+<text x="1080" y="265" text-anchor="middle" class="s">↑ to 512² → sigmoid</text>
+<path d="M24 302H1176 M597 327V597" stroke="#c4ced4" fill="none"/>
+<text x="24" y="346" text-anchor="start" class="h">B   Plain U-Net</text>
+<text x="24" y="373" text-anchor="start" class="s">Symmetric decoding with four lateral skips</text>
+<rect x="36" y="403" width="37" height="26" rx="3" fill="#deebf5" stroke="#627888"/>
+<text x="54.5" y="421" text-anchor="middle" class="n">E1</text>
+<rect x="489" y="403" width="37" height="26" rx="3" fill="#f8e8cf" stroke="#627888"/>
+<text x="507.5" y="421" text-anchor="middle" class="n">D1</text>
+<path d="M73 416H486" fill="none" stroke="#415364" stroke-width="1.7" stroke-dasharray="5 3" marker-end="url(#tip)"/>
+<path d="M56 429L82 449" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<path d="M478 451L493 431" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<rect x="83" y="440" width="37" height="26" rx="3" fill="#deebf5" stroke="#627888"/>
+<text x="101.5" y="458" text-anchor="middle" class="n">E2</text>
+<rect x="442" y="440" width="37" height="26" rx="3" fill="#f8e8cf" stroke="#627888"/>
+<text x="460.5" y="458" text-anchor="middle" class="n">D2</text>
+<path d="M120 453H439" fill="none" stroke="#415364" stroke-width="1.7" stroke-dasharray="5 3" marker-end="url(#tip)"/>
+<path d="M103 466L129 486" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<path d="M431 488L446 468" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<rect x="130" y="477" width="37" height="26" rx="3" fill="#deebf5" stroke="#627888"/>
+<text x="148.5" y="495" text-anchor="middle" class="n">E3</text>
+<rect x="395" y="477" width="37" height="26" rx="3" fill="#f8e8cf" stroke="#627888"/>
+<text x="413.5" y="495" text-anchor="middle" class="n">D3</text>
+<path d="M167 490H392" fill="none" stroke="#415364" stroke-width="1.7" stroke-dasharray="5 3" marker-end="url(#tip)"/>
+<path d="M150 503L176 523" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<path d="M384 525L399 505" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<rect x="177" y="514" width="37" height="26" rx="3" fill="#deebf5" stroke="#627888"/>
+<text x="195.5" y="532" text-anchor="middle" class="n">E4</text>
+<rect x="348" y="514" width="37" height="26" rx="3" fill="#f8e8cf" stroke="#627888"/>
+<text x="366.5" y="532" text-anchor="middle" class="n">D4</text>
+<path d="M214 527H345" fill="none" stroke="#415364" stroke-width="1.7" stroke-dasharray="5 3" marker-end="url(#tip)"/>
+<rect x="234" y="553" width="105" height="35" rx="3" fill="#dbede3" stroke="#627888"/>
+<text x="286.5" y="575.5" text-anchor="middle" class="n">Center</text>
+<path d="M208 541L236 558" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<path d="M339 569L362 542" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<text x="24" y="615" text-anchor="start" class="s">E = encoder     D = decoder     Dashed arrows = skip connections</text>
+<text x="623" y="346" text-anchor="start" class="h">C   UAFNet</text>
+<text x="623" y="373" text-anchor="start" class="s">Four scales feed both coarse prediction and refinement</text>
+<rect x="625" y="403" width="163" height="45" rx="3" fill="#deebf5" stroke="#627888"/>
+<text x="706.5" y="430.5" text-anchor="middle" class="n">PVT / ResNet50</text>
+<path d="M788 425H816" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<rect x="819" y="403" width="126" height="45" rx="3" fill="#dbede3" stroke="#627888"/>
+<text x="882" y="430.5" text-anchor="middle" class="n">MBDC</text>
+<path d="M945 425H980" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<rect x="983" y="403" width="185" height="45" rx="3" fill="#dbede3" stroke="#627888"/>
+<text x="1075.5" y="430.5" text-anchor="middle" class="n">FPN + coarse head</text>
+<path d="M1080 448V495H987" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<path d="M877 448V472" fill="none" stroke="#415364" stroke-width="1.7" stroke-dasharray="5 3" marker-end="url(#tip)"/>
+<rect x="819" y="475" width="165" height="40" rx="3" fill="#f8e8cf" stroke="#627888"/>
+<text x="901.5" y="500" text-anchor="middle" class="n">3 × UAFM</text>
+<path d="M902 515V544" fill="none" stroke="#415364" stroke-width="1.7" marker-end="url(#tip)"/>
+<rect x="797" y="547" width="212" height="39" rx="3" fill="#e9e1f1" stroke="#627888"/>
+<text x="903" y="571.5" text-anchor="middle" class="n">Final water logit</text>
+<text x="623" y="615" text-anchor="start" class="s">Optional: coarse residual or high-resolution detail correction</text>
+</svg>

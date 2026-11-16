@@ -188,7 +188,7 @@ YAML 的 `paths.OUTPUT_DIR` 指定原位替换目录，`READ_WINDOW_SIZE` 控制
 
 | 参数组 | 主要变量 | 用途 |
 |---|---|---|
-| 模型选择 | `METHOD` | train.py只训练；后处理另运行post_process.py |
+| 模型选择 | `model.ARCHITECTURE`、`model.BACKBONE` | 分别选择分割结构与编码器，见[网络结构图与可用组合](docs/model_structure.md) |
 | 数据 | `IMAGE_DIR`、`LABEL_DIR`、`POLARIZATIONS`、`POLARIZATION_BANDS` | 数据路径、极化与文件波段映射 |
 | 斑点滤波 | `image_process.yaml` 的 `processing` 中的 `FILTER_INPUT_STAGE`、`FILTER_WINDOW`、`ENL` | 正式训练不调用SNAP，实际滤波在离线模式完成 |
 | 输出 | `OUTPUT_ROOT`、`OUTPUT_DIR`、`RESULT_FILES` | 最终实验目录及模型/指标/日志名称；运行只加时间戳，续跑沿用原目录 |
@@ -197,11 +197,11 @@ YAML 的 `paths.OUTPUT_DIR` 指定原位替换目录，`READ_WINDOW_SIZE` 控制
 | 优化 | `OPTIMIZER_NAME`、`WEIGHT_DECAY`、`COSINE_SCHEDULE`、`TRAIN_AUGMENTATION` | 单通道水体方法的优化与增强设置 |
 | 损失 | `LOSS_NAME`、`CLASS_WEIGHT_MODE`、`BCE_WEIGHT`、`DICE_WEIGHT` | 选择损失及BCE类别权重；后两项仅 BCE+Dice 使用 |
 | 采样 | `SAMPLING`、`HARD_WARMUP_EPOCHS`、`HARD_SAMPLE_RATIO`、`HARD_POOL_RATIO` | 随机/困难采样及比例 |
-| DeepLab | `DEEPLAB_*` | 编码器、解码宽度、ASPP空洞率、Dropout |
+| DeepLab | `DEEPLAB_*` | 解码宽度、ASPP空洞率、Dropout |
 | 其他网络 | `UAFNET_*`、`STAGE`、`HEAD_LOSS_WEIGHTS` 等 | 仅选中对应模型时生效 |
 | 训练质量输出 | `SAVE_VALIDATION_FIGURES`、`INTERVAL`、`MAX_SCENES`、`PREVIEW_MAX_SIDE` | 本轮val预测拼概览，图件标题使用原生像素计数 |
 
-默认 `METHOD="deeplabv3"` 使用 PVT-v2-B2 编码器、ASPP 和浅层跳连，单头 BCE，解码通道256、浅层投影48、空洞率 `(3,6,9)`。输入512×512时，深层16×16特征经过ASPP，与128×128浅层特征融合，最后恢复到512×512。它是输出步长32、普通卷积的 DeepLabv3+ 风格适配，不是原论文完整配置。
+默认组合为 `deeplabv3plus + pvt_v2_b2.in1k`，使用单头 BCE、256 通道 ASPP 和 48 通道浅层跳连。输入 512×512 时，深层 16×16 特征经 ASPP，与 128×128 浅层特征融合，最后恢复至输入尺寸。
 
 图像预处理统一通过 `src/datasets/image_process.py` 手动运行。正式训练读取
 `I:\水体数据\processed_power\normalized\images` 与 `labels`；不执行校正、滤波或标准化。
@@ -238,14 +238,7 @@ python src/supervised/train.py configs/train.yaml
 
 其他方法可这样选择：
 
-| `METHOD` | 模型 | `LOSS_NAME` | `SAMPLING` |
-|---|---|---|---|
-| `deeplabv3` | PVT + DeepLabv3+风格解码器 | `bce` / `bce_dice` | BCE可选困难采样；BCE+Dice用`random` |
-| `uafnet` | UAFNet风格水体网络，可配置嵌套细化等 | `bce` / `bce_dice` | 同上 |
-| `uanet` | 按`STAGE`选择模块的双类别网络 | `ce` | `random` |
-| `unet` | 普通U-Net | `ce` | `random` |
-| `pvt` | PVT + 简单解码头 | `ce` | `random` |
-| `resnet50` | ResNet50 + 相同简单解码头 | `ce` | `random` |
+单通道模型可选 BCE 或 BCE+Dice。困难采样要求 BCE；整景重叠融合验证使用 BCE 或 CE。普通 U-Net、双类别 UANet 及 PVT/ResNet50 的共享语义解码头使用 CE 和随机采样。完整组合与对应配置见[模型结构说明](docs/model_structure.md)。
 
 切换双类别模型时，同时调整损失和采样变量。`POLARIZATIONS=("VV",)` 可训练单VV模型，但不会从缺失数据中构造VH；单极化模型应重新训练或做明确的迁移实验。
 

@@ -71,9 +71,12 @@ class ResNetUAFNetTests(unittest.TestCase):
     def test_factory_changes_only_backbone_and_metadata(self):
         configs = []
         for backbone in ("pvt_v2_b2.in1k", "resnet50.tv_in1k"):
-            with patch.object(train, "UAFNET_BACKBONE", backbone), patch.object(train, "UAFNET_REFINEMENT_DECODER", "uafm"), patch.object(train, "UAFNET_HIGH_RESOLUTION_REFINEMENT", False), \
+            with patch.multiple(train, METHOD=None, ARCHITECTURE="uafnet", BACKBONE=backbone,
+                                UAFNET_REFINEMENT_DECODER="uafm", UAFNET_HIGH_RESOLUTION_REFINEMENT=False,
+                                OUTPUT_DIR=None, CLASS_WEIGHT_MODE="none", SAMPLING="hard",
+                                POLARIZATIONS=("VV", "VH"), POLARIZATION_BANDS={"VV": 1, "VH": 2}), \
                  patch.object(train, "WaterSegmentationTrainer") as factory:
-                train.create_trainer("uafnet")
+                train.create_trainer()
                 configs.append(factory.call_args.kwargs)
         before, after = configs
         for key in before:

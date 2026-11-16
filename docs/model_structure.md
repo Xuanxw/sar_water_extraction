@@ -1,116 +1,76 @@
-# 模型代码结构与函数索引
+# SAR 水体分割模型结构
 
-模型按骨干集中在少量脚本中。每种方法的初始化和前向放在自己的类里，公共组件只保留一份定义。
+当前 BC 基线使用 **PVT-v2-B2 编码器 + DeepLabv3+ 风格解码器**。输入是一幅离线归一化的单 VV 功率影像，网络为每个像元输出一个水体 logit。训练用 BCE，推理时经 sigmoid 得到水体概率。
 
-## 1. 当前目录
+![当前 DeepLabv3+ 基线、U-Net 的同尺度跳连和 UAFNet 的逐级细化](model_structure.svg)
 
-```text
-src/supervised/models/
-├─ unet.py        # UNet
-├─ pvt.py         # PVT 基线、PVT-UANet 及其特有模块
-├─ resnet.py      # ResNet50WaterNet
-├─ common.py      # 公共卷积、双卷积、FPN、语义解码头
-├─ checkpoint.py  # 按元信息重建并严格加载模型
-└─ __init__.py
+**图 1**　A 展示当前基线。以 512 × 512 输入为例，PVT 输出四级特征，图中尺寸写作“空间大小 × 通道数”。ASPP 取最深层 C4 提取上下文，上采样后与浅层 C1 拼接；C2、C3 参与编码，解码头直接读取 C1 和 C4。B 展示普通 U-Net 的四条同尺度跳连。C 展示 UAFNet 中粗预测与三级 UAFM 的连接。实际训练窗口由数据配置指定。
+
+## 训练入口支持哪些组合
+
+在 `configs/train.yaml` 的 `model` 下，`ARCHITECTURE` 选择完整分割结构，`BACKBONE` 选择编码器。表中 **B2–B5** 分别写作 `pvt_v2_b2.in1k` 到 `pvt_v2_b5.in1k`，**ResNet50** 写作 `resnet50.tv_in1k`。输出头数与每头通道数分开列出。
+
+| ARCHITECTURE | BACKBONE | 特征如何进入预测 | 输出头 × 每头通道 |
+|---|---|---|---|
+| `deeplabv3plus` | B2–B5 | C4 → 五支路 ASPP；C1 → 48 通道投影；拼接后经两次 3×3 卷积。默认 B2、ASPP 宽 256、空洞率 3/6/9 | 1 × 1 |
+| `semantic_fpn` | B2 或 ResNet50 | 四级特征分别投影至相同通道数，语义头将它们对齐、相加并分类。适合固定解码头比较编码器 | 1 × 2 |
+| `unet` | `plain_cnn` | 四次池化、卷积瓶颈、四次转置卷积上采样；每级拼接对应编码器特征 | 1 × 2 |
+| `sentinel1_water_unet` | `s1water_cnn` | Wagner 五级编码器与五条跳连，最近邻上采样，每级三层卷积 | 1 × 1 |
+| `unet` | `mobilenet_v2` | 复用 ai4g 结构对照中的 SMP U-Net，MobileNetV2 提取多尺度特征，解码器逐级上采样。可在统一入口选择，也保留原 DFC 实验脚本 | 1 × 1 |
+| `uanet` | B2 | 建筑分割结构的水体标签适配。由 `STAGE` 决定参与训练的模块，见下表 | 1 × 2 或 4 × 2 |
+| `uafnet` | B2–B5 或 ResNet50 | 各尺度经 MBDC，FPN 和语义头给出粗预测，三级 UAFM 逐步细化。可切换最终残差、分尺度空洞率、高分辨率修正 | 4 × 1 |
+| `uafnet` + `UAFNET_REFINEMENT_DECODER: unetpp` | B2 | 保留 MBDC、FPN 和粗预测，以 U-Net++ 风格的密集跳连替换三级 UAFM；此组合要求关闭高分辨率修正 | 4 × 1 |
+
+| UANet 的 STAGE | 新增计算 | 用于验证的输出 |
+|---|---|---|
+| `mbdc` | 各尺度特征经多分支空洞卷积后送入语义头 | 粗预测 |
+| `fpn` | MBDC 后加入自顶向下的 FPN | 融合后的粗预测 |
+| `uafm` | 加入三级不确定性引导细化 | 最终细化头 |
+| `full` | 在首次细化前，用 PSM 和 CGM 调整最深层特征 | 最终细化头 |
+
+多头模型训练时监督各输出，验证取最后一头。单通道头支持 BCE 或 BCE+Dice；当前整景重叠融合验证支持 BCE 和 CE。双通道头用 CE，沿用历史配方的 Adam、随机采样。切换架构时也要核对损失、类别权重和输出目录。若希望只测编码器差异，可固定 `semantic_fpn`，在 B2 与 ResNet50 之间切换，沿用同一划分、预处理和训练配方。
+
+## 怎样切换
+
+当前组合在原 YAML 中写为：
+
+```yaml
+model:
+  ARCHITECTURE: deeplabv3plus
+  BACKBONE: pvt_v2_b2.in1k
 ```
 
-数据读取位于 `datasets/water_dataset.py`；训练入口、方法选择、参数与完整训练循环都位于同一个 `train.py`。
+训练本仓库的普通 U-Net 时，在同一份完整 YAML 中修改以下字段。用 S1 双极化样本对照时，另将数据路径指向 DFC 影像和标签，设置 `data.DATA_LAYOUT: patch`、`POLARIZATIONS: [VV, VH]` 和 `POLARIZATION_BANDS: {VV: 1, VH: 2}`；用 BC 数据则保留原单 VV 设置。
 
-## 2. 按类查找函数
-
-| 文件 | 类 / 函数 | 作用与主要方法 |
-|---|---|---|
-| [unet.py](../src/supervised/models/unet.py) | `UNet` | `__init__` 创建网络；`forward` 编解码；`load_state_dict` 兼容历史层名 |
-| [pvt.py](../src/supervised/models/pvt.py) | `build_pvt_backbone` | 创建基线与 UANet 共用的 timm PVT 骨干 |
-| 同上 | `PVTWaterNet` | 本类的 `__init__`、`forward` 包含骨干、投影、解码与上采样 |
-| 同上 | `MBDC` | `__init__` 定义三分支与残差；`forward` 拼接、压缩并相加 |
-| 同上 | `PSM` | `__init__` 定义 γ 和 softmax；`forward` 计算空间注意力 |
-| 同上 | `CGM` | `__init__` 定义 γ；`forward` 计算通道门控 |
-| 同上 | `UncertaintyRank` | `forward` 生成前景/背景等级，无需自定义初始化 |
-| 同上 | `UAFM` | `__init__` 定义加权、融合和分类层；`forward` 返回特征与预测 |
-| 同上 | `PVTUANet` | `__init__` 按 stage 创建模块；`forward` 组织粗预测和三级细化 |
-| [resnet.py](../src/supervised/models/resnet.py) | `ResNet50WaterNet` | 本类的 `__init__`、`forward` 包含 ResNet 骨干、投影、解码与上采样 |
-| [common.py](../src/supervised/models/common.py) | `BasicConv2d` | `__init__` 定义卷积/BN/ReLU；`forward` 顺序执行 |
-| 同上 | `DoubleConv` | `__init__` 创建两个基础块；`forward` 连续执行 |
-| 同上 | `FPN` | `__init__` 定义侧向/输出卷积；`forward` 自顶向下融合 |
-| 同上 | `SemanticFPNDecoder` | `__init__` 定义四条支路；`forward` 对齐、相加并分类 |
-| [checkpoint.py](../src/supervised/models/checkpoint.py) | `load_model` | 根据模型名、参数重建网络，关闭预训练下载并严格加载权重 |
-
-## 3. 阅读顺序与继承关系
-
-```text
-train.py：main() → create_trainer()，选择 METHOD="uanet"
-  → train.py：创建 WaterSegmentationTrainer，无训练器子类
-  → models/pvt.py：PVTUANet.__init__ / forward
-       ├─ 同文件：build_pvt_backbone
-       ├─ 同文件：MBDC、PSM、CGM、UncertaintyRank、UAFM
-       └─ common.py：BasicConv2d、FPN、SemanticFPNDecoder
-  → 返回训练器：损失、更新、验证、保存
+```yaml
+model:
+  ARCHITECTURE: unet
+  BACKBONE: plain_cnn
+training:
+  LOSS_NAME: ce
+  CLASS_WEIGHT_MODE: none
+  SAMPLING: random
 ```
 
-先看 `PVTUANet.forward()` 确认连接，再在同一文件内定位具体模块。FPN 的构造和前向集中在 `FPN` 类中，ResNet 分割流程集中在 `ResNet50WaterNet` 类中；timm 提供骨干内部的实现，不在本项目重写。
+新实验使用独立的 `paths.OUTPUT_DIR` 并设 `RESUME_CHECKPOINT: null`。运行 `python src/supervised/train.py configs/train.yaml`。旧 YAML 的 `run.METHOD: pvt` 和 `resnet50` 对应现在的 `semantic_fpn` 加各自编码器；旧 `deeplabv3` 对应 `deeplabv3plus`。旧配置仍可单独运行。
 
-所有完整分割模型直接继承 `nn.Module`，不再经过 `BackboneWaterNet` 中间父类。PVT 和 ResNet 的短前向流程在本类直接展开，方便顺序阅读。公共卷积、FPN、解码头仍各只有一份类定义；PVT 骨干构造也只有一份。
+## 与 sentinel1-water-unet 的对应关系
 
-解码头中带 bias 的卷积保留原始 Sequential 结构，不强行替换为 `bias=False` 的 `BasicConv2d`，以保持参数语义与历史权重名称一致。
+BC 可选择独立的 `sentinel1_water_unet + s1water_cnn`。下表对照普通 U-Net 和作者公开网络。
 
-训练入口也已合并：不再定义 UNetTrainer/PVTTrainer 等子类，四个同级方法由 `METHOD` 选择，然后直接创建同一个 `WaterSegmentationTrainer`。公共训练器位于 `src/supervised/train.py`；没有迁移 Lightning 或添加配置、argparse 框架。
-
-统一入口的调用为 `main() → create_trainer() → WaterSegmentationTrainer(...) → train()`。`OUTPUT_DIR=None` 时根据 METHOD 选择原实验目录；uanet 还根据 STAGE 分目录。METHOD 的四个值为 unet、pvt、resnet50、uanet，只有 uanet 使用 STAGE。
-
-入口合并已用固定合成数据对照两轮训练：UNet、PVT、ResNet50、UANet-mbdc 和 UANet-full 的逐轮指标、标准化、划分、保存轮次与权重均与合并前一致。另有 7 项模型测试和 3 项统一入口选择测试通过；没有启动正式数据训练。
-
-## 4. 导入、运行与旧权重
-
-```python
-from models.unet import UNet
-from models.pvt import PVTWaterNet, PVTUANet, MBDC, PSM, CGM, UncertaintyRank, UAFM
-from models.resnet import ResNet50WaterNet
-from models.common import BasicConv2d, DoubleConv, FPN, SemanticFPNDecoder
-from models.checkpoint import load_model
-```
-
-四种方法统一运行 `python src/supervised/train.py`；顶部 `METHOD` 选择 unet/pvt/resnet50/uanet，`STAGE` 仅对 uanet 生效。在 `src` 目录可执行 `python -m supervised.models.unet` 查看 U-Net 尺寸示例。
-
-原来的多层拆分导入路径已收拢，项目内入口、测试和文档同步更新；外部临时脚本应按上述路径修改导入。
-
-模型属性名、检查点元信息、数据划分、标准化、输出顺序、损失和训练参数保持不变，已有权重字典无需转换。stage 仍控制模块启用，不要求复制多套实现，也不会自动接着上一阶段训练。
-
-本轮已用固定初始化和输入，对比 U-Net、PVT、ResNet 与 UANet 四种阶段共 7 种配置：整理前后的状态字典名称、数值和前向输出完全一致；full 对照将 PSM/CGM 的 γ 设为非零以覆盖增强路径。现有 7 项模型测试全部通过，包含梯度、严格重载和合成数据训练/校准接口检查。本轮没有启动正式数据训练。
-
-网络计算见 [U-Net 函数说明](unet_functions_and_derivations.md) 与 [PVT-UANet 函数说明](pvt_uanet_functions_and_derivations.md)。
-
-"""
-| 模块 | 属于 Transformer 吗？ | 主要计算 |
+| | 本仓库普通 U-Net | sentinel1-water-unet 的公开实现 |
 |---|---|---|
-| **PVT 骨干** | **是** | 多头空间缩减注意力、MLP、LayerNorm、残差 |
-| **MBDC** | 否 | 多分支空洞卷积、拼接、残差 |
-| **FPN** | 否 | 卷积、上采样、逐层相加 |
-| **语义解码头** | 否 | 卷积、上采样、多尺度相加 |
-| **PSM / CGM** | 不属于完整 Transformer Block | 空间注意力／通道调制 |
-| **UAFM** | 否 | 不确定性加权、卷积与特征融合 |
-| **普通 U-Net / ResNet** | 否 | 主要使用卷积结构 |
-"""
+| 输入 | 按配置读取实际极化；BC 为单 VV，DFC 可用 VV/VH | 10 m S1 VV/VH，σ⁰ dB 映射为 8 位；输入按 VV、VH、VV、VH 排列，再除以 255 |
+| 编码 | 4 次池化，默认瓶颈 512 通道 | 5 次池化，池化后 dropout 0.5，瓶颈 1024 通道 |
+| 解码 | 转置卷积，拼接后两层卷积 | 最近邻上采样，拼接后三层卷积 |
+| 输出 | 两类 logits，训练用 CE | 单通道 sigmoid 水体概率，可裁去边缘后拼景 |
 
-## 5. 完整 UAFNet 的 ResNet50 编码器对照
+**训练结构对照**　在 168 服务器的仓库根目录运行 `python src/supervised/train.py configs/168/train_s1water_bc.yaml`。该配置与 [PVT 标准配置](../configs/train.yaml) 使用相同的 BC 单 VV 清单、Z-score 输入、窗口、采样、损失和验证设置。对照模型采用 `sentinel1_water_unet + s1water_cnn`，从随机权重开始，实验写入独立目录。[168 服务器配置](../configs/168/train_s1water_bc.yaml)
 
-`train.py:create_trainer()` 保持 `METHOD="uafnet"`，通过 `UAFNET_BACKBONE` 选择 PVT-v2-B2 或 `resnet50.tv_in1k`。为了严格兼容旧检查点，完整模型暂沿用 `models/pvt.py:PVTUANet` 类名；ResNet50 的构建集中在 `models/resnet.py:build_resnet50_backbone()`，与旧的简单 ResNet50 基线共用，不复制解码器，也不增加训练器子类。
+单 VV 在训练中只占一个通道。网络返回一个 logit，BCE 和验证代码各自在需要的位置处理 sigmoid。该模式随机初始化；若 PVT 使用 ImageNet 初始化，两组对比包含初始化差异。直接试用作者四通道权重是另一项跨传感器实验。BC 的相对功率与原模型的 S1 σ⁰ dB 缩放含义不同。[BC 训练实现](../src/supervised/models/sentinel1_water_unet.py) · [作者实现](https://github.com/fabien-w/sentinel1-water-unet/blob/main/src/s1water/model.py) · [论文](https://doi.org/10.3390/rs16061056)
 
-512×512 SAR 输入时：
+## 代码索引
 
-| 编码器 | 四级特征通道 | 四级空间尺寸 |
-|---|---|---|
-| PVT-v2-B2 | 64、128、320、512 | 128²、64²、32²、16² |
-| ResNet50 | 256、512、1024、2048 | 128²、64²、32²、16² |
-| 各自 MBDC 输出 | 均为32 | 128²、64²、32²、16² |
-
-两组都经过 MBDC → FPN → 语义解码头产生粗预测。各级 MBDC 特征同时进入三级 UAFM，粗预测引导逐级细化；最后在1/4分辨率相加粗 logits 与修正 logits，再恢复512×512。训练返回四个全分辨率输出，最终头用于验证。本次高分辨率细化关闭，固定空洞率、等权 BCE 和全局困难采样保持一致。
-
-新检查点记录 `model_name="resnet50_uafnet"` 及实际 `model_kwargs.backbone_name`，`models/checkpoint.py:load_model()` 离线严格重建。旧 PVT 与简单 ResNet50 模型名称仍可加载。ResNet50 替换是本项目的骨干消融，不等同于原论文配置；输入通道适配使 MBDC 参数量也发生必要变化。
-
-
-## 2026-10-28：PVT 嵌套细化对照
-
-当前 `train.py` 默认设置 `UAFNET_REFINEMENT_DECODER="unetpp"`，关闭高分辨率分支。保留 PVT/MBDC/FPN/粗预测，仅替换三级 UAFM 为 `models/pvt.py:NestedUNetDecoder` 的六节点密集跳跃融合；`DoubleConv` 复用 common.py。四头等权 BCE 和最终粗预测残差保持不变。
-
-新模型在检查点中命名为 `pvt_unetpp_refinement`，由 `models/checkpoint.py` 重建；输出进入 `pvt_unetpp_hard_sampling_residual_grouped`。将开关恢复为 `uafm` 即恢复原 grouped PVT 控制路径。节点尺寸、公式和非原版复现的边界见 [结构推导第29节](pvt_uanet_functions_and_derivations.md#29-pvt--u-net-风格嵌套细化对照)。
+- [统一模型选择与训练](../src/supervised/train.py) · [训练 YAML](../configs/train.yaml) · [按检查点重建网络](../src/supervised/models/checkpoint.py)
+- [PVT、ASPP、MBDC、PSM、CGM、UAFM 和嵌套解码](../src/supervised/models/pvt.py) · [ResNet50](../src/supervised/models/resnet.py) · [共享 FPN 与语义头](../src/supervised/models/common.py)
+- [普通 U-Net](../src/supervised/models/unet.py) · [MobileNetV2 U-Net 实验](../src/supervised/experimental/experimental_model_unet_mobilenet.py) · [U-Net 推导](unet_functions_and_derivations.md) · [PVT-UANet 推导](pvt_uanet_functions_and_derivations.md)

@@ -1,23 +1,21 @@
-# 本文件为唯一参数来源；修改后重新启动对应脚本。null表示关闭/未指定。
-# RESUME_CHECKPOINT保留当前续跑点；新实验设null，并设置独立OUTPUT_DIR。
+# BC 单 VV 标准基线：PVT-v2-B2 + DeepLabv3+，读取 Lee 滤波后按训练集 Z-score 归一化的功率。
+# 每轮遍历全部有效训练窗口。新实验从第 1 轮开始，续跑时填写本实验的检查点。
 
 # 相对数据路径以DATA_ROOT为基准；模型结果和仓库缓存保留绝对路径。
 paths:
   # 数据搬迁后只修改本项；其余相对路径以此目录为基准。
   DATA_ROOT: I:\水体数据
   RESUME_CHECKPOINT: null
-  IMAGE_DIR: processed_power\normalized\images
-  LABEL_DIR: processed_power\normalized\labels
+  IMAGE_DIR: processed_power/normalized/images
+  LABEL_DIR: processed_power/normalized/labels
   # 多个目录依次添加；只有处理协议和归一化统计一致时才能合并。
   MANIFEST_PATHS:
-  - processed_power\normalized\split_manifest.csv
+  - processed_power/normalized/split_manifest.csv
   OUTPUT_ROOT: E:\Code_projects\sar_water_extraction\outputs
   OUTPUT_DIR: E:\Code_projects\sar_water_extraction\outputs\pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_power_full_train_bc_scenes_overlap
   WINDOW_CACHE_DIR: E:\Code_projects\sar_water_extraction\data_cache\bc_scenes
 # 执行模式与批次/实验输出。
 run:
-  # deeplabv3、uafnet、uanet、unet、pvt、resnet50。
-  METHOD: deeplabv3
   RUN_DIRECTORY_FORMAT: '%Y%m%d_%H%M%S_%f'
   RESULT_FILES:
     metrics: metrics.csv
@@ -56,11 +54,13 @@ data:
     windows_per_epoch: null
     num_workers: 2
 
-# 网络结构；只使用选中METHOD的参数。
+# 网络组合及输出头见 docs/model_structure.md。
 model:
+  ARCHITECTURE: deeplabv3plus  # unet / semantic_fpn / uanet / uafnet / deeplabv3plus / sentinel1_water_unet
+  # sentinel1_water_unet 搭配 s1water_cnn 和 PRETRAINED: false，沿用 BC 单 VV 的训练设置。
+  BACKBONE: pvt_v2_b2.in1k    # 例如 semantic_fpn 也支持 resnet50.tv_in1k
   # 从本地缓存的ImageNet权重初始化编码器；解码器重新初始化。
   PRETRAINED: true
-  DEEPLAB_BACKBONE: pvt_v2_b2.in1k
   DEEPLAB_DECODER_CHANNELS: 256
   DEEPLAB_LOW_LEVEL_CHANNELS: 48
   # PVT 最深特征步长32；不是原论文步长16的配置。
@@ -75,7 +75,6 @@ model:
   DECODER_CHANNELS: 32
   # 仅 UANet 分阶段使用。
   STAGE: uafm
-  UAFNET_BACKBONE: pvt_v2_b2.in1k
   UAFNET_FINAL_RESIDUAL: true
   # null：固定原空洞率。
   UAFNET_MBDC_DILATIONS: null
@@ -91,13 +90,13 @@ training:
   EPOCHS: 20
   LEARNING_RATE: 0.0001
   SEED: 42
-  # deeplabv3/uafnet：bce 或 bce_dice；其余双类别方法用 ce。
+  # 单通道头用 bce 或 bce_dice，双类别头用 ce。
   LOSS_NAME: bce
   # 以下两项仅 bce_dice 使用。
   BCE_WEIGHT: 1.0
   # LOSS_NAME="bce"时不参与损失。
   DICE_WEIGHT: 1.0
-  # none、train_pixels（原基线）、train_pixels_sqrt（本次对照）。
+  # 按训练像元频数的平方根逆频率计算 BCE 类别权重。
   CLASS_WEIGHT_MODE: train_pixels_sqrt
   OPTIMIZER_NAME: adamw
   WEIGHT_DECAY: 0.01
@@ -106,7 +105,7 @@ training:
   TRAIN_AUGMENTATION: true
   # 仅用于日志提示，不参与损失或选模。
   ABNORMAL_F1_THRESHOLD: 0.001
-  # 本轮用固定种子的随机窗口抽样，与类别权重配合；先关闭困难重采样。
+  # windows_per_epoch 为 null，random 每轮打乱并遍历全部训练窗口。
   SAMPLING: random
   HARD_WARMUP_EPOCHS: 2
   HARD_SAMPLE_RATIO: 0.5

@@ -51,6 +51,17 @@ RESULT_FILES = dict(
 WATER_GROUP_NAMES = ('无水体', '水体≤1%', '水体1%–10%', '水体10%–50%', '水体>50%')
 
 CONFIG_PATH = CONFIG = None
+PVT_B2 = "pvt_v2_b2.in1k"
+RESNET50 = "resnet50.tv_in1k"
+PVT_ENCODERS = tuple(f"pvt_v2_b{i}.in1k" for i in (2, 3, 4, 5))
+SUPPORTED_BACKBONES = {
+    "sentinel1_water_unet": ("s1water_cnn",),
+    "unet": ("plain_cnn", "mobilenet_v2"),
+    "semantic_fpn": (PVT_B2, RESNET50),
+    "uanet": (PVT_B2,),
+    "uafnet": (*PVT_ENCODERS, RESNET50),
+    "deeplabv3plus": PVT_ENCODERS,
+}
 
 
 def configure(config_path):
@@ -67,7 +78,15 @@ def configure(config_path):
     CONFIG = load_yaml(CONFIG_PATH)
 
     # ---------- 配置绑定 ----------
-    METHOD = CONFIG["run"]["METHOD"]
+    global ARCHITECTURE, BACKBONE
+    model = CONFIG["model"]
+    METHOD = CONFIG["run"].get("METHOD")  # 已发布的旧 YAML 与历史实验入口
+    ARCHITECTURE = model.get("ARCHITECTURE")
+    BACKBONE = model.get("BACKBONE")
+    if METHOD is not None and (ARCHITECTURE is not None or BACKBONE is not None):
+        raise ValueError("请只用 model.ARCHITECTURE + model.BACKBONE，移除旧 run.METHOD")
+    if METHOD is None and (ARCHITECTURE is None or BACKBONE is None):
+        raise ValueError("请选择 model.ARCHITECTURE 和 model.BACKBONE")
     RESUME_CHECKPOINT = CONFIG["paths"]["RESUME_CHECKPOINT"]
     IMAGE_DIR = CONFIG["paths"]["IMAGE_DIR"]
     LABEL_DIR = CONFIG["paths"]["LABEL_DIR"]
@@ -104,7 +123,7 @@ def configure(config_path):
     HARD_POOL_RATIO = CONFIG["training"]["HARD_POOL_RATIO"]
     LOW_WATER_POOL_RATIO = CONFIG["training"]["LOW_WATER_POOL_RATIO"]
     WATER_GROUP_NAMES = tuple(CONFIG["training"]["WATER_GROUP_NAMES"])
-    DEEPLAB_BACKBONE = CONFIG["model"]["DEEPLAB_BACKBONE"]
+    DEEPLAB_BACKBONE = model.get("DEEPLAB_BACKBONE", PVT_B2)
     DEEPLAB_DECODER_CHANNELS = CONFIG["model"]["DEEPLAB_DECODER_CHANNELS"]
     DEEPLAB_LOW_LEVEL_CHANNELS = CONFIG["model"]["DEEPLAB_LOW_LEVEL_CHANNELS"]
     DEEPLAB_ASPP_RATES = tuple(CONFIG["model"]["DEEPLAB_ASPP_RATES"])
@@ -112,7 +131,7 @@ def configure(config_path):
     BASE_CHANNELS = CONFIG["model"]["BASE_CHANNELS"]
     DECODER_CHANNELS = CONFIG["model"]["DECODER_CHANNELS"]
     STAGE = CONFIG["model"]["STAGE"]
-    UAFNET_BACKBONE = CONFIG["model"]["UAFNET_BACKBONE"]
+    UAFNET_BACKBONE = model.get("UAFNET_BACKBONE", PVT_B2)
     UAFNET_FINAL_RESIDUAL = CONFIG["model"]["UAFNET_FINAL_RESIDUAL"]
     UAFNET_MBDC_DILATIONS = CONFIG["model"]["UAFNET_MBDC_DILATIONS"]
     UAFNET_HIGH_RESOLUTION_REFINEMENT = CONFIG["model"]["UAFNET_HIGH_RESOLUTION_REFINEMENT"]
@@ -1070,39 +1089,73 @@ class WaterSegmentationTrainer:
                 self.dataset.close()
 
 
+def select_model(method=None):
+    """将旧实验名还原成结构与编码器，新 YAML 直接使用这两个字段。"""
+    legacy = METHOD if method is None else method
+    if legacy is None:
+        architecture, backbone = ARCHITECTURE, BACKBONE
+    else:
+        previous = {"unet": ("unet", "plain_cnn"), "pvt": ("semantic_fpn", PVT_B2),
+                    "resnet50": ("semantic_fpn", RESNET50), "uanet": ("uanet", PVT_B2),
+                    "uafnet": ("uafnet", UAFNET_BACKBONE), "deeplabv3": ("deeplabv3plus", DEEPLAB_BACKBONE)}
+        if legacy not in previous:
+            raise ValueError(f"未知的旧训练方法 {legacy}")
+        architecture, backbone = previous[legacy]
+    if architecture not in SUPPORTED_BACKBONES:
+        raise ValueError(f"未知模型结构 {architecture}，可选 {tuple(SUPPORTED_BACKBONES)}")
+    if backbone not in SUPPORTED_BACKBONES[architecture]:
+        raise ValueError(f"{architecture} 不支持 {backbone}，可选 {SUPPORTED_BACKBONES[architecture]}")
+    if architecture == "uafnet" and UAFNET_REFINEMENT_DECODER == "unetpp" and (
+            backbone != PVT_B2 or UAFNET_HIGH_RESOLUTION_REFINEMENT):
+        raise ValueError("嵌套细化只支持 PVT-B2，且需关闭高分辨率细化")
+    return architecture, backbone
+
+
 def create_trainer(method=None):
-    """平级选择网络与保存目录，然后创建同一个公共训练器。"""
+    """按结构和编码器构建模型，沿用各基线的输出头、训练配方与检查点名称。"""
     if CONFIG is None:
         raise ValueError("请先调用configure(config_path)，再创建训练器")
     if DATA_LAYOUT not in ('full_scene', 'patch'):
         raise ValueError('DATA_LAYOUT应为full_scene或patch')
-    method = METHOD if method is None else method
-    binary_method = method in ("uafnet", "deeplabv3")
+    architecture, backbone = select_model(method)
+    mobile_unet = architecture == "unet" and backbone == "mobilenet_v2"
+    binary_method = architecture in ("uafnet", "deeplabv3plus", "sentinel1_water_unet") or mobile_unet
     # 在创建训练器时解析，单极化自动构建单通道网络，并重新统计该通道的均值和标准差。
     bands = tuple(POLARIZATION_BANDS[name] for name in POLARIZATIONS)
-    if method == "unet":
+    if mobile_unet:
+        from supervised.experimental.experimental_model_unet_mobilenet import AI4GWaterUNet
+        model_class = AI4GWaterUNet
+        model_kwargs = dict(in_channels=len(bands), num_classes=1, pretrained=PRETRAINED)
+        model_info = dict(model_name="ai4g_mobilenetv2_unet_dfc", decoder="SMP U-Net",
+                          normalization="BatchNorm", pretrained=PRETRAINED, supervision="single_head_" + LOSS_NAME)
+        experiment = "ai4g_mobilenetv2_unet"
+    elif architecture == "sentinel1_water_unet":
+        from supervised.models.sentinel1_water_unet import UNetS1Water
+
+        if PRETRAINED:
+            raise ValueError("BC 单极化结构对照从随机权重开始，请设 model.PRETRAINED: false")
+        model_class = UNetS1Water
+        model_kwargs = dict(in_channels=len(bands), num_classes=1)
+        experiment = "sentinel1_water_unet"
+        model_info = dict(model_name=experiment, normalization="BatchNorm", pretrained=False,
+                          decoder="nearest upsample + skip + three convolutions",
+                          supervision="single_head_" + LOSS_NAME)
+    elif architecture == "unet":
         model_class = UNet
         model_kwargs = dict(in_channels=len(bands), base_channels=BASE_CHANNELS)
         model_info = dict(model_name="unet", normalization="BatchNorm", base_channels=BASE_CHANNELS)
         experiment = "unet_baseline"
 
-    elif method == "pvt":
-        model_class = PVTWaterNet
+    elif architecture == "semantic_fpn":
+        is_pvt = backbone == PVT_B2
+        model_class = PVTWaterNet if is_pvt else ResNet50WaterNet
         model_kwargs = dict(in_channels=len(bands), num_classes=2,
                             decoder_channels=DECODER_CHANNELS, pretrained=PRETRAINED)
-        model_info = dict(model_name="pvt", backbone="pvt_v2_b2.in1k",
-                          normalization="LayerNorm + decoder BatchNorm", stage="backbone_projection_decoder")
-        experiment = "pvt_baseline"
+        model_info = dict(model_name="pvt" if is_pvt else "resnet50", stage="backbone_projection_decoder",
+                          normalization="LayerNorm + decoder BatchNorm" if is_pvt else "BatchNorm")
+        experiment = model_info["model_name"] + "_baseline"
 
-    elif method == "resnet50":
-        model_class = ResNet50WaterNet
-        model_kwargs = dict(in_channels=len(bands), num_classes=2,
-                            decoder_channels=DECODER_CHANNELS, pretrained=PRETRAINED)
-        model_info = dict(model_name="resnet50", backbone="resnet50.tv_in1k",
-                          normalization="BatchNorm", stage="backbone_projection_decoder")
-        experiment = "resnet50_baseline"
-
-    elif method == "uanet":
+    elif architecture == "uanet":
         model_class = PVTUANet
         model_kwargs = dict(in_channels=len(bands), num_classes=2,
                             decoder_channels=DECODER_CHANNELS, pretrained=PRETRAINED, stage=STAGE)
@@ -1112,14 +1165,14 @@ def create_trainer(method=None):
                           supervision="sum_CE_all_train_heads; final_head_validation")
         experiment = f"pvt_uanet_{STAGE}"
 
-    elif method == "deeplabv3":
+    elif architecture == "deeplabv3plus":
         model_class = PVTDeepLabV3Plus
         model_kwargs = dict(in_channels=len(bands), num_classes=1, pretrained=PRETRAINED,
-                            backbone_name=DEEPLAB_BACKBONE, decoder_channels=DEEPLAB_DECODER_CHANNELS,
+                            backbone_name=backbone, decoder_channels=DEEPLAB_DECODER_CHANNELS,
                             low_level_channels=DEEPLAB_LOW_LEVEL_CHANNELS,
                             atrous_rates=DEEPLAB_ASPP_RATES, dropout=DEEPLAB_DROPOUT)
         model_info = dict(
-            model_name="pvt_deeplabv3plus", backbone=DEEPLAB_BACKBONE,
+            model_name="pvt_deeplabv3plus", backbone=backbone,
             decoder="DeepLabv3+ style ASPP + low-level fusion", output_stride=32,
             decoder_channels=DEEPLAB_DECODER_CHANNELS, low_level_channels=DEEPLAB_LOW_LEVEL_CHANNELS,
             aspp_rates=DEEPLAB_ASPP_RATES, aspp_dropout=DEEPLAB_DROPOUT,
@@ -1132,12 +1185,12 @@ def create_trainer(method=None):
         )
         experiment = "pvt_deeplabv3plus"
 
-    elif method == "uafnet":
+    elif architecture == "uafnet":
         # 水体论文的单模型结构；损失由 LOSS_NAME 选择，BCE+Dice 属于本项目对照实验。
         model_class = PVTUANet
         model_kwargs = dict(in_channels=len(bands), num_classes=1,
                             decoder_channels=DECODER_CHANNELS, pretrained=PRETRAINED, stage="uafm",
-                            backbone_name=UAFNET_BACKBONE, final_residual=UAFNET_FINAL_RESIDUAL)
+                            backbone_name=backbone, final_residual=UAFNET_FINAL_RESIDUAL)
         if UAFNET_REFINEMENT_DECODER not in ("uafm", "unetpp"):
             raise ValueError("UAFNET_REFINEMENT_DECODER 应为 uafm 或 unetpp")
         if UAFNET_REFINEMENT_DECODER == "unetpp":
@@ -1147,20 +1200,20 @@ def create_trainer(method=None):
         if UAFNET_MBDC_DILATIONS is not None:
             # dilation 不属于 state_dict，必须保存到 model_kwargs 才能正确重建新结构。
             model_kwargs["mbdc_dilations"] = UAFNET_MBDC_DILATIONS
-        resnet_backbone = UAFNET_BACKBONE == "resnet50.tv_in1k"
+        resnet_backbone = backbone == RESNET50
         model_info = dict(model_name="resnet50_uafnet" if resnet_backbone else "pvt_uafnet",
-                          backbone=UAFNET_BACKBONE, stage="uafm",
+                          backbone=backbone, stage="uafm",
                           normalization="BatchNorm" if resnet_backbone else "LayerNorm + BatchNorm",
                           output_order="coarse_to_fine",
                           supervision=f"sum_{LOSS_NAME}_all_train_heads; final_head_validation",
-                          implementation=f"UAFNet paper-guided SAR adaptation; single {UAFNET_BACKBONE}",
+                          implementation=f"UAFNet paper-guided SAR adaptation; single {backbone}",
                           final_prediction="coarse_plus_zero_init_correction" if UAFNET_FINAL_RESIDUAL else "direct_refinement",
                           paper_doi="10.1109/IGARSS53475.2024.10641026")
         if resnet_backbone:
             experiment = "resnet50_uafnet"
             model_info["implementation"] = "UAFNet decoder with ResNet50 encoder; project backbone ablation"
         else:
-            variant = UAFNET_BACKBONE.split(".")[0].removeprefix("pvt_v2_")
+            variant = backbone.split(".")[0].removeprefix("pvt_v2_")
             experiment = "pvt_uafnet" if variant == "b2" else f"pvt_uafnet_{variant}"
         if UAFNET_REFINEMENT_DECODER == "unetpp":
             experiment = "pvt_unetpp"
@@ -1171,49 +1224,47 @@ def create_trainer(method=None):
         else:
             model_info["refinement_decoder"] = "UAFM"
 
-    else:
-        raise ValueError("METHOD 应为 deeplabv3、uafnet、uanet、unet、pvt 或 resnet50")
-
-    if method not in ("unet", "deeplabv3"):
+    if architecture in ("semantic_fpn", "uanet", "uafnet"):
         model_info.update(decoder=("SemanticFPNDecoder + NestedUNetDecoder" if model_info.get("model_name") == "pvt_unetpp_refinement"
                                    else "SemanticFPNDecoder"), decoder_channels=DECODER_CHANNELS,
                           timm_version=timm.__version__, pretrained=PRETRAINED)
 
     baseline_loss = "bce" if binary_method else "ce"
     if (binary_method and LOSS_NAME not in ("bce", "bce_dice")) or (not binary_method and LOSS_NAME != "ce"):
-        raise ValueError("deeplabv3/uafnet 可选 bce/bce_dice；其余双类别模型使用 ce")
+        raise ValueError(f"{architecture} + {backbone} 需要 {'bce 或 bce_dice' if binary_method else 'ce'}")
     # BCE 保留历史目录；新损失进入独立目录，时间戳继续隔离每次运行。
     if LOSS_NAME != baseline_loss:
         experiment += f"_{LOSS_NAME}"
     if SAMPLING in ("hard", "stratified_hard", "hybrid_hard"):
         if not binary_method or LOSS_NAME != "bce":
-            raise ValueError("困难采样支持 DeepLab/UAFNet + BCE；其他方法或损失请设 SAMPLING='random'")
+            raise ValueError("困难采样使用单通道 BCE；其他模型或损失请设 SAMPLING='random'")
         experiment += "_hard_sampling"
-    if method == "uafnet" and UAFNET_FINAL_RESIDUAL:
+    if architecture == "uafnet" and UAFNET_FINAL_RESIDUAL:
         experiment += "_residual"
     if SAMPLING == "stratified_hard":
         experiment += "_stratified"
     elif SAMPLING == "hybrid_hard":
         experiment += "_hybrid"
-    if method == "uafnet" and UAFNET_HIGH_RESOLUTION_REFINEMENT:
+    if architecture == "uafnet" and UAFNET_HIGH_RESOLUTION_REFINEMENT:
         experiment += "_highres"
-    if method == "uafnet" and UAFNET_MBDC_DILATIONS is not None:
+    if architecture == "uafnet" and UAFNET_MBDC_DILATIONS is not None:
         experiment += "_scale_mbdc"
     # 非水体论文分支保持旧等权规则；修改 UAFNet 监督权重时单独保存实验。
-    head_loss_weights = (1.0,) if method == "deeplabv3" else tuple(HEAD_LOSS_WEIGHTS) if method == "uafnet" else None
-    if method == "uafnet" and head_loss_weights != (1.0, 1.0, 1.0, 1.0):
+    head_loss_weights = tuple(HEAD_LOSS_WEIGHTS) if architecture == "uafnet" else (1.0,) if binary_method else None
+    if architecture == "uafnet" and head_loss_weights != (1.0, 1.0, 1.0, 1.0):
         experiment += "_head_weights"
         model_info["supervision"] = f"weighted_sum_{LOSS_NAME}_all_train_heads; final_head_validation"
     # 保留原 VV/VH 目录；单极化或其他组合独立保存，防止比较时混淆。
     if POLARIZATIONS != ("VV", "VH"):
         experiment += "_" + "_".join(name.lower() for name in POLARIZATIONS)
-    model_info.update(polarizations=POLARIZATIONS, polarization_bands=dict(zip(POLARIZATIONS, bands)))
+    model_info.update(architecture=architecture, backbone=backbone, polarizations=POLARIZATIONS,
+                      polarization_bands=dict(zip(POLARIZATIONS, bands)))
     if CLASS_WEIGHT_MODE == "train_pixels":
         experiment += "_balanced_bce"
     if DATA_LAYOUT == 'full_scene':
         model_info['input_representation'] = 'BC_single_date_stored_VV; sampled_train_window_mean_std'
     output_dir = OUTPUT_ROOT / experiment if OUTPUT_DIR is None else Path(OUTPUT_DIR)
-    cprint(f"训练方法：{method}；极化：{POLARIZATIONS}；文件波段：{bands}；实验目录：{output_dir}", color="cyan", flush=True)
+    cprint(f"网络：{architecture}；编码器：{backbone}；极化：{POLARIZATIONS}；文件波段：{bands}；实验目录：{output_dir}", color="cyan", flush=True)
     return WaterSegmentationTrainer(
         model_class=model_class, model_kwargs=model_kwargs, model_info=model_info,
         image_dir=IMAGE_DIR, label_dir=LABEL_DIR, output_dir=output_dir,

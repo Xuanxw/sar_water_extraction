@@ -13,6 +13,10 @@ def load_model(checkpoint):
         options = dict(checkpoint["model_kwargs"])
         options["pretrained"] = False
         model = PVTUANet(**options)
+    elif name == "sentinel1_water_unet":
+        from .sentinel1_water_unet import UNetS1Water
+
+        model = UNetS1Water(**checkpoint["model_kwargs"])
     elif name == "pvt_deeplabv3plus":
         from .pvt import PVTDeepLabV3Plus
 
