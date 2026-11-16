@@ -304,8 +304,9 @@ class WaterSegmentationTrainer:
                 for manifest in manifests or [self.image_dir.parent/'split_manifest.csv']:
                     receipt = Path(manifest).parent/'preprocessing.json'
                     record = json.loads(receipt.read_text(encoding='utf-8')) if receipt.is_file() else {}
-                    if (record.get('bc_org_domain'), record.get('input_domain'), record.get('output_domain'),
-                        record.get('stage'), record.get('complete')) != ('intensity','intensity','standardized','normalized',True):
+                    if ((record.get('bc_org_domain'), record.get('input_domain'), record.get('stage'),
+                         record.get('complete')) != ('intensity','intensity','normalized',True)
+                            or record.get('output_domain') not in ('standardized', 'scene_p02_p98')):
                         raise ValueError(f'BC训练需要已完成的功率域标准化数据，请用新版image_process.py生成：{receipt}')
             if manifests is not None:
                 data_root = merge_scene_manifests(manifests, bands=bands, seed=seed, speckle=self.speckle,
@@ -670,7 +671,9 @@ class WaterSegmentationTrainer:
                 counts = self.dataset.windows[self.train_set.indices, 5:7]
                 self.sample_water_ratios = torch.from_numpy(counts[:,0]/counts.sum(axis=1))
                 self.sample_groups = torch.bucketize(self.sample_water_ratios, torch.tensor([0.,.01,.1,.5],dtype=torch.float64))
-            if self.inputs_normalized:
+            if self.inputs_normalized and self.input_preprocessing.get('output_domain') == 'scene_p02_p98':
+                cprint('读取整景 P02/P98 归一化影像（float32 [0,1]）', 'cyan', flush=True)
+            elif self.inputs_normalized:
                 cprint(f"读取离线归一化影像；原训练统计mean={self.input_preprocessing['mean']}，std={self.input_preprocessing['std']}；训练不再标准化", 'cyan', flush=True)
             else:
                 cprint(f"训练窗口统计：mean={mean}；std={std}；缓存可复用", 'cyan', flush=True)

@@ -120,6 +120,9 @@ processing:
   FILTER_INPUT_STAGE: org
   # org/calibrated/filtered
   NORMALIZE_INPUT_STAGE: filtered
+  # zscore 使用训练统计；scene_p02_p98 将每景有效功率映射到 float32 [0,1]。
+  # 后者自动写入 NORMALIZED_ROOT 同级的 <原目录名>_p02_p98；复用滤波成果时选 MODE: normalize。
+  NORMALIZATION_METHOD: zscore
   WINDOW_SIZE: 1024
   HALO: 128
   # 每个训练景固定抽样；val不参与参数估计。

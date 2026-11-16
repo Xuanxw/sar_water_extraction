@@ -42,6 +42,7 @@ from datasets import snap_preprocess
 from datasets.speckle import SpeckleFilter
 from datasets.manifest_paths import source_path, relative_source, manifest_fingerprint, write_relative_manifest
 from supervised.load.sar_scene_dataset import SARSceneDataset
+from utils.raster import file_percentiles, windows
 
 # 参数统一在YAML维护；以下只将配置绑定到现有函数使用的变量。
 from configuration import load_yaml, config_argument
@@ -58,7 +59,7 @@ def configure(config_path):
     global SNAP_CACHE_DIR, CLEAN_SNAP_CACHE_ON_SUCCESS, SNAP_WORK_DIR, NORMALIZE_WORK_DIR, NORMALIZE_READ_SIZE, NORMALIZE_THREADS, NORMALIZE_COMPRESSION_LEVEL, ENABLE_CALIBRATION
     global ENABLE_FILTER, INPUT_DOMAIN, FILTER_WINDOW, ENL, FILTER_INPUT_STAGE, NORMALIZE_INPUT_STAGE, WINDOW_SIZE, HALO
     global NORMALIZATION_WINDOWS, SEED, CALIBRATION_QUANTITY, CALIBRATION_OUTPUT_DOMAIN, CALIBRATION_REFERENCE, CALIBRATION_PRODUCTS_DIR, CALIBRATION_COMMAND, QUICKLOOK_BACKSCATTER_DB_RANGE
-    global SNAP_THREADS, SNAP_TILE_CACHE
+    global SNAP_THREADS, SNAP_TILE_CACHE, NORMALIZATION_METHOD
     CONFIG_PATH = Path(config_path).expanduser().resolve()
     CONFIG = load_yaml(CONFIG_PATH)
 
@@ -116,6 +117,9 @@ def configure(config_path):
     ENL = CONFIG["processing"]["ENL"]
     FILTER_INPUT_STAGE = CONFIG["processing"]["FILTER_INPUT_STAGE"]
     NORMALIZE_INPUT_STAGE = CONFIG["processing"]["NORMALIZE_INPUT_STAGE"]
+    NORMALIZATION_METHOD = CONFIG["processing"].get("NORMALIZATION_METHOD", "zscore")
+    if NORMALIZATION_METHOD not in ("zscore", "scene_p02_p98"):
+        raise ValueError("NORMALIZATION_METHOD 可选 zscore 或 scene_p02_p98")
     WINDOW_SIZE = CONFIG["processing"]["WINDOW_SIZE"]
     HALO = CONFIG["processing"]["HALO"]
     NORMALIZATION_WINDOWS = CONFIG["processing"]["NORMALIZATION_WINDOWS"]
@@ -845,6 +849,8 @@ def file_stamp(path):
 
 
 def stage_root(stage):
+    if stage == 'normalized' and NORMALIZATION_METHOD == 'scene_p02_p98':
+        return NORMALIZED_ROOT.with_name(NORMALIZED_ROOT.name + '_p02_p98')
     return {'org': OUTPUT_DIR, 'calibrated': CALIBRATED_ROOT,
             'filtered': FILTERED_ROOT, 'normalized': NORMALIZED_ROOT}[stage]
 
@@ -854,6 +860,26 @@ def stage_record(folder):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
 
 
+def scene_power_limits(src, bands, temporary):
+    """扫描整景共同有效的功率像素，逐波段求 P02/P98，不使用标签或训练集统计。"""
+    paths = [temporary / f'power_{i}.bin' for i in range(len(bands))]
+    count = 0
+    with ExitStack() as stack:
+        streams = [stack.enter_context(path.open('wb')) for path in paths]
+        for win in windows(src, NORMALIZE_READ_SIZE):
+            raw = src.read(bands, window=win, masked=True, out_dtype='float32')
+            valid = ~np.ma.getmaskarray(raw).any(axis=0) & np.isfinite(raw.data).all(axis=0)
+            count += np.count_nonzero(valid)
+            for band, stream in zip(raw.data, streams):
+                band[valid].tofile(stream)
+    # 全无效时发布同网格 NoData 影像，标签不会使无观测像元变成有效输入。
+    limits = [file_percentiles(path, count, (2, 98)) if count else (np.nan, np.nan)
+              for path in paths]
+    for path in paths:
+        path.unlink()
+    return np.asarray(limits).T, count
+
+
 def write_normalized_scene(source, pending, bands, mean, std):
     """分块标准化并在SSD完成压缩，再跨盘复制到目标临时文件；公式和有效域不变。"""
     if NORMALIZE_READ_SIZE < 1 or NORMALIZE_THREADS < 1:
@@ -861,10 +887,21 @@ def write_normalized_scene(source, pending, bands, mean, std):
     NORMALIZE_WORK_DIR.mkdir(parents=True, exist_ok=True)
     timings = dict(read_seconds=0., calculate_seconds=0., write_compress_seconds=0.)
     # 均值/标准差使用原统计精度，完成运算后才转float32，与旧实现一致。
-    mean, std = np.asarray(mean)[:,None,None], np.asarray(std)[:,None,None]
     with TemporaryDirectory(prefix='normalize_', dir=NORMALIZE_WORK_DIR) as temporary:
         local = Path(temporary)/'normalized.tif'
         with rasterio.open(source) as src:
+            relative = NORMALIZATION_METHOD == 'scene_p02_p98'
+            if relative:
+                started = time.perf_counter()
+                (low, high), count = scene_power_limits(src, bands, Path(temporary))
+                timings['percentile_seconds'] = time.perf_counter() - started
+                # P02=P98 时只区分高于该值的像元；常数景所有有效像元为 0。
+                offset = low[:, None, None]
+                scale = (high - low)[:, None, None]
+                divisor = np.where(scale == 0, 1., scale)
+            else:
+                offset = np.asarray(mean)[:, None, None]
+                divisor = np.asarray(std)[:, None, None]
             profile = src.profile.copy()
             profile.update(driver='GTiff', count=len(bands), dtype='float32', nodata=float('nan'),
                            tiled=True, blockxsize=256, blockysize=256, compress='deflate', predictor=3,
@@ -880,14 +917,21 @@ def write_normalized_scene(source, pending, bands, mean, std):
                         valid=~np.ma.getmaskarray(raw).any(axis=0)&np.isfinite(raw.data).all(axis=0)
                         if np.any(raw.data[:, valid] < 0):
                             raise ValueError(f'标准化前的有效线性功率出现负值：{source}')
-                        values=(raw.data-mean)/std
+                        values=(raw.data-offset)/divisor
+                        if relative:
+                            values=np.where(scale == 0, raw.data > offset, np.clip(values, 0, 1))
                         values=np.where(valid[None],values,np.nan).astype('float32')
                         timings['calculate_seconds']+=time.perf_counter()-started
                         started=time.perf_counter()
                         dst.write(values,window=win)
                         timings['write_compress_seconds']+=time.perf_counter()-started
-                dst.update_tags(input_stage='normalized', input_domain='intensity', output_domain='standardized',
-                                statistics='train_only', source=str(source))
+                dst.update_tags(input_stage='normalized', input_domain='intensity', source=str(source),
+                                output_domain='scene_p02_p98' if relative else 'standardized',
+                                statistics='scene_valid_pixels' if relative else 'train_only')
+                if relative:
+                    dst.update_tags(valid_pixels=count)
+                    for i, (p02, p98) in enumerate(zip(low, high), 1):
+                        dst.update_tags(i, p02=p02, p98=p98)
                 started=time.perf_counter()
             # 多线程压缩剩余任务在关闭文件时完成，也计入写入时间。
             timings['write_compress_seconds']+=time.perf_counter()-started
@@ -986,7 +1030,17 @@ def process_stage(stage):
                       filter=filtering.config if filtering else None,
                       calibration_reference=CALIBRATION_REFERENCE if stage == 'calibrated' else parent.get('calibration_reference',''),
                       calibration_command=CALIBRATION_COMMAND if stage == 'calibrated' else None)
-    if stage == 'normalized':
+    mean = std = None
+    relative = stage == 'normalized' and NORMALIZATION_METHOD == 'scene_p02_p98'
+    if stage == 'normalized' and previous and previous.get('output_domain') != (
+            'scene_p02_p98' if relative else 'standardized'):
+        raise ValueError(f'已有另一种归一化结果，请检查输出目录：{target}')
+    if relative:
+        if NORMALIZATION_REFERENCE is not None:
+            raise ValueError('整景 P02/P98 使用本景功率，请将 NORMALIZATION_REFERENCE 设为 null')
+        parameters.update(output_domain='scene_p02_p98', statistics_protocol='per_scene_valid_pixels',
+                          percentiles=[2, 98], output_range=[0, 1], upstream=parent)
+    elif stage == 'normalized':
         if NORMALIZATION_REFERENCE is not None:
             reference_path = Path(NORMALIZATION_REFERENCE)
             if reference_path.parent.resolve() == target.resolve():
@@ -997,6 +1051,8 @@ def process_stage(stage):
             # 仅复用已完成训练统计；不同滤波/物理量不能混用同一标准化尺度。
             if reference.get('bc_org_domain') != 'intensity':
                 raise ValueError('归一化参考必须来自 BC ORG 功率处理链，请重新计算 train 统计')
+            if reference.get('output_domain') != 'standardized':
+                raise ValueError('Z-score 需要使用同方案的均值和标准差')
             keys = ('stage','bands','input_domain','output_domain','quantity','filter','calibration_reference')
             reference_parent = reference.get('upstream',{})
             if any(reference_parent.get(k) != parent.get(k) for k in keys) or reference.get('bands') != list(BANDS):
@@ -1121,7 +1177,7 @@ def process_stage(stage):
 
 def export_scene(path):
     """按已有成果输出原图/校正/滤波/归一化概览；缺失阶段明确标注。"""
-    output = path.parent / 'quicklooks'
+    output = path.parent / ('quicklooks_p02_p98' if NORMALIZATION_METHOD == 'scene_p02_p98' else 'quicklooks')
     output.mkdir(exist_ok=True)
     figure = output / (path.stem + '.quick_overview.png')
     metadata = figure.with_suffix('.json')
@@ -1149,8 +1205,10 @@ def export_scene(path):
             width,height = src.width,src.height
         valid = counts > 0
         if stage == 'normalized':
-            gray = display_bytes(values, valid, *Z_DISPLAY_RANGE)
-            display = f'fixed z range {Z_DISPLAY_RANGE}'
+            relative = record.get('output_domain') == 'scene_p02_p98'
+            limits = (0, 1) if relative else Z_DISPLAY_RANGE
+            gray = display_bytes(values, valid, *limits)
+            display = 'scene P02-P98 [0,1]' if relative else f'fixed z range {limits}'
         elif record.get('quantity') in ('sigma0','beta0','gamma0'):
             positive = valid & (values > 0)
             db = 10 * np.log10(np.maximum(values,1e-30))
@@ -1203,7 +1261,7 @@ def export_quicklooks():
             errors.append(dict(image=str(path),error=str(error)))
             print(f'快视图失败 {path.name}：{error}',flush=True)
     for split in SPLITS:
-        folder=QUICKLOOK_IMAGE_ROOT/split/'quicklooks'
+        folder=QUICKLOOK_IMAGE_ROOT/split/('quicklooks_p02_p98' if NORMALIZATION_METHOD == 'scene_p02_p98' else 'quicklooks')
         folder.mkdir(exist_ok=True)
         save_record(folder/'overview_status.json',dict(complete=not errors,expected=len(files),errors=errors))
     print(f'快视图完成：成功{len(files)-len(errors)}/{len(files)}',flush=True)

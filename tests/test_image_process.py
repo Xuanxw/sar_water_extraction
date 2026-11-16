@@ -92,6 +92,59 @@ class ImageProcessTests(unittest.TestCase):
                 self.assertEqual(build.call_count,2)
                 self.assertEqual(manifest.read_bytes(),before);self.assertEqual(manifest.stat().st_mtime_ns,stamp)
 
+    def test_scene_percentiles_reuse_lee_and_preserve_zscore(self):
+        from supervised import train
+        train.configure(Path(__file__).resolve().parents[1] / "configs/train.yaml")
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            opts = self.options(root)
+            fixture.SceneDatasetTests().prepare(opts['OUTPUT_DIR'])
+            with patch.multiple(tools, **opts), patch.object(snap_preprocess, 'snap_runtime', return_value={'test':'1'}), \
+                    patch.object(snap_preprocess.SnapSpeckleFilter, 'run', side_effect=self.fake_gpt) as gpt:
+                raw_path = opts['OUTPUT_DIR'] / 'images/train/train.tif'
+                with rasterio.open(raw_path, 'r+') as src:
+                    raw = np.arange(src.width * src.height, dtype='float32').reshape(src.shape)
+                    raw[0, 0] = np.nan
+                    src.write(raw, 1)
+                tools.process_stage('filtered')
+                tools.process_stage('normalized')
+                baseline = opts['NORMALIZED_ROOT'] / 'images/train/train.tif'
+                baseline_hash = hashlib.sha256(baseline.read_bytes()).digest()
+                with patch.multiple(tools, MODE='normalize', NORMALIZATION_METHOD='scene_p02_p98', NORMALIZE_READ_SIZE=9):
+                    tools.main()
+                    target = tools.stage_root('normalized')
+                    record = tools.stage_record(target)
+                    self.assertEqual(record['output_domain'], 'scene_p02_p98')
+                    self.assertNotIn('mean', record)
+                    path = target / 'images/train/train.tif'
+                    with rasterio.open(path) as dst:
+                        low, high = np.nanpercentile(raw.astype('float64'), (2, 98))
+                        expected = np.clip((raw.astype('float64') - low) / (high - low), 0, 1)
+                        np.testing.assert_array_equal(dst.read(1), expected.astype('float32'))
+                        np.testing.assert_allclose([float(dst.tags(1)['p02']), float(dst.tags(1)['p98'])],
+                                                   [low, high], rtol=1e-14)
+                    with rasterio.open(target / 'images/val/val.tif') as dst:
+                        self.assertEqual(dst.tags(1)['p02'], dst.tags(1)['p98'])
+                        pixels = dst.read(1, masked=True).compressed()
+                        self.assertTrue(np.all(pixels == 0))
+                    stamp = path.stat().st_mtime_ns
+                    tools.main()
+                    self.assertEqual(path.stat().st_mtime_ns, stamp)
+                    self.assertEqual(gpt.call_count, 2)
+                    self.assertEqual(hashlib.sha256(baseline.read_bytes()).digest(), baseline_hash)
+                    trainer = WaterSegmentationTrainer(
+                        fixture.TinySceneNet, {}, dict(model_name='tiny'), target/'images', target/'labels',
+                        root/'runs', bands=(1,), batch_size=2, epochs=1, loss_name='bce', require_normalized=True,
+                        require_preprocessed=True, require_bc_power=True,
+                        scene_options=dict(cache_dir=opts['WINDOW_CACHE_DIR'], window_size=32, halo=8,
+                                           num_workers=0, windows_per_epoch=2))
+                    trainer.train()
+                    trainer.dataset.close()
+                    checkpoint = torch.load(trainer.run_dir/'last.pth', weights_only=True, map_location='cpu')
+                    check_preprocessed_input(target/'images', checkpoint)
+                    with self.assertRaises(ValueError):
+                        check_preprocessed_input(baseline.parent.parent, checkpoint)
+
     def test_reference_statistics_skip_reestimation_and_resume(self):
         with TemporaryDirectory() as temp:
             root=Path(temp);opts=self.options(root)
