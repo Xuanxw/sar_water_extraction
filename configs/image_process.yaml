@@ -98,6 +98,9 @@ inspection:
 snap:
   # 全批滤波成果发布成功后，删除本批SNAP缓存影像；中断时保留。
   CLEAN_SNAP_CACHE_ON_SUCCESS: true
+  # 同时滤波的整景数。服务器可先试 2；每景独立启动一个 JVM。
+  SNAP_SCENE_WORKERS: 1
+  # 每个 GPT 进程的并行线程数与瓦片缓存。
   SNAP_THREADS: 4
   SNAP_TILE_CACHE: 512M
 

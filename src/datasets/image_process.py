@@ -3,8 +3,10 @@ BC ORG 像元为未校正的线性功率（intensity）。
 不生成训练切片；滤波、归一化与阶段快视图均由本入口按MODE执行。
 """
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import ExitStack
 from datetime import datetime
+from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
@@ -59,7 +61,7 @@ def configure(config_path):
     global SNAP_CACHE_DIR, CLEAN_SNAP_CACHE_ON_SUCCESS, SNAP_WORK_DIR, NORMALIZE_WORK_DIR, NORMALIZE_READ_SIZE, NORMALIZE_THREADS, NORMALIZE_COMPRESSION_LEVEL, ENABLE_CALIBRATION
     global ENABLE_FILTER, INPUT_DOMAIN, FILTER_WINDOW, ENL, FILTER_INPUT_STAGE, NORMALIZE_INPUT_STAGE, WINDOW_SIZE, HALO
     global NORMALIZATION_WINDOWS, SEED, CALIBRATION_QUANTITY, CALIBRATION_OUTPUT_DOMAIN, CALIBRATION_REFERENCE, CALIBRATION_PRODUCTS_DIR, CALIBRATION_COMMAND, QUICKLOOK_BACKSCATTER_DB_RANGE
-    global SNAP_THREADS, SNAP_TILE_CACHE, NORMALIZATION_METHOD
+    global SNAP_THREADS, SNAP_TILE_CACHE, SNAP_SCENE_WORKERS, NORMALIZATION_METHOD
     CONFIG_PATH = Path(config_path).expanduser().resolve()
     CONFIG = load_yaml(CONFIG_PATH)
 
@@ -132,6 +134,9 @@ def configure(config_path):
     QUICKLOOK_BACKSCATTER_DB_RANGE = tuple(CONFIG["inspection"]["QUICKLOOK_BACKSCATTER_DB_RANGE"])
     SNAP_THREADS = CONFIG["snap"]["SNAP_THREADS"]
     SNAP_TILE_CACHE = CONFIG["snap"]["SNAP_TILE_CACHE"]
+    SNAP_SCENE_WORKERS = CONFIG["snap"].get("SNAP_SCENE_WORKERS", 1)
+    if type(SNAP_SCENE_WORKERS) is not int or SNAP_SCENE_WORKERS < 1:
+        raise ValueError("snap.SNAP_SCENE_WORKERS 必须为正整数")
 
 
 SCENE_PATTERN = re.compile(r"(BC\d+)[_-]([A-Z]+)[_-](ORG)[_-](?:2S)?(VV|VH|HH|HV)[_-](\d{8}T\d{6})[_-](\d+)", re.I)
@@ -976,7 +981,36 @@ def cleanup_snap_cache(filtering, rows, source_root, source_bands, target):
     print(f'SNAP缓存清理：删除{removed}个缓存影像，释放{freed/1024**3:.2f} GiB；日志和其他任务缓存保留。', flush=True)
 
 
+def process_scene_rows(rows, workers, process_one):
+    """限制同时在途的景数，主线程按完成顺序登记进度，出错时停止派发。"""
+    items = enumerate(rows, 1)
+    if workers == 1:
+        for item in items:
+            yield process_one(*item)
+        return
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = {pool.submit(process_one, *item) for item in islice(items, workers)}
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            results = [future.result() for future in done]
+            for result in results:
+                yield result
+                item = next(items, None)
+                if item is not None:
+                    pending.add(pool.submit(process_one, *item))
+
+
 def process_stage(stage):
+    if stage != 'filtered':
+        return _process_stage(stage)
+    target = stage_root(stage)
+    target.mkdir(parents=True, exist_ok=True)
+    # 同一正式目录只允许一个入口更新批级进度和完成标记。
+    with FileLock(str(target/'.filter_stage.lock'), timeout=0):
+        return _process_stage(stage)
+
+
+def _process_stage(stage):
     """校正/滤波/归一化分别落盘；每景参数和源文件一致时复用，支持中断重跑。"""
     if stage == 'calibrated':
         source_root = OUTPUT_DIR
@@ -1022,7 +1056,7 @@ def process_stage(stage):
         domain, quantity = CALIBRATION_OUTPUT_DOMAIN, CALIBRATION_QUANTITY
     if stage == 'filtered':
         snap_preprocess.configure_paths(SNAP_GPT_PATH, SNAP_CACHE_DIR, SNAP_WORK_DIR,
-                                        threads=SNAP_THREADS, tile_cache=SNAP_TILE_CACHE)
+                                        threads=SNAP_THREADS, tile_cache=SNAP_TILE_CACHE, scene_workers=SNAP_SCENE_WORKERS)
         filtering = SpeckleFilter(dict(method='snap_lee', input_domain=domain, window_size=FILTER_WINDOW, enl=ENL))
     parameters = dict(stage=stage, bc_org_domain='intensity', bands=list(BANDS), input_domain=parent.get('output_domain', INPUT_DOMAIN),
                       output_domain='standardized' if stage == 'normalized' else domain, quantity=quantity,
@@ -1076,6 +1110,13 @@ def process_stage(stage):
         parameters.update(mean=mean.tolist(), std=std.tolist(),
                           statistics_window_indices=indices, window_size=WINDOW_SIZE, halo=HALO,
                           seed=SEED, normalization_windows=NORMALIZATION_WINDOWS, upstream=parent)
+    workers = SNAP_SCENE_WORKERS if stage == 'filtered' else 1
+    if workers > 1:
+        for key in ('name', 'label_name'):
+            if len({(row['split'], row[key]) for row in rows}) != len(rows):
+                raise ValueError(f'并行滤波清单中存在重复输出：{key}')
+    if stage == 'filtered':
+        print(f'SNAP Lee：同时处理 {workers} 景，每景 GPT 线程 {SNAP_THREADS}，瓦片缓存 {SNAP_TILE_CACHE}', flush=True)
     target.mkdir(parents=True, exist_ok=True)
     marker = target / '.preprocessing_incomplete'
     marker.write_text('处理中；请完成image_process.py后再训练', encoding='utf-8')
@@ -1084,78 +1125,83 @@ def process_stage(stage):
     for split in ('train','val'):
         for kind in ('images','labels'):
             (target / kind / split).mkdir(parents=True, exist_ok=True)
+    def process_one(number, row):
+        source = source_root / 'images' / row['split'] / row['name']
+        output = target / 'images' / row['split'] / row['name']
+        label = OUTPUT_DIR / 'labels' / row['split'] / row['label_name']
+        receipt = output.with_suffix(output.suffix + '.processing.json')
+        stamps = file_stamp(source)
+        imported = None
+        if stage == 'calibrated' and CALIBRATION_PRODUCTS_DIR is not None:
+            imported = Path(CALIBRATION_PRODUCTS_DIR) / row['split'] / row['name']
+            stamps += file_stamp(imported)
+        signature = dict(parameters, sources=stamps)
+        match = False
+        if output.exists() and receipt.exists():
+            match = json.dumps(json.loads(receipt.read_text(encoding='utf-8')).get('signature'),sort_keys=True) == json.dumps(signature,sort_keys=True)
+            if match:
+                with rasterio.open(source) as src, rasterio.open(output) as dst:
+                    match = src.shape == dst.shape and src.crs == dst.crs and src.transform == dst.transform and dst.count == len(BANDS)
+        print(f'{stage} {number}/{len(rows)} [{row["split"]}] {row["scene_id"]}：{"复用" if match else "处理"}', flush=True)
+        if not match:
+            pending = output.with_suffix('.tif.partial')
+            if stage == 'filtered':
+                cached = filtering.snap.prepare_file(source, source_bands, create=True)
+                # 使用GeoTIFF副本确保后续成果不依赖缓存被清理。
+                started = time.perf_counter()
+                # 缓存已是符合要求的压缩GeoTIFF，直接复制，保持文件字节一致。
+                shutil.copyfile(cached, pending)
+                copy_seconds = round(time.perf_counter()-started, 3)
+                save_record(output.with_suffix('.copy_timing.json'), dict(cache_copy_seconds=copy_seconds))
+                print(f'  缓存直接复制：{copy_seconds}秒', flush=True)
+            elif stage == 'calibrated':
+                if imported is not None:
+                    raster_copy(str(imported), str(pending), driver='GTiff', compress='deflate', tiled=True, BIGTIFF='IF_SAFER')
+                else:
+                    if not isinstance(CALIBRATION_COMMAND, (list, tuple)):
+                        raise ValueError('CALIBRATION_COMMAND需为参数列表，不经shell拼接')
+                    def wsl_path(path):
+                        text = Path(path).resolve().as_posix()
+                        return '/mnt/' + text[0].lower() + text[2:] if len(text)>1 and text[1]==':' else text
+                    fields = dict(input=str(source), output=str(pending), scene_id=row['scene_id'],
+                                  input_wsl=wsl_path(source), output_wsl=wsl_path(pending))
+                    command = [str(arg).format(**fields) for arg in CALIBRATION_COMMAND]
+                    with output.with_suffix('.calibration.log').open('w',encoding='utf-8') as log:
+                        subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True,
+                                       creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            else:
+                timings = write_normalized_scene(source, pending, source_bands, mean, std)
+                save_record(output.with_suffix('.normalize_timing.json'), timings)
+                print(f'  归一化耗时（秒）：{timings}', flush=True)
+            with rasterio.open(source) as src, rasterio.open(pending) as dst:
+                if src.shape != dst.shape or src.crs != dst.crs or src.transform != dst.transform or dst.count != len(BANDS):
+                    raise ValueError(f'处理结果网格/波段改变，不能沿用原标签：{row["scene_id"]}')
+            if stage == 'calibrated':
+                with rasterio.open(source) as raw, rasterio.open(pending) as calibrated:
+                    for _, win in raw.block_windows(1):
+                        original = raw.read(BANDS, window=win, masked=True)
+                        valid = ~np.ma.getmaskarray(original).any(axis=0) & np.isfinite(original.data).all(axis=0)
+                        values = calibrated.read(window=win, masked=True)
+                        usable = ~np.ma.getmaskarray(values).any(axis=0) & np.isfinite(values.data).all(axis=0)
+                        if (valid & ~usable).any() or (values.data[:,valid] < 0).any():
+                            raise ValueError('校正结果丢失原有效像素或出现负值；请检查有效域和输出物理域')
+            pending.replace(output)
+            save_record(receipt, dict(signature=signature))
+        copied_label = target / 'labels' / row['split'] / row['label_name']
+        if not copied_label.exists() or copied_label.stat().st_mtime_ns != label.stat().st_mtime_ns or copied_label.stat().st_size != label.stat().st_size:
+            shutil.copy2(label, copied_label)
+        return row['scene_id'], match
+
     reused = generated = 0
     try:
-        for number, row in enumerate(rows, 1):
-            source = source_root / 'images' / row['split'] / row['name']
-            output = target / 'images' / row['split'] / row['name']
-            label = OUTPUT_DIR / 'labels' / row['split'] / row['label_name']
-            receipt = output.with_suffix(output.suffix + '.processing.json')
-            stamps = file_stamp(source)
-            imported = None
-            if stage == 'calibrated' and CALIBRATION_PRODUCTS_DIR is not None:
-                imported = Path(CALIBRATION_PRODUCTS_DIR) / row['split'] / row['name']
-                stamps += file_stamp(imported)
-            signature = dict(parameters, sources=stamps)
-            match = False
-            if output.exists() and receipt.exists():
-                match = json.dumps(json.loads(receipt.read_text(encoding='utf-8')).get('signature'),sort_keys=True) == json.dumps(signature,sort_keys=True)
-                if match:
-                    with rasterio.open(source) as src, rasterio.open(output) as dst:
-                        match = src.shape == dst.shape and src.crs == dst.crs and src.transform == dst.transform and dst.count == len(BANDS)
-            print(f'{stage} {number}/{len(rows)} [{row["split"]}] {row["scene_id"]}：{"复用" if match else "处理"}', flush=True)
-            if match:
-                reused += 1
-            else:
-                pending = output.with_suffix('.tif.partial')
-                if stage == 'filtered':
-                    cached = filtering.snap.prepare_file(source, source_bands, create=True)
-                    # 使用GeoTIFF副本确保后续成果不依赖缓存被清理。
-                    started = time.perf_counter()
-                    # 缓存已是符合要求的压缩GeoTIFF，直接复制，保持文件字节一致。
-                    shutil.copyfile(cached, pending)
-                    copy_seconds = round(time.perf_counter()-started, 3)
-                    save_record(output.with_suffix('.copy_timing.json'), dict(cache_copy_seconds=copy_seconds))
-                    print(f'  缓存直接复制：{copy_seconds}秒', flush=True)
-                elif stage == 'calibrated':
-                    if imported is not None:
-                        raster_copy(str(imported), str(pending), driver='GTiff', compress='deflate', tiled=True, BIGTIFF='IF_SAFER')
-                    else:
-                        if not isinstance(CALIBRATION_COMMAND, (list, tuple)):
-                            raise ValueError('CALIBRATION_COMMAND需为参数列表，不经shell拼接')
-                        def wsl_path(path):
-                            text = Path(path).resolve().as_posix()
-                            return '/mnt/' + text[0].lower() + text[2:] if len(text)>1 and text[1]==':' else text
-                        fields = dict(input=str(source), output=str(pending), scene_id=row['scene_id'],
-                                      input_wsl=wsl_path(source), output_wsl=wsl_path(pending))
-                        command = [str(arg).format(**fields) for arg in CALIBRATION_COMMAND]
-                        with output.with_suffix('.calibration.log').open('w',encoding='utf-8') as log:
-                            subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True,
-                                           creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-                else:
-                    timings = write_normalized_scene(source, pending, source_bands, mean, std)
-                    save_record(output.with_suffix('.normalize_timing.json'), timings)
-                    print(f'  归一化耗时（秒）：{timings}', flush=True)
-                with rasterio.open(source) as src, rasterio.open(pending) as dst:
-                    if src.shape != dst.shape or src.crs != dst.crs or src.transform != dst.transform or dst.count != len(BANDS):
-                        raise ValueError(f'处理结果网格/波段改变，不能沿用原标签：{row["scene_id"]}')
-                if stage == 'calibrated':
-                    with rasterio.open(source) as raw, rasterio.open(pending) as calibrated:
-                        for _, win in raw.block_windows(1):
-                            original = raw.read(BANDS, window=win, masked=True)
-                            valid = ~np.ma.getmaskarray(original).any(axis=0) & np.isfinite(original.data).all(axis=0)
-                            values = calibrated.read(window=win, masked=True)
-                            usable = ~np.ma.getmaskarray(values).any(axis=0) & np.isfinite(values.data).all(axis=0)
-                            if (valid & ~usable).any() or (values.data[:,valid] < 0).any():
-                                raise ValueError('校正结果丢失原有效像素或出现负值；请检查有效域和输出物理域')
-                pending.replace(output)
-                save_record(receipt, dict(signature=signature))
-                generated += 1
-            copied_label = target / 'labels' / row['split'] / row['label_name']
-            if not copied_label.exists() or copied_label.stat().st_mtime_ns != label.stat().st_mtime_ns or copied_label.stat().st_size != label.stat().st_size:
-                shutil.copy2(label, copied_label)
-            save_record(target/'processing_status.json', dict(stage=stage, complete=False, completed=number,
-                        expected=len(rows), reused=reused, generated=generated, last_scene=row['scene_id']))
+        for scene, match in process_scene_rows(rows, workers, process_one):
+            reused += int(match)
+            generated += int(not match)
+            completed = reused + generated
+            save_record(target/'processing_status.json', dict(stage=stage, complete=False, completed=completed,
+                        expected=len(rows), reused=reused, generated=generated, last_scene=scene))
+            if workers > 1:
+                print(f'{stage} 已完成 {completed}/{len(rows)} 景（复用 {reused}，新生成 {generated}）', flush=True)
         write_relative_manifest(manifest, target/'split_manifest.csv')
         if stage == 'normalized':
             # 在发布完成标记前预建窗口索引；训练只读取，不再估计/应用归一化。

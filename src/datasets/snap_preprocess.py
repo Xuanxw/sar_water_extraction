@@ -3,6 +3,7 @@
 由image_process.py显式生成独立缓存，训练/验证/推理只读复用。源影像和标签不改写。
 仅临时补充真实的波段单位，不伪造SLC、卫星类型或校正LUT。
 """
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,10 +12,10 @@ import hashlib
 import json
 import subprocess
 import shutil
-from time import perf_counter
+from time import perf_counter, sleep
 import xml.etree.ElementTree as ET
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 import numpy as np
 import rasterio
 
@@ -24,13 +25,36 @@ CACHE_DIR = None
 WORK_DIR = None
 GPT_THREADS = 4
 GPT_TILE_CACHE = '512M'
+GPT_SCENE_WORKERS = 1
 
 
-def configure_paths(gpt_path, cache_dir, work_dir, *, threads=4, tile_cache='512M'):
+def configure_paths(gpt_path, cache_dir, work_dir, *, threads=4, tile_cache='512M', scene_workers=1):
     """只接收执行层的SNAP运行配置，不启动处理、不创建目录。"""
-    global GPT_PATH, CACHE_DIR, WORK_DIR, GPT_THREADS, GPT_TILE_CACHE
+    global GPT_PATH, CACHE_DIR, WORK_DIR, GPT_THREADS, GPT_TILE_CACHE, GPT_SCENE_WORKERS
+    if type(scene_workers) is not int or scene_workers < 1:
+        raise ValueError("scene_workers 必须为正整数")
+    GPT_SCENE_WORKERS = scene_workers
     GPT_PATH, CACHE_DIR, WORK_DIR = Path(gpt_path), Path(cache_dir), Path(work_dir)
     GPT_THREADS, GPT_TILE_CACHE = int(threads), str(tile_cache)
+
+
+@contextmanager
+def gpt_slot():
+    """每个 GPT 独享用户目录。第一个位置沿用串行锁，可与其他入口共用缓存。"""
+    locks = [FileLock(str(CACHE_DIR / ('gpt.lock' if i == 0 else f'gpt_{i}.lock')))
+             for i in range(GPT_SCENE_WORKERS)]
+    while True:
+        for i, lock in enumerate(locks):
+            try:
+                lock.acquire(timeout=0)
+            except Timeout:
+                continue
+            try:
+                yield CACHE_DIR / ('snap_userdir' if i == 0 else f'snap_userdir_{i}')
+            finally:
+                lock.release()
+            return
+        sleep(0.2)
 
 
 @lru_cache(maxsize=4)
@@ -101,20 +125,19 @@ class SnapSpeckleFilter:
                 print(f'SNAP Lee整景准备：{source.name}；输入域={self.config["input_domain"]}', flush=True)
                 # 发布新影像之前移除旧完成标记；失败时保留日志，下一次重新处理本景。
                 record.unlink(missing_ok=True)
-                with FileLock(str(CACHE_DIR/'gpt.lock')):
-                    # 中间影像放SSD；完成后跨盘复制到I盘临时文件，再在同盘原子发布。
-                    # 工作目录不进入数值配置/缓存键，历史完成景仍可直接复用。
-                    WORK_DIR.mkdir(parents=True, exist_ok=True)
-                    with TemporaryDirectory(prefix='work_', dir=WORK_DIR) as temporary:
-                        work = Path(temporary)
-                        timings = self.run(source, bands, work/'filtered.tif', work, folder) or {}
-                        started = perf_counter()
-                        pending_image = folder/'filtered.tif.partial'
-                        shutil.copyfile(work/'filtered.tif', pending_image)
-                        pending_image.replace(output)
-                        timings['cache_publish_seconds'] = round(perf_counter()-started, 3)
-                        (folder/'timings.json').write_text(json.dumps(timings, indent=2), encoding='utf-8')
-                        print(f'SNAP分阶段耗时（秒）：{timings}', flush=True)
+                # 中间影像放SSD；完成后跨盘复制到I盘临时文件，再在同盘原子发布。
+                # 工作目录不进入数值配置/缓存键，历史完成景仍可直接复用。
+                WORK_DIR.mkdir(parents=True, exist_ok=True)
+                with TemporaryDirectory(prefix='work_', dir=WORK_DIR) as temporary:
+                    work = Path(temporary)
+                    timings = self.run(source, bands, work/'filtered.tif', work, folder) or {}
+                    started = perf_counter()
+                    pending_image = folder/'filtered.tif.partial'
+                    shutil.copyfile(work/'filtered.tif', pending_image)
+                    pending_image.replace(output)
+                    timings['cache_publish_seconds'] = round(perf_counter()-started, 3)
+                    (folder/'timings.json').write_text(json.dumps(timings, indent=2), encoding='utf-8')
+                    print(f'SNAP分阶段耗时（秒）：{timings}', flush=True)
                 pending = record.with_suffix('.json.partial')
                 pending.write_text(json.dumps(signature, ensure_ascii=False, indent=2), encoding='utf-8')
                 pending.replace(record)
@@ -144,14 +167,13 @@ class SnapSpeckleFilter:
         timings['input_preparation_seconds'] = round(perf_counter()-started, 3)
         graph_path, raw_output = diagnostics/'graph.xml', work/'snap_output.tif'
         self.write_graph(graph_path, adapted, raw_output, len(bands))
-        userdir = CACHE_DIR/'snap_userdir'
-        userdir.mkdir(parents=True, exist_ok=True)
-        command = [str(GPT_PATH), str(graph_path), '-c', GPT_TILE_CACHE, '-q', str(GPT_THREADS),
-                   '-Dsnap.userdir=' + str(userdir)]
         # 将Java输出写入日志，报错保留原始原因；不退回旧Lee继续训练。
         log = diagnostics/'gpt.log'
         started = perf_counter()
-        with log.open('w', encoding='utf-8') as stream:
+        with gpt_slot() as userdir, log.open('w', encoding='utf-8') as stream:
+            userdir.mkdir(parents=True, exist_ok=True)
+            command = [str(GPT_PATH), str(graph_path), '-c', GPT_TILE_CACHE, '-q', str(GPT_THREADS),
+                       '-Dsnap.userdir=' + str(userdir)]
             completed = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT,
                                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         timings['gpt_seconds'] = round(perf_counter()-started, 3)
@@ -232,7 +254,7 @@ class SnapSpeckleFilter:
     def __call__(self, image, valid):
         """兼容旧切片集成推理的数组入口；整景训练使用prepare_file缓存，不走此慢路径。"""
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(CACHE_DIR/'gpt.lock')), TemporaryDirectory(prefix='array_', dir=CACHE_DIR) as temporary:
+        with FileLock(str(CACHE_DIR/'array_diagnostics.lock')), TemporaryDirectory(prefix='array_', dir=CACHE_DIR) as temporary:
             work = Path(temporary)
             diagnostics = CACHE_DIR/'array_diagnostics'
             diagnostics.mkdir(exist_ok=True)
