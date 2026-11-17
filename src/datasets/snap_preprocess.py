@@ -149,21 +149,7 @@ class SnapSpeckleFilter:
         timings = {}
         started = perf_counter()
         adapted = work/'input.tif'
-        with rasterio.open(source) as src:
-            profile = dict(driver='GTiff', width=src.width, height=src.height, count=len(bands),
-                           dtype='float32', crs=src.crs, transform=src.transform, nodata=-9999.,
-                           tiled=True, blockxsize=256, blockysize=256, BIGTIFF='IF_SAFER')
-            with rasterio.open(adapted, 'w', **profile) as dst:
-                for _, window in dst.block_windows(1):
-                    values = src.read(bands, window=window, masked=True, out_dtype='float32')
-                    good = ~np.ma.getmaskarray(values).any(axis=0) & np.isfinite(values.data).all(axis=0)
-                    if (values.data[:, good] < 0).any():
-                        raise ValueError(f'线性SAR输入出现有效负值：{source}；请检查物理域/NoData')
-                    limit = np.sqrt(np.finfo('float32').max) if self.config['input_domain'] == 'amplitude' else np.finfo('float32').max
-                    if (values.data[:, good] > limit).any():
-                        raise ValueError(f'输入值超出Float32功率范围：{source}')
-                    dst.write(np.where(good[None], values.data, -9999).astype('float32'), window=window)
-
+        profile = self.prepare_input(source, bands, adapted)
         timings['input_preparation_seconds'] = round(perf_counter()-started, 3)
         graph_path, raw_output = diagnostics/'graph.xml', work/'snap_output.tif'
         self.write_graph(graph_path, adapted, raw_output, len(bands))
@@ -182,8 +168,33 @@ class SnapSpeckleFilter:
 
         # SNAP可能改变NoData标记；用原有效域恢复，合法0值仍有效，标签网格不变。
         started = perf_counter()
+        self.restore_output(source, adapted, raw_output, output, profile)
+        timings['restore_mask_and_compress_seconds'] = round(perf_counter()-started, 3)
+        return timings
+
+    def prepare_input(self, source, bands, adapted):
+        """按选定波段写入 GPT 共用的 Float32 输入，合法零保留，无效值编码为 -9999。"""
+        with rasterio.open(source) as src:
+            profile = dict(driver='GTiff', width=src.width, height=src.height, count=len(bands),
+                           dtype='float32', crs=src.crs, transform=src.transform, nodata=-9999.,
+                           tiled=True, blockxsize=256, blockysize=256, BIGTIFF='IF_SAFER')
+            with rasterio.open(adapted, 'w', **profile) as dst:
+                for _, window in dst.block_windows(1):
+                    values = src.read(bands, window=window, masked=True, out_dtype='float32')
+                    good = ~np.ma.getmaskarray(values).any(axis=0) & np.isfinite(values.data).all(axis=0)
+                    if (values.data[:, good] < 0).any():
+                        raise ValueError(f'线性SAR输入出现有效负值：{source}；请检查物理域/NoData')
+                    limit = np.sqrt(np.finfo('float32').max) if self.config['input_domain'] == 'amplitude' else np.finfo('float32').max
+                    if (values.data[:, good] > limit).any():
+                        raise ValueError(f'输入值超出Float32功率范围：{source}')
+                    dst.write(np.where(good[None], values.data, -9999).astype('float32'), window=window)
+        return profile
+
+    def restore_output(self, source, adapted, raw_output, output, profile):
+        """校验原始网格，恢复输入有效域并无损压缩到同网格 GeoTIFF。"""
+        profile = profile.copy()
         with rasterio.open(adapted) as original, rasterio.open(raw_output) as filtered:
-            if filtered.shape != original.shape or filtered.count != len(bands):
+            if filtered.shape != original.shape or filtered.count != profile['count']:
                 raise ValueError('SNAP输出尺寸/波段数与输入不一致')
             # 旧切片数组入口没有地理参考；真实ORG有CRS时必须同时保持投影和仿射网格。
             if original.crs is not None and (filtered.crs != original.crs or not filtered.transform.almost_equals(original.transform)):
@@ -194,17 +205,14 @@ class SnapSpeckleFilter:
                     good = original.read_masks(1, window=window) > 0
                     values = filtered.read(window=window)
                     if not np.isfinite(values[:, good]).all() or (values[:, good] < 0).any():
-                        raise ValueError(f'SNAP在有效区域输出非法值；查看 {log}')
+                        raise ValueError(f'SNAP在有效区域输出非法值；查看 {raw_output}')
                     dst.write(np.where(good[None], values, -9999).astype('float32'), window=window)
                 dst.update_tags(input_domain=self.config['input_domain'], calibration='not_applied',
                                 speckle='SNAP GPT Lee', source=str(source))
-                for b in range(1, len(bands)+1):
+                for b in range(1, profile['count']+1):
                     dst.set_band_unit(b, self.config['input_domain'])
 
-        timings['restore_mask_and_compress_seconds'] = round(perf_counter()-started, 3)
-        return timings
-
-    def write_graph(self, path, source, output, count):
+    def write_graph(self, path, source, output, count, *, format_name="GeoTIFF-BigTIFF"):
         """图中显式平方/开方；输入为功率时保持功率，不做dB或辐射校正。"""
         graph = ET.Element('graph', id='ORG_SNAP_Lee')
         ET.SubElement(graph, 'version').text = '1.0'
@@ -247,7 +255,7 @@ class SnapSpeckleFilter:
             last_node = 'Restore'
         write = node('Write', 'Write', last_node)
         ET.SubElement(write, 'file').text = str(output)
-        ET.SubElement(write, 'formatName').text = 'GeoTIFF-BigTIFF'
+        ET.SubElement(write, 'formatName').text = format_name
         ET.indent(graph)
         ET.ElementTree(graph).write(path, encoding='utf-8', xml_declaration=True)
 
