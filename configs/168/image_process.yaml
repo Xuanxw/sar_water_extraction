@@ -23,14 +23,14 @@ paths:
   AUDIT_OUTPUT_ROOT: radiometry_audit
   QUICKLOOK_IMAGE_ROOT: prepared_scenes/images
   CALIBRATED_ROOT: processed_scenes/calibrated
-  FILTERED_ROOT: processed_scenes/filtered
+  FILTERED_ROOT: /home/lenovo/apps/sar_water_extraction/data/processed_scenes/filtered
   NORMALIZED_ROOT: processed_scenes/normalized
   # null则由本批train重新统计；batch 2复用batch 1，保持多批输入尺度一致。
   NORMALIZATION_REFERENCE: null
   WINDOW_CACHE_DIR: /tmp/lenovo/data_cache/bc_scenes
   SNAP_GPT_PATH: /home/lenovo/apps/esa-snap/bin/gpt
   SNAP_CACHE_DIR: snap_lee_cache
-  # 每景的临时读写使用 168 本机 SSD，已完成的滤波成果保存在数据盘。
+  # 每景的临时读写和正式滤波成果均使用 168 本机 SSD。
   SNAP_WORK_DIR: /tmp/lenovo/sar_snap_work
   NORMALIZE_WORK_DIR: /tmp/lenovo/data_cache/normalize_work
   # 已校正GeoTIFF根目录：train/val下同名文件。
