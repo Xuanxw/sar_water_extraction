@@ -136,3 +136,25 @@ ORG批处理保留原分割栅格`water.tif`，水体矢量仅输出清理后的
 `org.filter.input_domain: amplitude`执行幅度平方→功率Lee滤波→恢复幅度。Base30在滤波后幅度上取暗侧第30百分位；Otsu在`log_amplitude`即20log10(max(A,floor))上估计，再恢复到幅度单位分类，失败回退同一幅度域Q30。Otsu可分性不是识别精度。
 
 两组均启用20公里支持域和`height_envelope.mode: regional_dem`，根据每景潜在同斜距地形所需DEM计算高程包络。案例路径、运行命令和结果目录见`configs/北京密云区/README.md`。旧功率案例配置已清理，已有成果内的参数快照保留，不作为新幅度输入入口。
+
+### Otsu坡度风险约束（独立开关）
+
+ORG的`threshold.slope_guard: {enabled: true, slope_deg: 15.0}`在暗侧Otsu与`radar_profiles`组合下启用：已知坡度大于15°采用Otsu与当前百分位阈值的较小者，其他位置保持Otsu；坡度未知不硬排除。未配置该开关的基线算法不变。`water_percent: 30`时百分位即Q30。
+
+独立风险图`slope_threshold_rejection.tif`在分割和成面阶段共同应用，不能与物理阴影/叠掩混称。`extraction`记录实际阈值、原始候选被收紧面积及坡度未知面积；这些不是误检率。面积与其他排除项可能重叠。
+
+`org.scene_ids`可明确选取景号，未设置或空列表表示全部扫描结果。`paths.REUSE_RESULTS_DIR`可只读复用同科学参数的已完成实验输入，新实验必须使用独立OUTPUT_DIR和CACHE_DIR；裁剪/滤波通过VRT引用原缓存，统计和几何掩膜导入新工作目录。它不复用旧水体结果，也不新增全局续跑签名。修改参数后仍应使用新目录或显式重算。
+
+## ORG道路冲突核验
+
+`osm_roads.py`负责共享OSM道路下载缓存、米制缓冲与只读水体冲突输出，由`org_pipeline.py`的`02R/08R`阶段调用。通过独立YAML的`road_review.enabled`启用；不会参与阈值决策、地形修正或水体成面。
+
+每景的`road_review/road_conflict.tif`按三个波段记录原始候选、辅助修正后、最终成面的路网冲突；同时生成核验面、PNG与面积JSON。完整下载和核验阶段支持续跑，不完整响应不当作空路网。实现不依赖Qt、GeoPandas或requests。
+
+完整配置、输出定义及运行命令见`configs/北京密云区/README.md`的“OSM道路与水体冲突核验”。
+
+## ORG处理过程快视图
+
+`org_quicklook.py`生成每景`quicklook.png`，展示纯阈值候选、实际启用的掩膜、辅助修正结果、清理后TIF、实际SHP缩略图及分阶段删除/新增。面积和变化先按原生像元分块计算，缩略图不作精度评价；道路仅核验。原有`presentation/water_overlay.png`继续保留。
+
+旧格式PNG可在完整景续跑时单独升级，不重新分割或改水体文件。`output.process_preview_size`控制读取的缩略尺寸，`output.refresh_quicklook`可强制重绘。缺失图层明确显示；旧土地覆盖掩膜可从缓存重建显示。显示设置和掩膜定义见案例配置目录README。

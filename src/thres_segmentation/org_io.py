@@ -52,8 +52,11 @@ def inventory(root, options):
              'sensor':match[1],'acquisition_time':time.isoformat(),
              'date':time.astimezone(ZoneInfo(options['date_timezone'])).date().isoformat(),'source_stamp':stamp(path)}
         records.setdefault(identifier, []).append(record)
+    selected_ids={str(s).upper() for s in options.get('scene_ids', [])}
     result=[]
     for identifier, candidates in records.items():
+        if selected_ids and identifier not in selected_ids:
+            continue
         archives=[r for r in candidates if r['member'] is not None]
         # 使用原始压缩包及其中XML，与此前生产来源保持一致；不删除解压文件。
         # 这是明确的输入优先级，不以同名推断文件内容完全相同。
@@ -67,6 +70,9 @@ def inventory(root, options):
             paths='；'.join(r['path'] for r in (archives or candidates))
             raise ValueError(f'同景存在多个版本，请保留一个输入：{paths}')
         result.append(selected)
+    missing=selected_ids-{r['scene_id'] for r in result}
+    if missing:
+        raise ValueError('未找到配置的ORG景号：'+'；'.join(sorted(missing)))
     if not result:raise ValueError(f'没有已命名完成的ORG文件：{root}')
     return sorted(result,key=lambda r:(r['date'],r['scene_id']))
 
@@ -230,4 +236,6 @@ def export_water_polygon(source, overwrite=False, **kwargs):
     source=Path(source)
     if source.with_name('slope.tif').exists():kwargs['slope_path']=source.with_name('slope.tif')
     if source.with_name('terrain_exclusion.tif').exists():kwargs['terrain_path']=source.with_name('terrain_exclusion.tif')
+    if source.with_name('slope_threshold_rejection.tif').exists():
+        kwargs['slope_rejection_path']=source.with_name('slope_threshold_rejection.tif')
     return build_water_polygons(source.with_suffix('.tif'),source.with_name('water_polygon.shp'),overwrite=overwrite,**kwargs)

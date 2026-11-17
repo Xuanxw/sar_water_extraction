@@ -11,6 +11,7 @@ from rasterio.features import geometry_mask
 from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
+from rasterio.shutil import copy as copy_raster
 from pyproj import Transformer
 from shapely.geometry import mapping
 from shapely import transform as transform_geometry
@@ -23,8 +24,9 @@ from utils.raster import windows
 from utils.water_presentation import save_raster_water_presentation
 from thres_segmentation.metadata import read_source_metadata
 from thres_segmentation.scene_pipeline import disk_percentiles
-from thres_segmentation.threshold import select_otsu_or_percentile
+from thres_segmentation.threshold import select_otsu_or_percentile, slope_otsu_rejection
 from thres_segmentation.quality_review import export_quality_review
+from thres_segmentation.org_quicklook import save_org_process_quicklook, quicklook_is_current
 from thres_segmentation.water_analysis import pixel_areas,area_sum
 
 
@@ -61,6 +63,68 @@ class SceneProgress:
             else:raise ValueError(f'阶段产物不在配置的缓存或成果目录内：{path}')
         self.state['stages'][name]={'complete':True,'files':records}
         write_json(self.path,self.state, default=str)
+
+
+def reuse_reference_inputs(reference_root, reference_config, record, progress, folder, log, reuse_terrain=True):
+    """将同参数已完成实验的计算输入接入新实验，源文件只读，不复制大幅SAR。
+
+    裁剪/Lee用独立VRT引用原缓存，统计复制JSON。reuse_terrain为真时才复制几何；
+    剖面配置改变时关闭该项，由本轮重新计算，不能导入旧30米类别图。
+    新实验仍使用自身progress续跑；源缓存须保留，VRT不会成为独立像元备份。
+    不导入旧水体分类、矢量或质量结果，保证本轮重新分割并独立成面。
+    返回本景是否复用了完整地形，主流程不能把未完成的参考掩膜传入分割。
+    """
+    from thres_segmentation.product_layout import scene_product
+    source=Path(reference_root)/record['date']/record['scene_id']
+    old_paths=reference_config['paths']
+    old_cache=Path(old_paths['CACHE_DIR'])/'scenes'/record['scene_id']
+    old_progress = old_cache / 'progress.json'
+    if not old_progress.exists():
+        log.message('参考实验尚未开始本景，本轮独立处理；不读取未完成产物')
+        return False
+    old_state=json.loads(old_progress.read_text(encoding='utf-8'))
+    roots={'cache':old_cache,'output':source,'snap':Path(old_paths['SNAP_CACHE_DIR'])}
+    for stage in ('crop','filter','statistics'):
+        if progress.completed(stage):
+            continue
+        receipt=old_state['stages'].get(stage, {})
+        if not receipt.get('complete'):
+            log.message(f'参考实验的{stage}尚未完成，本轮从未完成阶段继续计算')
+            return False
+        inputs=[roots[p['root']]/p['path'] for p in receipt['files']]
+        if not receipt['complete'] or not all(p.is_file() for p in inputs):
+            raise FileNotFoundError(f'对照输入阶段尚未完整：{record["scene_id"]}/{stage}')
+        if stage in ('crop','filter'):
+            target=progress.folder/(stage+'_reference.vrt')
+            copy_raster(inputs[0],target,driver='VRT')
+            files=[target]
+            if stage=='crop':
+                for name in ('metadata.json','source.xml'):
+                    shutil.copy2(scene_product(source,name),folder/name)
+                    files.append(folder/name)
+        else:
+            target=progress.folder/'statistics.json'
+            shutil.copy2(inputs[0],target)
+            files=[target]
+        progress.mark(stage,files)
+        log.message(f'只读复用对照输入：{stage}；{inputs[0]}','REUSED')
+    # 参考实验仍在运行时，只接收已完成mask阶段；缺少几何时用本轮独立缓存计算。
+    if not reuse_terrain:
+        return False
+    if progress.completed('reference_terrain'):
+        return True
+    if not old_state['stages'].get('mask', {}).get('complete'):
+        log.message('参考实验本景地形/分割尚未完成，本轮独立计算地形')
+        return False
+    if not progress.completed('reference_terrain'):
+        files=[]
+        for name in ('terrain_exclusion.tif','shadow_mask.tif','layover_mask.tif','terrain_geometry.json'):
+            target=folder/name
+            shutil.copy2(scene_product(source,name),target)
+            files.append(target)
+        progress.mark('reference_terrain',files)
+        log.message('复用对照阴影/叠掩掩膜，本轮不重新估计几何','REUSED')
+    return True
 
 
 def statistics(filtered, aoi, config, folder, history_percentiles=None):
@@ -128,9 +192,17 @@ def statistics(filtered, aoi, config, folder, history_percentiles=None):
 def segment(filtered, aoi, auxiliary, config, folder, stats, save_context=True, terrain_products=None):
     """分块分割，未知保持255；阈值对照可通过terrain_products固定既有地形掩膜。"""
     post=config['org']['postprocess'];size=config['processing']['block_size']
+    guard=config['threshold'].get('slope_guard',{})
+    guard_enabled=guard.get('enabled',False)
+    slope_limit=float(guard.get('slope_deg',15.0))
+    percentile_threshold=stats.get('threshold_selection',{}).get('percentile_threshold')
+    if guard_enabled and ('slope' not in auxiliary or percentile_threshold is None):
+        raise ValueError('坡度阈值约束需要坡度数据及同景百分位阈值统计')
     radius=post['opening_radius_px']+post['closing_radius_px'];halo=2*radius
     totals={'raw_area_m2':0.,'final_area_m2':0.,'valid_area_m2':0.,'landcover_removed_m2':0.,
             'terrain_removed_m2':0.,'auxiliary_unknown_m2':0.,'sensitivity_area_m2':[0.,0.,0.]}
+    if guard_enabled:
+        totals.update(slope_threshold_removed_m2=0.,slope_threshold_unknown_m2=0.)
     files=[]
     geometry_mode=post['terrain_enabled'] and post.get('terrain_method','slope_only') in ('gui_geometry','radar_profiles')
     if geometry_mode:
@@ -148,7 +220,10 @@ def segment(filtered, aoi, auxiliary, config, folder, stats, save_context=True, 
         terrain_files=[] if terrain_products is not None else [*terrain.values(),folder/'terrain_geometry.json']
     with ExitStack() as stack:
         src=stack.enter_context(rasterio.open(filtered));profile=src.profile.copy()
-        profile.update(dtype='uint8',nodata=255,count=1)
+        # 只读复用输入可能是VRT；输出始终是实际GeoTIFF，不能继承VRT写入驱动。
+        profile.update(driver='GTiff',dtype='uint8',nodata=255,count=1,BIGTIFF='IF_SAFER')
+        if src.driver=='VRT':
+            profile.update(compress='lzw',tiled=True,blockxsize=256,blockysize=256)
         readers={}
         for name,path in auxiliary.items():
             if name in ('copernicus','aspect'):continue
@@ -168,6 +243,16 @@ def segment(filtered, aoi, auxiliary, config, folder, stats, save_context=True, 
             p=profile.copy()
             if name=='slope':p.update(dtype='float32',nodata=np.nan)
             writers[name]=stack.enter_context(rasterio.open(path.with_suffix('.partial.tif'),'w',**p))
+        if guard_enabled:
+            path=folder/'slope_threshold_rejection.tif'
+            files.append(path)
+            writers['slope_threshold_rejection']=stack.enter_context(
+                rasterio.open(path.with_suffix('.partial.tif'),'w',**profile))
+        if save_context and post['landcover_enabled']:
+            path = folder / 'landcover_exclusion.tif'
+            files.append(path)
+            writers['landcover_exclusion'] = stack.enter_context(
+                rasterio.open(path.with_suffix('.partial.tif'), 'w', **profile))
         for core in windows(src,size):
             x0=max(0,int(core.col_off)-halo);y0=max(0,int(core.row_off)-halo)
             x1=min(src.width,int(core.col_off+core.width)+halo);y1=min(src.height,int(core.row_off+core.height)+halo)
@@ -180,11 +265,13 @@ def segment(filtered, aoi, auxiliary, config, folder, stats, save_context=True, 
             compare=(lambda t:data.data<t) if config['threshold']['mode']=='bottom' else (lambda t:data.data>=t)
             raw=compare(stats['thresholds_amplitude'][0])&valid
             excluded_cover=np.zeros(valid.shape,bool);excluded_slope=excluded_cover.copy()
+            cover_known = np.zeros(valid.shape, bool)
             history=np.full(valid.shape,255,np.uint8);slope=np.full(valid.shape,np.nan,np.float32)
             aux_missing=np.zeros(valid.shape,bool)
             if 'worldcover' in readers:
                 cover=readers['worldcover'].read(1,window=win,masked=True)
                 known=~np.ma.getmaskarray(cover)&np.isin(cover.data,(10,20,30,40,50,60,70,80,90,95,100))
+                cover_known = known
                 if post['landcover_enabled']:
                     excluded_cover=known&np.isin(cover.data,post['excluded_cover_classes']);aux_missing|=~known
                 if post['history_enabled'] and 'history' not in readers:
@@ -201,34 +288,57 @@ def segment(filtered, aoi, auxiliary, config, folder, stats, save_context=True, 
             if geometry_mode:
                 terrain=readers['terrain_exclusion'].read(1,window=win,masked=True)
                 excluded_slope=(~np.ma.getmaskarray(terrain))&(terrain.data==1)
+            slope_rejected=np.zeros(valid.shape,bool)
+            if guard_enabled:
+                slope_rejected=slope_otsu_rejection(data.data,valid,slope,
+                    stats['thresholds_amplitude'][0],percentile_threshold,slope_limit)
             def correct(base):
                 value=compare(base)&valid
                 if post['history_enabled']:
                     # 历史水体只能恢复仍满足较宽SAR阈值的像元，不能填入未覆盖区域。
                     value |= (history==1)&compare(stats['thresholds_amplitude'][3])&valid
-                value &= ~(excluded_cover|excluded_slope)
+                # 风险约束位于历史恢复之后；不允许恢复逻辑绕过更严格的阈值。
+                value &= ~(excluded_cover|excluded_slope|slope_rejected)
                 if post['opening_radius_px']:
                     r=post['opening_radius_px'];yy,xx=np.ogrid[-r:r+1,-r:r+1]
                     value=binary_opening(value,structure=xx*xx+yy*yy<=r*r)
                 if post['closing_radius_px']:
                     r=post['closing_radius_px'];yy,xx=np.ogrid[-r:r+1,-r:r+1]
                     value=binary_closing(value,structure=xx*xx+yy*yy<=r*r)
-                return value&valid&~(excluded_cover|excluded_slope)
+                return value&valid&~(excluded_cover|excluded_slope|slope_rejected)
             final=correct(stats['thresholds_amplitude'][0]);good=valid[crop]
             for name,mask in (('raw',raw[crop]),('water',final[crop]),('coverage',good)):
                 if name in writers:
                     writers[name].write(np.where(good,mask,255).astype('uint8'),1,window=core)
             if 'history' in writers:writers['history'].write(np.where(valid,history,255)[crop].astype('uint8'),1,window=core)
             if 'slope' in writers:writers['slope'].write(np.where(valid,slope,np.nan)[crop],1,window=core)
+            if guard_enabled:
+                writers['slope_threshold_rejection'].write(
+                    np.where(good,slope_rejected[crop],255).astype('uint8'),1,window=core)
+            if 'landcover_exclusion' in writers:
+                # 保存实际应用的类别排除，不把辅助数据缺测写成确认不排除。
+                writers['landcover_exclusion'].write(
+                    np.where(good & cover_known[crop], excluded_cover[crop], 255).astype('uint8'), 1, window=core)
             areas=pixel_areas(src.crs,src.window_transform(core),good.shape)
             for key,mask in (('raw_area_m2',raw[crop]),('final_area_m2',final[crop]),('valid_area_m2',good),
                 ('landcover_removed_m2',(raw&excluded_cover)[crop]),('terrain_removed_m2',(raw&excluded_slope)[crop]),
                 ('auxiliary_unknown_m2',(valid&aux_missing)[crop])):
                 totals[key]+=area_sum(mask,areas)
+            if guard_enabled:
+                totals['slope_threshold_removed_m2']+=area_sum((raw&slope_rejected)[crop],areas)
+                totals['slope_threshold_unknown_m2']+=area_sum((valid&~np.isfinite(slope))[crop],areas)
             for i,t in enumerate(stats['thresholds_amplitude'][:3]):
                 value=final if i==0 else correct(t)
                 totals['sensitivity_area_m2'][i]+=area_sum(value[crop],areas)
     for path in files:path.with_suffix('.partial.tif').replace(path)
+    if guard_enabled:
+        totals['slope_threshold_policy']={
+            'slope_deg':slope_limit,'percentile':config['threshold']['water_percent'],
+            'steep_threshold':min(stats['thresholds_amplitude'][0],percentile_threshold),
+            'else_threshold':stats['thresholds_amplitude'][0],
+            'unknown_slope':'保留原Otsu判别','mask':'slope_threshold_rejection.tif',
+            'mask_values':'1=阈值风险排除，0=未排除（含坡度未知），255=SAR无效',
+            'note':'独立风险约束，不是阴影/叠掩；面积为原始候选交集，与其他排除面积可重叠。'}
     write_json(folder/'extraction.json',{'statistics':stats,**totals}, default=str)
     return files+[folder/'extraction.json']+(terrain_files if geometry_mode else [])
 
@@ -290,10 +400,36 @@ def _run_org_scenes(config,log):
             raise ValueError('形态学半径需为非负整数')
         if set(post['history_water_values'])&set(post['history_dry_values']):
             raise ValueError('历史水体和非水体编码不能重叠')
+        guard=config['threshold'].get('slope_guard',{})
+        if guard.get('enabled',False):
+            if config['threshold'].get('method')!='otsu' or config['threshold']['mode']!='bottom':
+                raise ValueError('坡度风险约束用于暗侧Otsu；其他阈值方法请关闭slope_guard')
+            if not np.isfinite(guard.get('slope_deg',15.0)) or not 0<=guard.get('slope_deg',15.0)<=90:
+                raise ValueError('slope_guard.slope_deg须为0～90度的有限值')
+            if not post['terrain_enabled'] or post.get('terrain_method')!='radar_profiles':
+                raise ValueError('本轮坡度约束叠加于radar_profiles，不使用全坡向坡度硬删除')
+            log.message(f"坡度风险约束：>{guard.get('slope_deg',15.0):g}°采用Otsu/百分位较小阈值；坡度未知保留")
         if len(config['input']['bands'])!=1:raise ValueError('ORG生产本轮使用一个极化波段')
         records=inventory(paths['ORG_ROOT'],options)
         aoi,crs=read_aoi(paths['AOI_PATH'],options['output_crs'])
         root=paths['OUTPUT_DIR'] or paths['OUTPUT_ROOT']/'org_scenes'
+        reference_root=paths.get('REUSE_RESULTS_DIR')
+        reference_config=None
+        if reference_root is not None:
+            reference_config=json.loads((reference_root/'run.json').read_text(encoding='utf-8'))['config']
+            if (root.resolve()==reference_root.resolve() or
+                    paths['CACHE_DIR'].resolve()==Path(reference_config['paths']['CACHE_DIR']).resolve()):
+                raise ValueError('对照实验的成果和阶段缓存须独立，不能写入参考实验目录')
+            # 仅导入科学参数相同的前置阶段；这不是新的全局续跑签名。
+            for section in ('org','input','threshold','polygon_output'):
+                ignored={'scene_ids','profile_geometry'} if section=='org' else {'slope_guard'} if section=='threshold' else set()
+                current={k:v for k,v in config[section].items() if k not in ignored}
+                reference={k:v for k,v in reference_config[section].items() if k not in ignored}
+                if current!=reference:
+                    raise ValueError(f'前置输入复用要求{section}前置参数与参考一致；仅允许改变坡度约束及剖面几何')
+            for key in ('ORG_ROOT','AOI_PATH'):
+                if paths[key].resolve()!=Path(reference_config['paths'][key]).resolve():
+                    raise ValueError(f'前置输入复用要求同一{key}')
         root.mkdir(parents=True,exist_ok=True)
     # 防止两个进程同时改写同一任务；不会停止用户的其他训练/下载。
     with FileLock(str(root/'processing.lock'),timeout=0):
@@ -306,6 +442,14 @@ def _run_org_scenes(config,log):
         print(f'ORG逐景处理：{len(records)}景，{len({r["date"] for r in records})}日期；输出：{root}',flush=True)
         with log.stage('02','辅助数据下载/复用与空间对齐'):
             auxiliary=prepare_auxiliary(config,aoi,crs)
+        road_network = None
+        road_settings = config.get('road_review', {})
+        if road_settings.get('enabled', False):
+            from thres_segmentation.osm_roads import prepare_osm_road_network
+            with log.stage('02R', 'OSM共享路网下载/复用，仅核验'):
+                road_network = prepare_osm_road_network(
+                    aoi, crs, paths['OSM_CACHE_DIR'], road_settings, log.message,
+                )
         polygon_options=dict(options=config.get('polygon_output',{}),postprocess=options['postprocess'],
                              cover_path=auxiliary.get('worldcover'),slope_path=auxiliary.get('slope'),
                              clip_geometry=aoi,clip_crs=crs)
@@ -322,7 +466,15 @@ def _run_org_scenes(config,log):
             with log.stage('SCENE','逐景处理总计',record['scene_id']) as scene_stage:
                 folder=root/record['date']/record['scene_id'];folder.mkdir(parents=True,exist_ok=True)
                 progress=SceneProgress(paths['CACHE_DIR'],record['scene_id'],folder,paths['SNAP_CACHE_DIR'],options['resume'])
+                preview_side = config['output'].get('process_preview_size', min(700, config['output']['preview_size']))
+                refresh_preview = config['output'].get('refresh_quicklook', False)
                 print(f'开始 {index}/{len(records)}：{record["scene_id"]}',flush=True)
+                if reference_config is not None:
+                    same_geometry = options.get('profile_geometry') == reference_config['org'].get('profile_geometry')
+                    reuse_terrain = reuse_reference_inputs(reference_root,reference_config,record,progress,folder,log,
+                                                          reuse_terrain=same_geometry)
+                    if not reuse_terrain:
+                        log.message('只复用裁剪/Lee/阈值统计；本轮独立重算细网格地形')
                 # 手动重跑入口时识别地形算法版本；复用滤波/分位数，避免误用修正前的掩膜。
                 if options['postprocess'].get('terrain_method')=='gui_geometry':
                     from thres_segmentation.terrain_geometry import TERRAIN_METHOD_VERSION
@@ -334,7 +486,8 @@ def _run_org_scenes(config,log):
                     from thres_segmentation.profile_terrain import PROFILE_METHOD_VERSION
                     terrain_record=folder/'terrain_geometry.json'
                     method=json.loads(terrain_record.read_text(encoding='utf-8')).get('method') if terrain_record.exists() else None
-                    if method!=PROFILE_METHOD_VERSION:
+                    # 显式同参数对照可沿用冻结旧几何；不要在每次续跑重复清空它的下游。
+                    if method!=PROFILE_METHOD_VERSION and not progress.completed('reference_terrain'):
                         for stage in ('mask','vector','quality','preview','complete'):progress.state['stages'].pop(stage,None)
                 if progress.completed('complete'):
                     scene_stage['status']='reused'
@@ -345,6 +498,16 @@ def _run_org_scenes(config,log):
                         had_polygon=(summary.get('water_polygon_shp')==str(polygon.resolve()) and summary.get('water_shp')==str(polygon.resolve()))
                         summary.update(water_shp=str(polygon.resolve()),water_polygon_shp=str(polygon.resolve()),quality_json=str((folder/'quality.json').resolve()))
                         if not had_polygon:write_json(folder/'scene.json',summary, default=str)
+                        # 展示格式升级只补PNG，不清空分割/几何完成记录。
+                        quicklook = folder / 'quicklook.png'
+                        if options['save_quicklook'] and (refresh_preview or not quicklook_is_current(quicklook, preview_side)):
+                            if progress.completed('filter'):
+                                original = progress.files('crop')[0] if progress.completed('crop') else None
+                                with log.stage('10', '补充处理过程快视图', record['scene_id']):
+                                    save_org_process_quicklook(progress.files('filter')[0], folder, quicklook,
+                                        preview_side, config, auxiliary, original_path=original, log=log.message)
+                            else:
+                                log.message('缺少滤波底图缓存，无法补过程图；保留已有水体成果')
                         # 补展示图只消费已有底图和最终掩膜，不重新分割或改变完成记录。
                         presentation = folder/'presentation'/'water_overlay.png'
                         if options['save_quicklook'] and not presentation.exists():
@@ -359,6 +522,7 @@ def _run_org_scenes(config,log):
                 crop=progress.folder/('intensity.tif' if options['filter']['input_domain']=='intensity' else 'amplitude.tif')
                 with log.stage('04','原始元数据/解压与行政区裁剪',record['scene_id']) as step:
                     if progress.completed('crop'):
+                        crop=progress.files('crop')[0]
                         step['status']='reused'
                     else:
                         print('  裁剪原始线性SAR及追溯元数据',flush=True)
@@ -398,16 +562,37 @@ def _run_org_scenes(config,log):
                     reason=selection['fallback_reason']
                     log.message(f"阈值方法：{selection['method_used']}；{options['filter']['input_domain']}阈值={stats['thresholds_amplitude'][0]:.6g}；"
                                 f"回退原因={reason or '无'}",'WARNING' if reason else 'INFO')
+                    if guard.get('enabled',False):
+                        strict=min(stats['thresholds_amplitude'][0],selection['percentile_threshold'])
+                        log.message(f"坡度>{guard.get('slope_deg',15.0):g}°严格阈值={strict:.6g}；"
+                                    f"Q{config['threshold']['water_percent']:g}={selection['percentile_threshold']:.6g}")
                 with log.stage('07','阈值分割及辅助修正',record['scene_id']) as step:
                     if progress.completed('mask'):step['status']='reused'
                     else:
-                        products=segment(filtered,scene_aoi,auxiliary,config,folder,stats)
+                        terrain_products=None
+                        if reference_config is not None and reuse_terrain:
+                            terrain_products={name:folder/(name+'.tif') for name in
+                                              ('shadow_mask','layover_mask','terrain_exclusion')}
+                        products=segment(filtered,scene_aoi,auxiliary,config,folder,stats,terrain_products=terrain_products)
                         (folder/'water_polygon.json').unlink(missing_ok=True)
                         progress.mark('mask',products)
                 water=folder/'water.tif';shp=folder/'water_polygon.shp'
                 with log.stage('08','完整水体面输出',record['scene_id']):
                     export_water_polygon(water,overwrite=not options['resume'],**polygon_options)
                     progress.mark('vector',list(folder.glob('water_polygon.*')))
+                if road_network is not None:
+                    from thres_segmentation.osm_roads import export_road_water_conflicts
+                    with log.stage('08R', '道路与水体冲突核验，不删除', record['scene_id']) as step:
+                        if progress.completed('road_review'):
+                            step['status'] = 'reused'
+                        else:
+                            files = export_road_water_conflicts(
+                                filtered, folder / 'raw.tif', water, folder / 'water_polygon.tif',
+                                road_network, folder / 'road_review',
+                                block_size=road_settings['block_size'],
+                                preview_size=road_settings['preview_size'], log=log.message,
+                            )
+                            progress.mark('road_review', files)
                 review=dict(config['quality_review']);enabled=review.pop('enabled')
                 with log.stage('09','质量JSON/分层核验点/疑似区域',record['scene_id']) as step:
                     if progress.completed('quality'):
@@ -435,6 +620,11 @@ def _run_org_scenes(config,log):
                         quality['correction_policy']=options['postprocess']
                         quality['not_evaluated']=['overlap_consistency','temporal_change','ray_traced_radar_occlusion']
                         if (folder/'terrain_geometry.json').exists():quality['terrain_geometry']=json.loads((folder/'terrain_geometry.json').read_text(encoding='utf-8'))
+                        if road_network is not None:
+                            quality['road_review'] = json.loads(
+                                (folder / 'road_review/road_review.json').read_text(encoding='utf-8')
+                            )
+                            quality['road_review']['directory'] = 'road_review'
                         write_json(folder/'quality.json',quality, default=str)
                         if enabled:
                             # 每景仅保留一份简洁质量JSON；矢量仍在review/下。
@@ -443,7 +633,8 @@ def _run_org_scenes(config,log):
                         progress.mark('quality',files)
                 with log.stage('10','输出快视图',record['scene_id']) as step:
                     if not options['save_quicklook']:step['status']='skipped'
-                    elif progress.completed('preview'):
+                    elif (progress.completed('preview') and not refresh_preview
+                          and quicklook_is_current(folder / 'quicklook.png', preview_side)):
                         step['status']='reused'
                         presentation = folder/'presentation'/'water_overlay.png'
                         if not presentation.exists():
@@ -451,7 +642,12 @@ def _run_org_scenes(config,log):
                                                           presentation, config['output']['preview_size'])
                     else:
                         # 展示正式交付的清理后栅格，与water_polygon.shp保持同一处理阶段。
-                        save_preview(filtered,folder/'water_polygon.tif',folder/'quicklook.png',config['output']['preview_size'])
+                        save_org_process_quicklook(filtered, folder, folder / 'quicklook.png', preview_side,
+                            config, auxiliary, original_path=crop, log=log.message)
+                        presentation = folder / 'presentation/water_overlay.png'
+                        if not presentation.exists():
+                            save_raster_water_presentation(filtered, folder / 'water_polygon.tif', presentation,
+                                                          config['output']['preview_size'])
                         previews=[folder/'quicklook.png']
                         if (folder/'terrain_class.tif').exists():
                             from thres_segmentation.terrain_geometry import save_terrain_preview

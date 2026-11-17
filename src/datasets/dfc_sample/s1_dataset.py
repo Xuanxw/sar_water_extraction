@@ -19,6 +19,39 @@ IGNORE_INDEX = -1  # 内部忽略标记；后续损失函数使用同一个 igno
 EXTENSIONS = {".tif", ".tiff", ".png", ".img", ".vrt"}
 
 
+def relative_backscatter_ranks(image, valid):
+    """每个极化独立计算有效像元的经验中秩；同值同秩，掩膜外填零。"""
+    image = np.asarray(image)
+    valid = np.asarray(valid, dtype=bool)
+    if image.ndim != 3 or valid.shape != image.shape[1:]:
+        raise ValueError("需要 [C,H,W] 影像和同网格 [H,W] 掩膜")
+    result = np.zeros(image.shape, dtype=np.float32)
+    if not valid.any():
+        return result
+    for channel, band in enumerate(image):
+        values = band[valid]
+        if not np.isfinite(values).all():
+            raise ValueError("有效掩膜内的后向散射值必须为有限数")
+        _, inverse, counts = np.unique(values, return_inverse=True, return_counts=True)
+        mids = (counts.cumsum() - 0.5 * counts) / values.size
+        result[channel, valid] = mids[inverse]
+    return result
+
+
+def vv_rank_dem_m(image, valid):
+    """共同有效域上转换 VV 中秩，第二通道保留地表高程（米）。"""
+    image = np.asarray(image)
+    valid = np.asarray(valid, dtype=bool)
+    if image.ndim != 3 or image.shape[0] != 2 or valid.shape != image.shape[1:]:
+        raise ValueError("VV + DEM 需要同网格的 [2,H,W] 影像和 [H,W] 掩膜")
+    if not np.isfinite(image[1, valid]).all():
+        raise ValueError("有效掩膜内的 DEM 高程必须为有限数")
+    result = np.empty(image.shape, dtype=np.float32)
+    result[:1] = relative_backscatter_ranks(image[:1], valid)
+    result[1] = np.where(valid, image[1], 0)
+    return result
+
+
 def sample_name(path, root):
     """保留稳定样本名；固定划分的 train/val 是存储分区，不是样本编号的一部分。"""
     root = Path(root)
@@ -47,14 +80,22 @@ class WaterDataset(Dataset):
 
     image 为 float32 [C,H,W]，label 为 int64 [H,W]。
     valid_mask 为 bool [H,W]，表示所选影像波段均有限且文件掩膜有效。
-    保留原始存储值和标签编码，不应用 scale/offset，不推断水体类别。
+    默认读取原始存储值；relative_backscatter_ranks 按有效像元计算逐波段中秩。标签编码原样读取。
     """
 
-    def __init__(self, image_dir, label_dir=None, bands=None, speckle=None):
+    def __init__(self, image_dir, label_dir=None, bands=None, speckle=None, patch_representation="stored"):
         """建立文件列表；标签按相对路径和不含扩展名的文件名配对。"""
+        if patch_representation not in ("stored", "relative_backscatter_ranks", "vv_rank_dem_m"):
+            raise ValueError(f"未知切片输入表示：{patch_representation}")
+        self.patch_representation = patch_representation
         self.image_dir = Path(image_dir)
         self.bands = bands
         self.speckle_filter = SpeckleFilter(speckle)
+        if patch_representation == "vv_rank_dem_m":
+            if bands is None or len(bands) != 2 or bands[0] == bands[1]:
+                raise ValueError("VV + DEM 需要两个不同的文件波段，依次为 VV 和 DEM")
+            if self.speckle_filter.config is not None:
+                raise ValueError("含 DEM 的切片不能对所有通道执行斑点滤波")
         self.image_paths = sorted(path for path in self.image_dir.rglob("*")
                                   if path.is_file() and path.suffix.lower() in EXTENSIONS)
         self.label_paths = None
@@ -83,6 +124,13 @@ class WaterDataset(Dataset):
         with rasterio.open(image_path) as src:
             from rasterio.windows import Window
             image, valid = read_filtered_window(src, self.bands, Window(0, 0, src.width, src.height), self.speckle_filter)
+            if self.patch_representation == "vv_rank_dem_m":
+                dem_index = self.bands[1] - 1
+                image[1] = image[1] * src.scales[dem_index] + src.offsets[dem_index]
+        if self.patch_representation == "vv_rank_dem_m":
+            image = vv_rank_dem_m(image, valid)
+        elif self.patch_representation == "relative_backscatter_ranks":
+            image = relative_backscatter_ranks(image, valid)
         sample = {
             "image": torch.from_numpy(image),
             "valid_mask": torch.from_numpy(valid),

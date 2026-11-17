@@ -17,7 +17,7 @@ from torch import nn
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
                 str(Path(__file__).resolve().parents[1] / "scripts")]
 from supervised import train
-from datasets.dfc_sample.s1_dataset import WaterDataset, resolve_sample_path
+from datasets.dfc_sample.s1_dataset import WaterDataset, relative_backscatter_ranks, resolve_sample_path, vv_rank_dem_m
 
 # 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
 train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
@@ -39,6 +39,34 @@ class GroupedTrainingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(2)
+
+    def test_relative_ranks(self):
+        image = np.array([[[1., 1., 5., 123.]], [[2., 2., 2., np.nan]]])
+        valid = np.array([[True, True, True, False]])
+        original = image.copy()
+        expected = np.array([[[1/3, 1/3, 5/6, 0]], [[.5, .5, .5, 0]]], dtype=np.float32)
+        np.testing.assert_array_equal(relative_backscatter_ranks(image, valid), expected)
+        np.testing.assert_array_equal(relative_backscatter_ranks(image ** 3, valid), expected)
+        np.testing.assert_array_equal(relative_backscatter_ranks(image, ~np.ones_like(valid)), 0)
+        np.testing.assert_array_equal(image, original)
+
+    def test_vv_rank_dem_m_keeps_elevation(self):
+        image = np.array([[[6., 9., 8., 90.]], [[0., 3., -2., -9999.]]])
+        valid = np.array([[True, True, True, False]])
+        expected = np.array([[[1/6, 5/6, .5, 0]], [[0., 3., -2., 0.]]], dtype=np.float32)
+        np.testing.assert_array_equal(vv_rank_dem_m(image, valid), expected)
+        self.assertEqual(image[1, 0, 3], -9999.)
+
+    def test_dem_dataset_respects_declared_nodata_and_scale(self):
+        with TemporaryDirectory() as folder:
+            data = np.array([[[1, 2, -9999, 9]], [[0, -3, 20, -9999]]], dtype=np.int16)
+            with rasterio.open(Path(folder) / "tile.tif", "w", driver="GTiff", width=4, height=1,
+                               count=2, dtype="int16", nodata=-9999, transform=from_origin(1, 2, 1, 1)) as raster:
+                raster.write(data)
+                raster.scales = (1., 2.)
+            sample = WaterDataset(folder, bands=(1, 2), patch_representation="vv_rank_dem_m")[0]
+            np.testing.assert_array_equal(sample["valid_mask"].numpy(), [[True, True, False, False]])
+            np.testing.assert_array_equal(sample["image"].numpy(), [[[.25, .75, 0, 0]], [[0, -6, 0, 0]]])
 
     def make_data(self, folder):
         """实际写出小 TIFF/PNG；副本和冲突记录保留在物理目录，仅由清单停用。"""

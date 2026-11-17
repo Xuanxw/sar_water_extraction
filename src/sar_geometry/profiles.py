@@ -9,7 +9,11 @@ from pyproj import Transformer
 from scipy.ndimage import map_coordinates
 import rasterio
 from rasterio.windows import Window
-from .core import interpolate_hermite_orbit_states, compute_radar_shadow_layover_batch
+from .core import (
+    interpolate_hermite_orbit_states,
+    compute_radar_shadow_layover_batch,
+    solve_range_doppler_points,
+)
 
 A = 6378137.0
 B = 6356752.314245179
@@ -174,3 +178,20 @@ def map_ecef_to_zero_doppler_profile(executable, model, points, solved):
             np.sum(surface_vectors * radial_basis, axis=-1),
         )
     return solved[:, 2], theta, valid_geometry
+
+
+def sample_zero_doppler_visibility(executable, model, points, times, theta, masks):
+    """将N×3 ECEF点映射到完整观测剖面，返回N×2类别、收敛与幅宽内标记。
+
+    坐标为米/秒/弧度；类别为0可见、1遮挡、255未知。仅对连续坐标求解，
+    类别采用最近邻，不在0/1/255之间插值。域外及失败保留255。
+    """
+    solved = solve_range_doppler_points(executable, model, points)
+    t, angle, good = map_ecef_to_zero_doppler_profile(executable, model, points, solved)
+    row = np.rint(np.where(good, (t - times[0]) / (times[1] - times[0]), -1)).astype('int64')
+    col = np.rint(np.where(good, (angle - theta[0]) / (theta[1] - theta[0]), -1)).astype('int64')
+    covered = solved[:, 5] == 0
+    sample = covered & good & (row >= 0) & (row < len(times)) & (col >= 0) & (col < len(theta))
+    value = np.full((len(points), 2), 255, dtype='uint8')
+    value[sample] = masks[row[sample], col[sample]]
+    return value, good, covered

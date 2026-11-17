@@ -105,7 +105,8 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
         dataset = Subset(scene_dataset, ids)
     else:
         from datasets.dfc_sample.s1_dataset import WaterDataset
-        dataset = WaterDataset(image_dir, label_dir, bands, speckle=checkpoint.get('speckle'))
+        dataset = WaterDataset(image_dir, label_dir, bands, speckle=checkpoint.get('speckle'),
+                               patch_representation=checkpoint.get('patch_representation', 'stored'))
         if use_saved_val:
             dataset.select_files(checkpoint['val_files'])
     batch_size = checkpoint["batch_size"] if batch_size is None else batch_size

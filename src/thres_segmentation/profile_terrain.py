@@ -1,5 +1,6 @@
 """将独立观测剖面掩膜供阈值流程消费，路径和科学参数由案例YAML显式提供。"""
 from pathlib import Path
+from time import perf_counter
 import json
 from contextlib import ExitStack
 import numpy as np
@@ -8,15 +9,135 @@ from rasterio.vrt import WarpedVRT
 from rasterio.enums import Resampling
 from rasterio.windows import Window
 from filelock import FileLock
+from pyproj import CRS, Transformer
+from scipy.ndimage import maximum_filter, minimum_filter
 from shapely.geometry import box
 from shapely.ops import unary_union
-from sar_geometry.scene import run_zero_doppler_terrain_visibility
-from sar_geometry.metadata import read_bc_metadata
+from sar_geometry.scene import run_zero_doppler_terrain_visibility, combine_shadow_layover_masks
+from sar_geometry.metadata import read_bc_metadata, build_bc_range_doppler_model
+from sar_geometry.profiles import sample_zero_doppler_visibility
 from sar_geometry.terrain_support import bound_same_range_terrain, scan_regional_dem_envelope
 from thres_segmentation.auxiliary_data import tile_specs, download_tile
 from utils.files import write_json
 
-PROFILE_METHOD_VERSION='radar_profile_zero_doppler_v2'
+PROFILE_METHOD_VERSION='radar_profile_zero_doppler_v3'
+
+
+def visibility_transition_band(shadow, layover, radius=1):
+    """在计算网格标记类别转折带，含0/1/255交界；稳定核心不扩张、不填洞。
+
+    输入两个同尺寸uint8数组，输出bool。调用方读取radius行halo后再截去halo，
+    避免分块边缘产生假边界。该标记只决定哪里重算，不是新的排除掩膜。
+    """
+    size = radius * 2 + 1
+    boundary = np.zeros(shadow.shape, dtype=bool)
+    for value in (shadow, layover):
+        boundary |= maximum_filter(value, size=size, mode='nearest') != minimum_filter(
+            value, size=size, mode='nearest'
+        )
+    return boundary
+
+
+def refine_sar_visibility_boundaries(reference, geometry_dir, output, geometry, annotation, block_size, log):
+    """将细网格稳定类别对齐至SAR，转折带按原生像元中心重新求解RD。
+
+    DEM仅按块双线性求椭球高；阴影/叠掩不做双线性插值。复用完整观测剖面，
+    不在局部窗口内重建阴影。未知仍为255，真实边界精度受源DEM及剖面采样限制。
+    """
+    started = perf_counter()
+    geometry_dir = Path(geometry_dir)
+    output = Path(output)
+    band_path = geometry_dir / 'visibility_transition.tif'
+    radius = 1
+    # 先在细网格建立边界带。halo覆盖两侧，分块大小不改变标记结果。
+    with rasterio.Env(GDAL_CACHEMAX=64 * 1024 * 1024), rasterio.open(geometry_dir / 'shadow_mask.tif') as shadow, rasterio.open(
+        geometry_dir / 'layover_mask.tif'
+    ) as layover:
+        profile = dict(shadow.profile, dtype='uint8', nodata=None)
+        with rasterio.open(band_path.with_suffix('.partial.tif'), 'w', **profile) as dst:
+            for row in range(0, shadow.height, 128):
+                height = min(128, shadow.height - row)
+                win = Window(0, row - radius, shadow.width, height + 2 * radius)
+                s = shadow.read(1, window=win, boundless=True, fill_value=255)
+                l = layover.read(1, window=win, boundless=True, fill_value=255)
+                boundary = visibility_transition_band(s, l, radius)[radius:radius + height]
+                dst.write(boundary.astype('uint8'), 1, window=Window(0, row, shadow.width, height))
+    band_path.with_suffix('.partial.tif').replace(band_path)
+    axes = np.load(geometry_dir / 'data_cache/profile_axes.npz')
+    times, theta = axes['times'], axes['theta']
+    axes.close()
+    masks = np.load(geometry_dir / 'data_cache/profiles.npy', mmap_mode='r')
+    settings = dict(geometry['model'], radar_grid_confirmed=True)
+    model = build_bc_range_doppler_model(annotation, settings)
+    names = ('shadow_mask', 'layover_mask', 'terrain_exclusion')
+    products = {name: output / (name + '.tif') for name in names}
+    refined_count = valid_count = 0
+    # 转折带严格使用与整景相同的DEM/轨道/轴；只减少稳定核心的重复求解。
+    with rasterio.Env(GDAL_CACHEMAX=64 * 1024 * 1024), ExitStack() as stack:
+        stack.callback(masks._mmap.close)
+        src = stack.enter_context(rasterio.open(reference))
+        native_grid = dict(crs=str(src.crs), width=src.width, height=src.height, transform=list(src.transform))
+        profile = dict(src.profile, driver='GTiff', count=1, dtype='uint8', nodata=255,
+                       compress='lzw', BIGTIFF='IF_SAFER')
+        readers = {}
+        for name in (*names[:2], 'visibility_transition'):
+            base = stack.enter_context(rasterio.open(geometry_dir / (name + '.tif')))
+            readers[name] = stack.enter_context(WarpedVRT(
+                base, crs=src.crs, transform=src.transform, width=src.width, height=src.height,
+                resampling=Resampling.nearest, nodata=255 if name in names else 0,
+            ))
+        dem = stack.enter_context(rasterio.open(geometry_dir / 'data_cache/dem_ellipsoid.tif'))
+        heights = stack.enter_context(WarpedVRT(
+            dem, crs=src.crs, transform=src.transform, width=src.width, height=src.height,
+            dtype='float32', nodata=np.nan, resampling=Resampling.bilinear,
+        ))
+        writers = {name: stack.enter_context(rasterio.open(
+            path.with_suffix('.partial.tif'), 'w', **profile
+        )) for name, path in products.items()}
+        to_ecef = Transformer.from_crs(CRS.from_user_input(src.crs).to_3d(), 4978, always_xy=True)
+        # 限制到小块，避免原生整景的浮点坐标/RD临时数组触发OOM。
+        for row in range(0, src.height, block_size):
+            height = min(block_size, src.height - row)
+            for col in range(0, src.width, block_size):
+                win = Window(col, row, min(block_size, src.width - col), height)
+                image = src.read(1, window=win, masked=True)
+                valid = ~np.ma.getmaskarray(image) & np.isfinite(image.data)
+                s = readers['shadow_mask'].read(1, window=win)
+                l = readers['layover_mask'].read(1, window=win)
+                refine = valid & (readers['visibility_transition'].read(1, window=win) == 1)
+                if refine.any():
+                    rr, cc = np.nonzero(refine)
+                    a = src.transform
+                    x = a.c + (cc + col + 0.5) * a.a + (rr + row + 0.5) * a.b
+                    y = a.f + (cc + col + 0.5) * a.d + (rr + row + 0.5) * a.e
+                    h = heights.read(1, window=win, masked=True).filled(np.nan)[refine]
+                    points = np.column_stack(to_ecef.transform(x, y, h))
+                    value, _, _ = sample_zero_doppler_visibility(
+                        geometry['paths']['CORE_PATH'], model, points, times, theta, masks
+                    )
+                    s[refine], l[refine] = value[:, 0], value[:, 1]
+                s[~valid] = l[~valid] = 255
+                union = combine_shadow_layover_masks(s, l)
+                for name, value in zip(names, (s, l, union)):
+                    writers[name].write(value, 1, window=win)
+                refined_count += int(refine.sum())
+                valid_count += int(valid.sum())
+            if row == 0 or row + height == src.height or row // block_size % 8 == 0:
+                log(f'[04b] SAR原生边界复核 {row + height}/{src.height}行；'
+                    f'重算{refined_count:,}点；{perf_counter() - started:.1f}s')
+    del masks
+    for path in products.values():
+        path.with_suffix('.partial.tif').replace(path)
+    return products, dict(
+        method='exact_rd_at_native_sar_transition_pixels',
+        transition_radius_cells=radius,
+        native_grid=native_grid,
+        transition_raster=str(band_path),
+        valid_pixels=valid_count,
+        refined_pixels=refined_count,
+        elapsed_seconds=perf_counter() - started,
+        note='稳定核心最近邻；类别转折带重算RD后采样完整剖面；未增加源DEM真实分辨率。',
+    )
 
 
 def prepare_profile_height_envelope(geometry, annotation, config, log):
@@ -102,8 +223,9 @@ def align_profile_masks(reference, geometry_dir, output, block_size=256):
 def generate_profile_terrain(reference, config, folder):
     """按本景ORG注释中的原雷达网格计算候选掩膜；缺项报错，不退回局部坡度。
 
-    只生成地形文件。阈值/历史水体/矢量处理仍由原主流程执行，30m未知域不作硬剔除。
+    只生成地形文件。阈值/历史水体/矢量处理仍由原主流程执行，未知域不作硬剔除。
     """
+    terrain_started = perf_counter()
     folder=Path(folder);paths=config['paths'];options=config['org']['profile_geometry']
     metadata=json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
     # XML已由本景输入解析流程保存在成果目录，避免依赖原ZIP是否仍在原位置。
@@ -128,7 +250,25 @@ def generate_profile_terrain(reference, config, folder):
     if envelope is not None:
         report = dict(report, height_envelope=envelope)
         write_json(geometry_output/'geometry_quality.json', report)
-    products=align_profile_masks(reference,geometry_output,folder,config['processing']['block_size'])
+    if geometry['scene'].get('refine_sar_boundaries', False):
+        products, refinement = refine_sar_visibility_boundaries(
+            reference, geometry_output, folder, geometry, annotation,
+            options['execution'].get('native_block_size', 256), log,
+        )
+        report = dict(report, native_boundary_refinement=refinement)
+        # 剖面/映射累计耗时覆盖续跑前后；本次墙钟耗时单独记录，避免把缓存命中误称为冷启动性能。
+        report['geometry_and_native_seconds'] = report['profile_seconds'] + report['mapping_seconds'] + refinement['elapsed_seconds']
+        report['current_run_terrain_seconds'] = perf_counter() - terrain_started
+        report['geometry_and_native_budget_met'] = (
+            report['geometry_and_native_seconds'] <= geometry['execution']['time_budget_seconds']
+        )
+        write_json(geometry_output / 'geometry_quality.json', report)
+        budget = geometry['execution']['time_budget_seconds']
+        log(f'[05b] 累计几何计算加原生复核：{report["geometry_and_native_seconds"]:.2f}s；'
+            f'{budget:g}秒目标={report["geometry_and_native_budget_met"]}；'
+            f'本次地形阶段{report["current_run_terrain_seconds"]:.2f}s')
+    else:
+        products=align_profile_masks(reference,geometry_output,folder,config['processing']['block_size'])
     write_json(folder/'terrain_geometry.json',dict(method=PROFILE_METHOD_VERSION,geometry_quality=report,
         high_slope_hard_exclusion=False,unknown_policy='255不参与硬排除',geometry_output=str(geometry_output),
         note='零Doppler观测剖面候选；不使用15度坡度硬剔除，历史岸线不作为真值。'))

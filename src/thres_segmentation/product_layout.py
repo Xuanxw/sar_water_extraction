@@ -3,7 +3,8 @@ import json
 from pathlib import Path
 NAMES=('raw.tif','water.tif','coverage.tif','history.tif','slope.tif','terrain_class.tif',
        'terrain_exclusion.tif','layover_mask.tif','shadow_mask.tif','terrain_geometry.json',
-       'extraction.json','metadata.json','source.xml','input.json')
+       'extraction.json','metadata.json','source.xml','input.json','slope_threshold_rejection.tif',
+       'landcover_exclusion.tif')
 
 
 def arrange_intermediates(config,restore=False):
@@ -27,11 +28,12 @@ def arrange_intermediates(config,restore=False):
                         item.update(root='output',path=Path(item['path']).name)
             progress.write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding='utf-8')
         # JSON的来源路径跟随真实文件位置；统计值和面成果不改变。
-        for name,key in (('water_polygon.json','source'),('quality.json','source_mask')):
+        for name,key in (('water_polygon.json','source'),
+                         ('water_polygon.json','slope_threshold_rejection'),('quality.json','source_mask')):
             p=folder/name
             if p.exists():
                 data=json.loads(p.read_text(encoding='utf-8'))
-                if key in data and Path(data[key]).name in NAMES:
+                if data.get(key) is not None and Path(data[key]).name in NAMES:
                     data[key]=str((folder if restore else work)/Path(data[key]).name)
                     p.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
     print(('恢复工作输入' if restore else '中间成果移入data_cache')+f'：{count}个文件',flush=True)

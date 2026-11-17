@@ -73,7 +73,8 @@ class OtsuThresholdTests(unittest.TestCase):
             root = Path(temp)
             fixture = org_fixture.OrgProductionTests('test_morphology_matches_single_block')
             config = fixture.make_config(root)
-            config['threshold'].update(method='otsu', water_percent=30)
+            # 离线scene_threshold使用线性域；不能继承真实案例的log_amplitude来比较阈值。
+            config['threshold'].update(method='otsu', water_percent=30, otsu_domain='linear')
             config['org']['postprocess'].update(terrain_enabled=False, history_enabled=False, landcover_enabled=False)
             source = next(config['paths']['ORG_ROOT'].glob('*.tif'))
             aoi = box(500000, 4000000, 500064, 4000064)

@@ -68,7 +68,7 @@ def configure(config_path):
     """显式加载本次YAML；导入模块时不读取文件或命令行参数。"""
     global CONFIG_PATH, CONFIG, METHOD, RESUME_CHECKPOINT, IMAGE_DIR, LABEL_DIR, MANIFEST_PATHS, OUTPUT_ROOT
     global OUTPUT_DIR, WINDOW_CACHE_DIR, RUN_DIRECTORY_FORMAT, RESULT_FILES, POLARIZATIONS, POLARIZATION_BANDS, VAL_RATIO, MAX_SAMPLES
-    global DATA_LAYOUT, DEM_BAND, SCENE_OPTIONS, PRETRAINED, CPU_THREADS, BATCH_SIZE, EPOCHS, LEARNING_RATE, SEED
+    global DATA_LAYOUT, PATCH_REPRESENTATION, DEM_BAND, SCENE_OPTIONS, PRETRAINED, CPU_THREADS, BATCH_SIZE, EPOCHS, LEARNING_RATE, SEED
     global LOSS_NAME, BCE_WEIGHT, DICE_WEIGHT, CLASS_WEIGHT_MODE, OPTIMIZER_NAME, WEIGHT_DECAY, COSINE_SCHEDULE, TRAIN_AUGMENTATION
     global ABNORMAL_F1_THRESHOLD, SAMPLING, HARD_WARMUP_EPOCHS, HARD_SAMPLE_RATIO, HARD_POOL_RATIO, LOW_WATER_POOL_RATIO, WATER_GROUP_NAMES, DEEPLAB_BACKBONE
     global DEEPLAB_DECODER_CHANNELS, DEEPLAB_LOW_LEVEL_CHANNELS, DEEPLAB_ASPP_RATES, DEEPLAB_DROPOUT, BASE_CHANNELS, DECODER_CHANNELS, STAGE, UAFNET_BACKBONE
@@ -101,6 +101,7 @@ def configure(config_path):
     VAL_RATIO = CONFIG["data"]["VAL_RATIO"]
     MAX_SAMPLES = CONFIG["data"]["MAX_SAMPLES"]
     DATA_LAYOUT = CONFIG["data"]["DATA_LAYOUT"]
+    PATCH_REPRESENTATION = CONFIG["data"].get("PATCH_REPRESENTATION", "stored")
     DEM_BAND = CONFIG["data"].get("DEM_BAND")
     SCENE_OPTIONS = CONFIG["data"]["SCENE_OPTIONS"]
     PRETRAINED = CONFIG["model"]["PRETRAINED"]
@@ -240,9 +241,11 @@ class WaterSegmentationTrainer:
         sampling="random", hard_warmup_epochs=2, hard_sample_ratio=0.5, hard_pool_ratio=0.25,
         low_water_pool_ratio=0.20, head_loss_weights=None, scene_options=None, class_weight_mode="none",
         resume_checkpoint=None, speckle=None, require_preprocessed=False, output_dir_is_final=False, require_normalized=False,
-        quality_options=None, validation_inference=None, require_bc_power=False,
+        quality_options=None, validation_inference=None, require_bc_power=False, patch_representation="stored",
     ):
         """准备固定划分、输入统计量、模型、优化器和实验目录。"""
+        if scene_options is not None and patch_representation != "stored":
+            raise ValueError("PATCH_REPRESENTATION 仅用于 patch 布局")
         self.validation_inference = dict(validation_inference or {})
         self.quality_options = dict(quality_options or {})  # 可视化不影响模型、采样及续跑状态。
         self.image_dir, self.label_dir = Path(image_dir), Path(label_dir)
@@ -371,7 +374,13 @@ class WaterSegmentationTrainer:
                 self.output_dir = self.output_dir.with_name(self.output_dir.name + '_bc_scenes')
         else:
             from datasets.dfc_sample.s1_dataset import WaterDataset, sample_name
-            self.dataset = WaterDataset(self.image_dir, self.label_dir, bands, speckle=self.speckle)
+            self.dataset = WaterDataset(self.image_dir, self.label_dir, bands, speckle=self.speckle,
+                                        patch_representation=patch_representation)
+            self.model_info["patch_representation"] = patch_representation
+            if patch_representation == "relative_backscatter_ranks":
+                self.model_info["input_representation"] = "per_patch_per_band_valid_midrank; train_mean_std"
+            elif patch_representation == "vv_rank_dem_m":
+                self.model_info["input_representation"] = "per_patch_valid_VV_midrank + DEM_m; train_channel_mean_std"
             split_path = self.image_dir.parent / "split_manifest.csv"
             self.split_info = {"split_strategy": "legacy_random", "split_manifest_sha256": ""}
             if split_path.is_file():
@@ -546,6 +555,12 @@ class WaterSegmentationTrainer:
     def check_resume_compatibility(self, checkpoint):
         """续跑沿用原实验，拒绝把不同标签、波段或网络混入同一记录。"""
         same_model = lambda values: {k: v for k, v in values.items() if k != "pretrained"}
+        if checkpoint.get('patch_representation', 'stored') != self.model_info.get('patch_representation', 'stored'):
+            raise ValueError('续跑检查点的切片输入表示与当前配置不同')
+        if self.model_info.get('patch_representation') == 'vv_rank_dem_m':
+            for field in ('input_channels', 'dem_band', 'dem_source', 'dem_unit'):
+                if checkpoint.get(field) != self.model_info.get(field):
+                    raise ValueError(f'续跑检查点的 {field} 与当前 DEM 输入不同')
         if checkpoint.get('inputs_normalized', False) != self.inputs_normalized or checkpoint.get('input_preprocessing', {}) != self.input_preprocessing:
             raise ValueError('续跑检查点与当前离线预处理协议不一致')
         if SpeckleFilter(checkpoint.get('speckle')).config != self.speckle:
@@ -1133,13 +1148,20 @@ def create_trainer(method=None):
     # 在创建训练器时解析，单极化自动构建单通道网络，并重新统计该通道的均值和标准差。
     bands = tuple(POLARIZATION_BANDS[name] for name in POLARIZATIONS)
     input_channels = POLARIZATIONS
-    if DEM_BAND is not None and DATA_LAYOUT == "full_scene":
+    if PATCH_REPRESENTATION == "vv_rank_dem_m":
+        if DATA_LAYOUT != "patch" or POLARIZATIONS != ("VV",):
+            raise ValueError("vv_rank_dem_m 需要 patch 布局并选择 VV 极化")
+        if type(DEM_BAND) is not int or DEM_BAND < 1 or DEM_BAND in bands:
+            raise ValueError("DEM_BAND 必须是独立的正整数文件波段编号")
+        bands += (DEM_BAND,)
+        input_channels += ("DEM",)
+    elif DEM_BAND is not None and DATA_LAYOUT == "full_scene":
         if POLARIZATIONS != ("VV",) or bands != (1,) or type(DEM_BAND) is not int or DEM_BAND != 2:
             raise ValueError("天仪整景 DEM 模式使用 VV=1、DEM_BAND=2 的 MODE=dem 成果")
         bands += (DEM_BAND,)
         input_channels += ("DEM",)
     elif DEM_BAND is not None:
-        raise ValueError("DEM_BAND 需要配合 full_scene 布局使用")
+        raise ValueError("DEM_BAND 需要配合 vv_rank_dem_m 输入表示")
     if mobile_unet:
         from supervised.experimental.experimental_model_unet_mobilenet import AI4GWaterUNet
         model_class = AI4GWaterUNet
@@ -1307,6 +1329,7 @@ def create_trainer(method=None):
         require_preprocessed=DATA_LAYOUT == "full_scene",
         require_normalized=DATA_LAYOUT == "full_scene",
         require_bc_power=DATA_LAYOUT == "full_scene",
+        patch_representation=PATCH_REPRESENTATION,
         output_dir_is_final=OUTPUT_DIR is not None,
         quality_options=VALIDATION_QUALITY_OPTIONS,
         validation_inference=CONFIG.get('validation_inference') if DATA_LAYOUT == 'full_scene' else None,

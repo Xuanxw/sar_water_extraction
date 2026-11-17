@@ -356,3 +356,11 @@ Python采用清楚的算法名称、逐步语句和必要中文说明；核心�
 `terrain_support.py`集中实现同斜距地形范围调查和区域高程扫描，实验脚本与正式阈值流程共用，不保留重复算法。正式适配器中的`prepare_profile_height_envelope()`负责按景选择/下载共享DEM、记录包络，并将派生的`height_bounds_m`传给原整景核心。没有修改C++可见性判据。
 
 参数及运行方式见`configs/北京密云区/README.md`。新案例的`height_envelope.mode: regional_dem`要求明确的EGM2008正高DEM和格网N；旧固定包络配置继续按原参数执行。只有DEM覆盖有保护带的潜在同斜距域且没有缺测才生成区域界限。调查采用离散时刻/角度采样，仍不是连续域完备性证明。
+
+### 细网格映射与SAR原生边界复核
+
+`scene.resolution_m`控制地理计算网格，`scene.dem_resolution_m`独立控制支持域DEM存储间隔；不设置后者时沿用计算网格间隔。细网格DEM值按双线性采样获得，源DEM的真实信息分辨率没有增加。
+
+`profiles.sample_zero_doppler_visibility()`统一实现ECEF点→RD→零Doppler地表角坐标→完整剖面类别查询。只有连续坐标参与计算，0/1/255类别采用最近邻，域外和失败为未知。
+
+阈值适配器的`scene.refine_sar_boundaries`开启原生SAR边界复核：在细网格用3×3邻域标出阴影/叠掩/未知转折带，包含跨块halo；转折带逐原生像元求解RD，稳定核心最近邻对齐。该计算复用整条剖面，不在窗口内部重新计算遮挡。`visibility_transition.tif`只是重算位置，不能用作地形排除掩膜。剖面采样间隔仍需独立记录；最终像元尺寸不等于地形分类精度。

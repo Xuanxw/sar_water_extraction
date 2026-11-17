@@ -5,6 +5,21 @@ import numpy as np
 from scipy.ndimage import uniform_filter
 
 
+def slope_otsu_rejection(values, valid, slope_deg, otsu_threshold, percentile_threshold,
+                         slope_limit_deg=15.0):
+    """返回坡度风险排除布尔图，供暗侧Otsu分割和成面共同使用。
+
+    values为滤波后的线性幅度/功率，两个阈值须与它同单位；坡度为同网格的度。
+    仅在Otsu比百分位更宽松时收紧坡度>limit区域，等于limit不收紧。
+    坡度NaN/Inf保留原判别；这不是几何阴影或叠掩掩膜。已确认SAR无效不标排除。
+    将不满足严格阈值的陡坡像元全部保护，避免后续填孔重新生成这些水体。
+    """
+    if otsu_threshold <= percentile_threshold:
+        return np.zeros(values.shape, dtype=bool)
+    steep = np.isfinite(slope_deg) & (slope_deg > slope_limit_deg)
+    return valid & steep & (values >= percentile_threshold)
+
+
 def select_otsu_or_percentile(values, percentile_threshold, method="percentile", otsu_bins=1024,
                              otsu_min_separability=0.5, otsu_min_class_fraction=0.001,
                              otsu_histogram_range=None, otsu_domain='linear', otsu_log_floor=1e-6):

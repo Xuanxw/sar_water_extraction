@@ -18,21 +18,21 @@ from rasterio.warp import transform_bounds
 from rasterio.transform import from_origin
 from rasterio.windows import Window
 from pyproj import Transformer, CRS
-from .core import solve_range_doppler_points, interpolate_hermite_orbit_states
+from .core import interpolate_hermite_orbit_states
 from .metadata import build_bc_range_doppler_model
 from .profiles import (
     ElevationSampler,
     build_zero_doppler_terrain_profiles,
-    map_ecef_to_zero_doppler_profile,
+    sample_zero_doppler_visibility,
     A,
 )
 from utils.files import write_json, sha256
 
-VERSION = 'zero_doppler_plane_profiles_0.3'
+VERSION = 'zero_doppler_plane_profiles_0.4'
 
 
 def make_terrain_raster_grid(bounds, resolution, crs):
-    """按米制固定网格构造输出；类别掩膜不会上采样为虚假的SAR原生地形精度。"""
+    """按米制构造数值网格；网格间隔不代表源DEM的真实分辨率。"""
     left, bottom, right, top = bounds
     left = np.floor(left / resolution) * resolution
     top = np.ceil(top / resolution) * resolution
@@ -71,6 +71,7 @@ def prepare_inputs(config, log):
         inputs=[dict(name=p.name, size=p.stat().st_size, mtime=p.stat().st_mtime_ns) for p in files],
         geoid=str(paths['GEOID_PATH']),
         resolution=options['resolution_m'],
+        dem_resolution=options.get('dem_resolution_m', options['resolution_m']),
         buffer=options['support_buffer_m'],
         crs=options['output_crs'],
         nodata=options['org_nodata'],
@@ -111,7 +112,9 @@ def prepare_inputs(config, log):
         reference.with_suffix('.partial.tif').replace(reference)
     b = options['support_buffer_m']
     expanded = (bounds[0] - b, bounds[1] - b, bounds[2] + b, bounds[3] + b)
-    profile = make_terrain_raster_grid(expanded, options['resolution_m'], options['output_crs'])
+    # DEM保留源信息尺度，细网格仅在采样时双线性求高程，不将整个20公里支持域放大。
+    dem_resolution = options.get('dem_resolution_m', options['resolution_m'])
+    profile = make_terrain_raster_grid(expanded, dem_resolution, options['output_crs'])
     to_ll = Transformer.from_crs(profile['crs'], 4326, always_xy=True)
     geoid = None
     try:
@@ -283,6 +286,8 @@ def run_zero_doppler_terrain_visibility(config, metadata, log=print):
     dem, reference = prepare_inputs(config, log)
     prepared = perf_counter()
     times, theta = make_zero_doppler_profile_grid(config, model, reference, exe)
+    # 原生SAR边界复核读取同一组轴及完整剖面，不重建/截短横向支持域。
+    np.savez(cache / 'profile_axes.npz', times=times, theta=theta)
     requested_first = model['time0']
     requested_last = requested_first + (model['rows'] - 1) * model['line_time']
     missing = max(0, float(times[0]) - requested_first) + max(0, requested_last - float(times[-1]))
@@ -403,18 +408,11 @@ def run_zero_doppler_terrain_visibility(config, metadata, log=print):
                     p = np.stack(
                         transform.transform(a.c + (cc + 0.5) * a.a, a.f + (rr + 0.5) * a.e, h), axis=-1
                     ).reshape(-1, 3)
-                    solved = solve_range_doppler_points(exe, model, p)
-                    t, angle, good = map_ecef_to_zero_doppler_profile(exe, model, p, solved)
-                    row = np.rint(np.where(good, (t - times[0]) / (times[1] - times[0]), -1)).astype('int64')
-                    col = np.rint(np.where(good, (angle - theta[0]) / (theta[1] - theta[0]), -1)).astype(
-                        'int64'
+                    value, good, radar_covered = sample_zero_doppler_visibility(
+                        exe, model, p, times, theta, masks
                     )
-                    covered = (ref.read(1, window=win).ravel() == 1) & (solved[:, 5] == 0)
-                    sample = (
-                        covered & good & (row >= 0) & (row < len(times)) & (col >= 0) & (col < len(theta))
-                    )
-                    value = np.full((len(p), 2), 255, np.uint8)
-                    value[sample] = masks[row[sample], col[sample]]
+                    covered = (ref.read(1, window=win).ravel() == 1) & radar_covered
+                    value[~covered] = 255
                     shape = h.shape
                     shadow = value[:, 0].reshape(shape)
                     layover = value[:, 1].reshape(shape)
@@ -456,6 +454,7 @@ def run_zero_doppler_terrain_visibility(config, metadata, log=print):
         profile_shape=[len(times), len(theta)],
         profile_step_m=[options['azimuth_step_m'], options['range_step_m']],
         resolution_m=options['resolution_m'],
+        dem_resolution_m=options.get('dem_resolution_m', options['resolution_m']),
         height_bounds_m=options['height_bounds_m'],
         supported_time_interval_s=[float(times[0]), float(times[-1])],
         unsupported_acquisition_seconds=missing,

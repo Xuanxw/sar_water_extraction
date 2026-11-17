@@ -112,8 +112,10 @@ class BNCalibrator:
             if not set(train_ids)<=set(train_data.train_ids) or not set(val_ids)<=set(train_data.val_ids):
                 raise ValueError('校准/验证窗口越过原划分')
         else:
-            train_data = WaterDataset(self.checkpoint['image_dir'], bands=self.checkpoint['bands'],speckle=self.checkpoint.get('speckle'))
-            val_data = WaterDataset(self.checkpoint['image_dir'],self.checkpoint['label_dir'],self.checkpoint['bands'],speckle=self.checkpoint.get('speckle'))
+            options = dict(bands=self.checkpoint['bands'], speckle=self.checkpoint.get('speckle'),
+                           patch_representation=self.checkpoint.get('patch_representation', 'stored'))
+            train_data = WaterDataset(self.checkpoint['image_dir'], **options)
+            val_data = WaterDataset(self.checkpoint['image_dir'], self.checkpoint['label_dir'], **options)
             file_indices = {sample_name(path,train_data.image_dir):i for i,path in enumerate(train_data.image_paths)}
             self.calibration_files = self.checkpoint['train_files'][:CALIBRATION_SAMPLES]
             train_ids = [file_indices[name] for name in self.calibration_files]

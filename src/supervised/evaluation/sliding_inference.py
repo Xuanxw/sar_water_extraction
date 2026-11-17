@@ -33,7 +33,7 @@ def iter_scene_predictions(model, image_path, label_path=None, *, bands=(1,),
                            window_size=1024, halo=128, stride=None, blend='gaussian',
                            mean=None, std=None, inputs_normalized=False, device='cpu',
                            use_amp=False, batch_size=1, num_workers=0, speckle=None,
-                           boundary_context=True):
+                           boundary_context=True, window_transform=None):
     """逐块返回最终融合结果，每个原分辨率像素仅输出一次。
 
     scores 为单通道 logit（两类时为 logit1-logit0）；image 已位于模型输入域。
@@ -41,9 +41,13 @@ def iter_scene_predictions(model, image_path, label_path=None, *, bands=(1,),
     用于在拼接线两侧连续计算真值边界。无标签时 label 全为 -1。
     boundary_context=False 时上下文仅含当前核心块，可复用窗口中的 SAR/有效掩膜；
     此时不适用于需要跨块邻域的边界指标。缓存高度仍只有 core。
+    window_transform(image, valid) 返回窗级 (image, valid)，先于训练标准化。
+    此时用于显示的 image 取最后覆盖该像素的窗口值，只有 scores 做融合。
     """
     # 保留标签网格核验，但重叠输入窗口不读取/分配未被模型使用的标签。
     ds = SceneWindows(image_path, label_path, bands, window_size, halo, speckle, stride, read_labels=False)
+    if window_transform is not None and (boundary_context or ds.filter.config is not None):
+        raise ValueError("逐窗变换需关闭滤波和标签边界上下文")
     device = torch.device(device)
     means = torch.as_tensor(mean if mean is not None else np.zeros(len(bands)),
                             device=device, dtype=torch.float32).reshape(1, -1, 1, 1)
@@ -118,6 +122,11 @@ def iter_scene_predictions(model, image_path, label_path=None, *, bands=(1,),
 
             loader_iterator = iter(loader)
             for batch in loader_iterator:
+                if window_transform is not None:
+                    for tile, mask in zip(batch['image'], batch['valid_mask']):
+                        values, valid_pixels = window_transform(tile.numpy(), mask.numpy())
+                        tile.copy_(torch.from_numpy(values))
+                        mask.copy_(torch.from_numpy(valid_pixels))
                 valid = batch['valid_mask'].to(device, non_blocking=True)
                 image = batch['image'].to(device, non_blocking=True)
                 if not inputs_normalized:

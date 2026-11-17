@@ -96,7 +96,7 @@ def polygon_parts(geom):
 
 
 def build_water_polygons(mask_path,destination,*,options=None,cover_path=None,slope_path=None,terrain_path=None,
-                         postprocess=None,clip_geometry=None,clip_crs=None,overwrite=False):
+                         postprocess=None,clip_geometry=None,clip_crs=None,overwrite=False,slope_rejection_path=None):
     """从最终阈值分类图生成清理后的水体面；原分类成果不改，新增结果独立记录。"""
     mask_path=Path(mask_path);destination=Path(destination)
     settings={**DEFAULTS,**(options or {})};post=postprocess or {}
@@ -132,6 +132,14 @@ def build_water_polygons(mask_path,destination,*,options=None,cover_path=None,sl
                 bad=(np.isin(values.data,post.get('excluded_cover_classes',[50])) if kind=='cover' else
                      values.data==1 if kind=='terrain' else values.data>post.get('max_slope_deg',15.))
                 excluded[y:end]|=known&bad
+        if slope_rejection_path is not None:
+            # 阈值风险和几何排除分开保存，成面时共同保护；255未知不硬删。
+            risk=stack.enter_context(rasterio.open(slope_rejection_path))
+            if (risk.shape,risk.crs,risk.transform)!=(src.shape,src.crs,src.transform):
+                raise ValueError('坡度阈值风险图必须与水体分类图同网格')
+            for y in range(0,src.height,BLOCK_ROWS):
+                win=Window(0,y,src.width,min(BLOCK_ROWS,src.height-y))
+                excluded[y:y+int(win.height)]|=risk.read(1,window=win)==1
         nodata_count=int(np.count_nonzero(label==255))
         label,report=clean_mask(label,excluded,settings)
         del excluded
@@ -169,6 +177,7 @@ def build_water_polygons(mask_path,destination,*,options=None,cover_path=None,sl
     report.update(complete=True,algorithm='gui_polygon_cleanup_v1',options=settings,source=str(mask_path),
                   original_water_pixels=original_count,cleaned_water_pixels=final_count,unknown_pixels=nodata_count,
                   polygon_count=count,smoothing_fallbacks=fallback,elapsed_seconds=perf_counter()-started,
+                  slope_threshold_rejection=str(slope_rejection_path) if slope_rejection_path is not None else None,
                   note='200像素规则会删除小水体；平滑面与清理后栅格边界略有差别。原quality.json仍描述原water.tif。')
     temp=report_path.with_suffix('.partial.json');temp.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(report_path)
     print(f'  完成：{count}面，耗时{report["elapsed_seconds"]:.1f}秒；{destination}',flush=True)
