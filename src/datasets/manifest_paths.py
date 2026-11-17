@@ -8,7 +8,7 @@ import os
 
 
 def source_path(value, manifest):
-    """解析 source_image/source_label；绝对路径兼容旧清单。"""
+    """解析清单内源影像、标签或 DEM 路径；绝对路径兼容旧清单。"""
     path = Path(value)
     return path if path.is_absolute() else (Path(manifest).resolve().parent / path).resolve()
 
@@ -49,7 +49,7 @@ def write_relative_manifest(source, target=None):
         fields, rows = reader.fieldnames, list(reader)
     changed = 0
     for row in rows:
-        for key in ('source_image', 'source_label'):
+        for key in ('source_image', 'source_label', 'dem_path'):
             if row.get(key):
                 value = relative_source(source_path(row[key], source), target)
                 changed += value != row[key]
@@ -62,7 +62,7 @@ def write_relative_manifest(source, target=None):
     writer.writerows(rows)
     data = stream.getvalue().encode('utf-8-sig')
     record = dict(source_sha256=fingerprint, converted_sha256=hashlib.sha256(data).hexdigest(),
-                  path_base='csv_directory', fields=['source_image', 'source_label'])
+                  path_base='csv_directory', fields=[k for k in ('source_image', 'source_label', 'dem_path') if k in fields])
     # 先发布兼容记录，再发布 CSV；中断时哈希不匹配会拒绝复用，不会误认完成。
     receipt = target.with_suffix('.paths.json')
     temporary = receipt.with_suffix('.json.partial')

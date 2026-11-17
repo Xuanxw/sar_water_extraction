@@ -25,9 +25,11 @@ def check_preprocessed_input(image_dir, checkpoint):
     normalized = record.get('stage') == 'normalized'
     if normalized != checkpoint.get('inputs_normalized', False):
         raise ValueError('输入影像的归一化状态与检查点不一致')
-    if normalized and (not record.get('complete') or (folder/'.preprocessing_incomplete').exists()):
+    derived = normalized or record.get('stage') == 'vv_dem'
+    if derived and (not record.get('complete') or (folder/'.preprocessing_incomplete').exists()):
         raise ValueError('离线归一化尚未完成')
-    if normalized and record != checkpoint.get('input_preprocessing'):
+    expects_dem = (checkpoint.get('input_preprocessing') or {}).get('stage') == 'vv_dem'
+    if (derived or expects_dem) and record != checkpoint.get('input_preprocessing'):
         raise ValueError('输入影像的离线处理协议与检查点不一致')
 
 
@@ -42,9 +44,12 @@ class SARSceneDataset(Dataset):
         receipt = self.root / 'preprocessing.json'
         self.input_preprocessing = json.loads(receipt.read_text(encoding='utf-8')) if receipt.exists() else {}
         self.inputs_normalized = self.input_preprocessing.get('stage') == 'normalized'
+        self.scene_dem = self.input_preprocessing.get('stage') == 'vv_dem'
+        if self.scene_dem and (tuple(bands) != (1, 2) or speckle is not None):
+            raise ValueError("天仪 VV＋DEM 需按 (1,2) 读取归一化 VV 和米制高程，关闭在线滤波")
         if require_prepared and (self.root / '.preprocessing_incomplete').exists():
             raise RuntimeError('离线影像处理尚未完成，请重新运行image_process.py')
-        if self.inputs_normalized and require_prepared and not self.input_preprocessing.get('complete'):
+        if (self.inputs_normalized or self.scene_dem) and require_prepared and not self.input_preprocessing.get('complete'):
             raise RuntimeError('归一化成果未完整发布')
         if self.inputs_normalized and speckle is not None:
             raise ValueError('输入已离线归一化，不能再次滤波')
@@ -83,7 +88,17 @@ class SARSceneDataset(Dataset):
                 source_stamp.append((str(path), st.st_size, st.st_mtime_ns))
                 # VRT本身很小；其引用的SAR变化时也必须使缓存失效。
                 if path.suffix.lower() == '.vrt':
-                    for node in ET.parse(path).findall('.//SourceFilename'):
+                    vrt = ET.parse(path)
+                    if self.scene_dem and kind == 'images':
+                        node = vrt.find("./VRTRasterBand[@band='2']/SimpleSource/SourceFilename")
+                        if node is None or not node.text or not r.get('dem_path'):
+                            raise ValueError(f"整景清单或 VRT 缺少 DEM 来源：{path}")
+                        linked = Path(node.text)
+                        if node.get('relativeToVRT') == '1':
+                            linked = path.parent / linked
+                        if linked.resolve() != source_path(r['dem_path'], self.manifest_path).resolve():
+                            raise ValueError(f"清单 dem_path 与 VRT 高程波段不一致：{path}")
+                    for node in vrt.findall('.//SourceFilename'):
                         linked = Path(node.text)
                         if node.get('relativeToVRT') == '1':
                             linked = path.parent / linked
@@ -203,6 +218,19 @@ class SARSceneDataset(Dataset):
 
     def normalization(self, train_ids):
         """训练景内固定抽取窗口估计均值/标准差；不读取val像素，结果缓存并随模型保存。"""
+        if self.scene_dem:
+            # VV 已离线归一化；仅聚合参与训练景的共同有效像元，高程保留米制至入模时。
+            scene_ids = np.unique(self.windows[np.asarray(train_ids, dtype=np.int64), 0])
+            rows = [self.scenes[int(sid)] for sid in scene_ids]
+            if not rows or any(row['split'] != 'train' for row in rows):
+                raise ValueError("DEM 统计只能读取训练景")
+            count = sum(int(r['valid_pixels']) for r in rows)
+            mean = sum(float(r['dem_sum_m']) for r in rows) / count
+            variance = sum(float(r['dem_sum_sq_m2']) for r in rows) / count - mean**2
+            if not np.isfinite([mean, variance]).all():
+                raise ValueError("训练景 DEM 统计不是有限数")
+            std = np.sqrt(max(variance, 0.))
+            return np.array([0., mean]), np.array([1., std if std > 1e-6 else 1.]), []
         if self.inputs_normalized:
             # 浮点影像已标准化；返回恒等参数，供检查点记录，训练不再变换。
             return np.zeros(len(self.bands)), np.ones(len(self.bands)), self.input_preprocessing.get('statistics_window_indices', [])
@@ -259,7 +287,7 @@ def merge_scene_manifests(manifest_paths, **dataset_options):
     # 忽略来源路径和采样索引，比较影响数值含义的处理步骤及归一化参数。
     def protocol(record):
         keys = ('stage', 'bands', 'input_domain', 'output_domain', 'quantity', 'filter',
-                'calibration_reference', 'mean', 'std')
+                'calibration_reference', 'mean', 'std', 'dem_source', 'dem_unit', 'vertical_datum')
         result = {k: record.get(k) for k in keys}
         if record.get('upstream'):
             result['upstream'] = protocol(record['upstream'])
@@ -270,7 +298,7 @@ def merge_scene_manifests(manifest_paths, **dataset_options):
     for path in paths:
         receipt = path.parent/'preprocessing.json'
         record = json.loads(receipt.read_text(encoding='utf-8')) if receipt.exists() else {}
-        if record.get('stage') != 'normalized' or not record.get('complete'):
+        if record.get('stage') not in ('normalized', 'vv_dem') or not record.get('complete'):
             raise ValueError(f'多目录训练要求已完成离线归一化：{path.parent}')
         if reference is None:
             reference = record
@@ -286,7 +314,7 @@ def merge_scene_manifests(manifest_paths, **dataset_options):
                 seen.add(identifier.casefold())
                 # 合并清单放在仓库缓存，先按各自CSV解析源路径，防止基准目录改变。
                 row = dict(row)
-                for field in ('source_image', 'source_label'):
+                for field in ('source_image', 'source_label', 'dem_path'):
                     if row.get(field):
                         row[field] = str(source_path(row[field], path))
                 # name使用绝对路径，现有训练/整景验证的Path拼接均会保留该绝对路径。

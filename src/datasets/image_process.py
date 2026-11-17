@@ -1,6 +1,6 @@
 """整景SAR数据准备与检查：MODE选择首次导入、标签重建、清单检查、辐射统计或快视图。
 BC ORG 像元为未校正的线性功率（intensity）。
-不生成训练切片；滤波、归一化与阶段快视图均由本入口按MODE执行。
+不生成训练切片；MODE=dem 使用最终 VV 网格和本地 GLO-30，另存双通道训练清单。
 """
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -66,6 +66,12 @@ def configure(config_path):
     CONFIG = load_yaml(CONFIG_PATH)
 
     MODE = CONFIG["run"]["MODE"]
+    if MODE == 'dem':
+        NORMALIZED_ROOT = CONFIG["paths"]["NORMALIZED_ROOT"]
+        NORMALIZATION_METHOD = CONFIG["processing"]["NORMALIZATION_METHOD"]
+        if NORMALIZATION_METHOD not in ("zscore", "scene_p02_p98"):
+            raise ValueError("DEM 输入需选择已完成的 zscore 或 scene_p02_p98 成果")
+        return
     SPLIT_CSV = CONFIG["paths"]["SPLIT_CSV"]
     PREPARE_BATCH = CONFIG["run"]["PREPARE_BATCH"]
     IMAGE_ROOT = CONFIG["paths"]["IMAGE_ROOT"]
@@ -857,8 +863,10 @@ def file_stamp(path):
 
 
 def stage_root(stage):
-    if stage == 'normalized' and NORMALIZATION_METHOD == 'scene_p02_p98':
-        return NORMALIZED_ROOT.with_name(NORMALIZED_ROOT.name + '_p02_p98')
+    if stage == 'normalized':
+        if NORMALIZATION_METHOD == 'scene_p02_p98':
+            return NORMALIZED_ROOT.with_name(NORMALIZED_ROOT.name + '_p02_p98')
+        return NORMALIZED_ROOT
     return {'org': OUTPUT_DIR, 'calibrated': CALIBRATED_ROOT,
             'filtered': FILTERED_ROOT, 'normalized': NORMALIZED_ROOT}[stage]
 
@@ -1324,7 +1332,12 @@ def main(config_path=None):
     if CONFIG is None:
         raise ValueError("请传入YAML路径，或先调用configure(config_path)")
     print(f"影像处理配置：{CONFIG_PATH}；模式：{MODE}", flush=True)
-    if MODE == 'labels':
+    if MODE == 'dem':
+        from datasets.scene_dem import prepare_scene_dems
+        paths, processing = CONFIG["paths"], CONFIG["processing"]
+        prepare_scene_dems(stage_root("normalized"), paths["DEM_TILE_DIR"], paths["WINDOW_CACHE_DIR"],
+                           processing["WINDOW_SIZE"], processing["HALO"])
+    elif MODE == 'labels':
         prepare_labels(OUTPUT_DIR, READ_WINDOW_SIZE)
     elif MODE in ('prepare','split','inspect'):
         prepare_dataset()
@@ -1357,7 +1370,7 @@ def main(config_path=None):
     elif MODE == 'quicklook':
         export_quicklooks()
     else:
-        raise ValueError('MODE选all/prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook')
+        raise ValueError('MODE选dem/all/prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook')
 
 
 if __name__ == '__main__':

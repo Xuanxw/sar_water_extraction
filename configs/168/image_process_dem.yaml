@@ -1,0 +1,14 @@
+# 从已完成的单 VV 归一化成果逐景准备 DEM。只使用已有 GLO-30 瓦片。
+paths:
+  DATA_ROOT: /tech-data-hub/wangxuanxuan/水体提取/BC水体数据及标签
+  # 与本机 image_process.yaml 一致。scene_p02_p98 自动追加 _p02_p98。
+  NORMALIZED_ROOT: processed_scenes/normalized
+  # 改为服务器实际的瓦片目录，其中应直接包含 Copernicus_DSM_COG_*_DEM.tif。
+  DEM_TILE_DIR: /home/lenovo/apps/sar_water_extraction/data_cache/auxiliary/tiles/copernicus
+  WINDOW_CACHE_DIR: /tmp/lenovo/data_cache/bc_scenes
+run:
+  MODE: dem
+processing:
+  NORMALIZATION_METHOD: scene_p02_p98
+  WINDOW_SIZE: 1024
+  HALO: 128

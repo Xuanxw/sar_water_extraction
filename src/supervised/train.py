@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from supervised.load.sar_scene_dataset import IGNORE_INDEX, SARSceneDataset, merge_scene_manifests
 from datasets.speckle import SpeckleFilter
-from datasets.manifest_paths import manifest_fingerprint
+from datasets.manifest_paths import manifest_fingerprint, write_relative_manifest
 from supervised.models.losses import WaterSegmentationLoss
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.models.unet import UNet
@@ -68,7 +68,7 @@ def configure(config_path):
     """显式加载本次YAML；导入模块时不读取文件或命令行参数。"""
     global CONFIG_PATH, CONFIG, METHOD, RESUME_CHECKPOINT, IMAGE_DIR, LABEL_DIR, MANIFEST_PATHS, OUTPUT_ROOT
     global OUTPUT_DIR, WINDOW_CACHE_DIR, RUN_DIRECTORY_FORMAT, RESULT_FILES, POLARIZATIONS, POLARIZATION_BANDS, VAL_RATIO, MAX_SAMPLES
-    global DATA_LAYOUT, SCENE_OPTIONS, PRETRAINED, CPU_THREADS, BATCH_SIZE, EPOCHS, LEARNING_RATE, SEED
+    global DATA_LAYOUT, DEM_BAND, SCENE_OPTIONS, PRETRAINED, CPU_THREADS, BATCH_SIZE, EPOCHS, LEARNING_RATE, SEED
     global LOSS_NAME, BCE_WEIGHT, DICE_WEIGHT, CLASS_WEIGHT_MODE, OPTIMIZER_NAME, WEIGHT_DECAY, COSINE_SCHEDULE, TRAIN_AUGMENTATION
     global ABNORMAL_F1_THRESHOLD, SAMPLING, HARD_WARMUP_EPOCHS, HARD_SAMPLE_RATIO, HARD_POOL_RATIO, LOW_WATER_POOL_RATIO, WATER_GROUP_NAMES, DEEPLAB_BACKBONE
     global DEEPLAB_DECODER_CHANNELS, DEEPLAB_LOW_LEVEL_CHANNELS, DEEPLAB_ASPP_RATES, DEEPLAB_DROPOUT, BASE_CHANNELS, DECODER_CHANNELS, STAGE, UAFNET_BACKBONE
@@ -101,6 +101,7 @@ def configure(config_path):
     VAL_RATIO = CONFIG["data"]["VAL_RATIO"]
     MAX_SAMPLES = CONFIG["data"]["MAX_SAMPLES"]
     DATA_LAYOUT = CONFIG["data"]["DATA_LAYOUT"]
+    DEM_BAND = CONFIG["data"].get("DEM_BAND")
     SCENE_OPTIONS = CONFIG["data"]["SCENE_OPTIONS"]
     PRETRAINED = CONFIG["model"]["PRETRAINED"]
     CPU_THREADS = CONFIG["training"]["CPU_THREADS"]
@@ -323,8 +324,9 @@ class WaterSegmentationTrainer:
                 for manifest in manifests or [self.image_dir.parent/'split_manifest.csv']:
                     receipt = Path(manifest).parent/'preprocessing.json'
                     record = json.loads(receipt.read_text(encoding='utf-8')) if receipt.is_file() else {}
+                    expected_stage = 'vv_dem' if self.model_info.get('input_channels') == ('VV', 'DEM') else 'normalized'
                     if ((record.get('bc_org_domain'), record.get('input_domain'), record.get('stage'),
-                         record.get('complete')) != ('intensity','intensity','normalized',True)
+                         record.get('complete')) != ('intensity','intensity',expected_stage,True)
                             or record.get('output_domain') not in ('standardized', 'scene_p02_p98')):
                         raise ValueError(f'BC训练需要已完成的功率域标准化数据，请用新版image_process.py生成：{receipt}')
             if manifests is not None:
@@ -337,7 +339,9 @@ class WaterSegmentationTrainer:
             self.input_preprocessing = self.dataset.input_preprocessing
             if self.inputs_normalized:
                 self.model_info['input_representation'] = 'offline_normalized_GeoTIFF; no_train_preprocessing'
-            if require_normalized and not self.inputs_normalized:
+            if self.dataset.scene_dem:
+                self.model_info['input_representation'] = 'offline_normalized_VV + Copernicus_GLO30_m; train_only_DEM_zscore'
+            if require_normalized and not (self.inputs_normalized or self.dataset.scene_dem):
                 raise ValueError('正式训练需使用离线归一化影像；先运行image_process.py的preprocess或normalize模式')
             split_path = self.dataset.manifest_path
             train_ids, val_ids = self.dataset.train_ids, self.dataset.val_ids
@@ -354,7 +358,8 @@ class WaterSegmentationTrainer:
                                    validation_protocol=(f"overlap_{self.validation_inference['blend']}_logits; unique_final_pixels; isolated_validation_rng" if self.validation_inference else 'nonoverlap_core_all_labeled_pixels; halo_context; no resize'),
                                    window_cache_key=self.dataset.cache_key,
                                    loader_workers=workers, loader_prefetch=2 if workers else 0,
-                                   normalization_protocol='fixed_training_windows_estimate',
+                                   normalization_protocol=('all_valid_training_scene_DEM_pixels' if self.dataset.scene_dem
+                                                           else 'fixed_training_windows_estimate'),
                                    normalization_windows_per_scene=self.dataset.normalization_windows,
                                    train_windows_per_epoch=self.windows_per_epoch,
                                    evaluation_scope='smoke_window_subset' if max_samples is not None else 'all_active_labeled_scene_cores')
@@ -464,7 +469,10 @@ class WaterSegmentationTrainer:
         if resume is None or self.resume_protocol_changed:
             self.run_dir.mkdir(parents=True, exist_ok=False)
         if (resume is None or self.resume_protocol_changed) and split_path.is_file():
-            shutil.copy2(split_path, self.run_dir / RESULT_FILES["split"])
+            if self.scene_options is not None and self.dataset.scene_dem:
+                write_relative_manifest(split_path, self.run_dir / RESULT_FILES["split"])
+            else:
+                shutil.copy2(split_path, self.run_dir / RESULT_FILES["split"])
             if getattr(self.dataset, "input_preprocessing", {}):
                 (self.run_dir/'input_preprocessing.json').write_text(
                     json.dumps(self.dataset.input_preprocessing, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -690,7 +698,9 @@ class WaterSegmentationTrainer:
                 counts = self.dataset.windows[self.train_set.indices, 5:7]
                 self.sample_water_ratios = torch.from_numpy(counts[:,0]/counts.sum(axis=1))
                 self.sample_groups = torch.bucketize(self.sample_water_ratios, torch.tensor([0.,.01,.1,.5],dtype=torch.float64))
-            if self.inputs_normalized and self.input_preprocessing.get('output_domain') == 'scene_p02_p98':
+            if self.dataset.scene_dem:
+                cprint(f'复用离线 VV；训练景 DEM 高程 mean={mean[1]:.4f} m，std={std[1]:.4f} m', 'cyan', flush=True)
+            elif self.inputs_normalized and self.input_preprocessing.get('output_domain') == 'scene_p02_p98':
                 cprint('读取整景 P02/P98 归一化影像（float32 [0,1]）', 'cyan', flush=True)
             elif self.inputs_normalized:
                 cprint(f"读取离线归一化影像；原训练统计mean={self.input_preprocessing['mean']}，std={self.input_preprocessing['std']}；训练不再标准化", 'cyan', flush=True)
@@ -1122,6 +1132,14 @@ def create_trainer(method=None):
     binary_method = architecture in ("uafnet", "deeplabv3plus", "sentinel1_water_unet") or mobile_unet
     # 在创建训练器时解析，单极化自动构建单通道网络，并重新统计该通道的均值和标准差。
     bands = tuple(POLARIZATION_BANDS[name] for name in POLARIZATIONS)
+    input_channels = POLARIZATIONS
+    if DEM_BAND is not None and DATA_LAYOUT == "full_scene":
+        if POLARIZATIONS != ("VV",) or bands != (1,) or type(DEM_BAND) is not int or DEM_BAND != 2:
+            raise ValueError("天仪整景 DEM 模式使用 VV=1、DEM_BAND=2 的 MODE=dem 成果")
+        bands += (DEM_BAND,)
+        input_channels += ("DEM",)
+    elif DEM_BAND is not None:
+        raise ValueError("DEM_BAND 需要配合 full_scene 布局使用")
     if mobile_unet:
         from supervised.experimental.experimental_model_unet_mobilenet import AI4GWaterUNet
         model_class = AI4GWaterUNet
@@ -1255,16 +1273,18 @@ def create_trainer(method=None):
         experiment += "_head_weights"
         model_info["supervision"] = f"weighted_sum_{LOSS_NAME}_all_train_heads; final_head_validation"
     # 保留原 VV/VH 目录；单极化或其他组合独立保存，防止比较时混淆。
-    if POLARIZATIONS != ("VV", "VH"):
-        experiment += "_" + "_".join(name.lower() for name in POLARIZATIONS)
+    if input_channels != ("VV", "VH"):
+        experiment += "_" + "_".join(name.lower() for name in input_channels)
     model_info.update(architecture=architecture, backbone=backbone, polarizations=POLARIZATIONS,
-                      polarization_bands=dict(zip(POLARIZATIONS, bands)))
+                      polarization_bands=dict(zip(POLARIZATIONS, bands)), input_channels=input_channels)
+    if DEM_BAND is not None:
+        model_info.update(dem_band=DEM_BAND, dem_source="Copernicus GLO-30 DSM", dem_unit="m")
     if CLASS_WEIGHT_MODE == "train_pixels":
         experiment += "_balanced_bce"
     if DATA_LAYOUT == 'full_scene':
         model_info['input_representation'] = 'BC_single_date_stored_VV; sampled_train_window_mean_std'
     output_dir = OUTPUT_ROOT / experiment if OUTPUT_DIR is None else Path(OUTPUT_DIR)
-    cprint(f"网络：{architecture}；编码器：{backbone}；极化：{POLARIZATIONS}；文件波段：{bands}；实验目录：{output_dir}", color="cyan", flush=True)
+    cprint(f"网络：{architecture}；编码器：{backbone}；输入通道：{input_channels}；文件波段：{bands}；实验目录：{output_dir}", color="cyan", flush=True)
     return WaterSegmentationTrainer(
         model_class=model_class, model_kwargs=model_kwargs, model_info=model_info,
         image_dir=IMAGE_DIR, label_dir=LABEL_DIR, output_dir=output_dir,

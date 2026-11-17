@@ -24,6 +24,8 @@ paths:
   QUICKLOOK_IMAGE_ROOT: prepared_scenes\images
   CALIBRATED_ROOT: processed_power\calibrated
   FILTERED_ROOT: processed_power\filtered
+  # MODE=dem 使用本地 GLO-30 瓦片，在归一化结果旁生成独立的 _vv_dem 目录。
+  DEM_TILE_DIR: E:/Code_projects/sar_water_extraction/data_cache/auxiliary/tiles/copernicus
   NORMALIZED_ROOT: processed_power\normalized
   # null则由本批train重新统计；batch 2复用batch 1，保持多批输入尺度一致。
   NORMALIZATION_REFERENCE: null
@@ -38,7 +40,7 @@ paths:
 
 # 执行模式与批次/实验输出。
 run:
-  # all/prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook
+  # dem/all/prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook
   MODE: preprocess
   # 从总表选择批次；null读取全部，切换批次时同步修改输出路径。
   PREPARE_BATCH: null
