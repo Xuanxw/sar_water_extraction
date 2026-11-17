@@ -15,7 +15,7 @@ from configuration import load_yaml
 from datasets.snap_preprocess import SnapSpeckleFilter, dimap_band_vrt, snap_runtime
 
 SCENE = "BC3-SM-ORG-VV-20240704T150208-008104"
-WRITERS = (("bigtiff", "GeoTIFF-BigTIFF", ".tif"), ("dimap", "BEAM-DIMAP", ".dim"))
+WRITERS = (("dimap", "BEAM-DIMAP", ".dim"), ("bigtiff", "GeoTIFF-BigTIFF", ".tif"))
 
 
 def scene_input(prepared):
@@ -130,7 +130,7 @@ def main(args):
                                  enl=processing["ENL"]))
     report = dict(scene=SCENE, source=str(src), yaml=str(Path(args[1]).resolve()), config=lee.config,
                   threads=config["snap"]["SNAP_THREADS"], tile_cache=config["snap"]["SNAP_TILE_CACHE"],
-                  runtime=snap_runtime(str(paths["SNAP_GPT_PATH"])), order=[w[1] for w in WRITERS], times={})
+                  runtime=snap_runtime(str(paths["SNAP_GPT_PATH"])), order=[w[1] for w in WRITERS], times={}, final_files={})
     products = {}
     report["restore_errors"] = {}
     dest = run_dir / "report.json"
@@ -140,8 +140,12 @@ def main(args):
             report["times"][tag], products[tag], error = run_writer(run_dir / tag, writer, src, lee, config)
             if error:
                 report["restore_errors"][tag] = error
+            else:
+                report["final_files"][tag] = str(products[tag][1])
+                print(f"[{tag}] 最终成果：{products[tag][1]}", flush=True)
             save_report(dest, report)
-        a, b = products.values()
+        # 报告中的网格、掩膜差异仍按 BigTIFF、DIMAP、参考输入排列。
+        a, b = products["bigtiff"], products["dimap"]
         for i, stage in enumerate(("raw", "final")):
             if stage == "final" and report["restore_errors"]:
                 report["final"] = dict(equal=False, reason="至少一个中间产品未通过生产网格或数值检查")

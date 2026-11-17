@@ -1,0 +1,143 @@
+# 本文件为唯一参数来源；修改后重新启动对应脚本。null表示关闭/未指定。
+# 每次一个MODE：prepare首次导入；labels重建标签；split检查划分；inspect抽查格式；radiometry统计功率。
+# calibrate/filter/normalize各执行单阶段；preprocess按开关串联校正、滤波、归一化。
+# preprocess不包括prepare/labels/检查/快视图；quicklook只读取已有成果。
+# all：prepare → 按开关预处理 → quicklook；不执行split/inspect/radiometry/labels。
+# 使用已准备的合批整景，功率滤波与标准化写入独立目录。
+
+# 相对数据路径以DATA_ROOT为基准；软件和仓库路径保留绝对路径。
+paths:
+  # 数据搬迁后只修改本项；其余相对路径以此目录为基准。
+  DATA_ROOT: /tech-data-hub/wangxuanxuan/水体提取/BC水体数据及标签/
+  SPLIT_CSV: 水体数据分组.csv
+  IMAGE_ROOT: SAR影像_卫星环境应用中心
+  LABEL_ROOT: 水体提取结果_卫星环境应用中心
+  # 当前整景数据根目录。
+  OUTPUT_DIR: prepared_scenes
+  # ZIP逐景展开，单景结束即清理临时影像。
+  CACHE_DIR: prepare_cache
+  # 可选：DATA_ROOT下相对目录或绝对目录，文件名为完整景号.tif/.tiff，1有效、0无效。
+  VALID_MASK_DIR: null
+  # 例如：完整景号: {image: SAR影像目录/原始.zip, label: 标签目录/水体.shp}；相对DATA_ROOT。
+  SOURCE_OVERRIDES: {}
+  AUDIT_OUTPUT_ROOT: radiometry_audit
+  QUICKLOOK_IMAGE_ROOT: prepared_scenes/images
+  CALIBRATED_ROOT: processed_scenes/calibrated
+  FILTERED_ROOT: processed_scenes/filtered
+  NORMALIZED_ROOT: processed_scenes/normalized
+  # null则由本批train重新统计；batch 2复用batch 1，保持多批输入尺度一致。
+  NORMALIZATION_REFERENCE: null
+  WINDOW_CACHE_DIR: /tmp/lenovo/data_cache/bc_scenes
+  SNAP_GPT_PATH: /home/lenovo/apps/esa-snap/bin/gpt
+  SNAP_CACHE_DIR: snap_lee_cache
+  # 每景的临时读写使用 168 本机 SSD，已完成的滤波成果保存在数据盘。
+  SNAP_WORK_DIR: /tmp/lenovo/sar_snap_work
+  NORMALIZE_WORK_DIR: /tmp/lenovo/data_cache/normalize_work
+  # 已校正GeoTIFF根目录：train/val下同名文件。
+  CALIBRATION_PRODUCTS_DIR: null
+
+# 执行模式与批次/实验输出。
+run:
+  # all/prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook
+  MODE: all
+  # 从总表选择批次；null读取全部，切换批次时同步修改输出路径。
+  PREPARE_BATCH: null
+
+# 整景读写与有效值约定；0不自动作为无效。
+input:
+  # 新数据单VV，文件波段编号从1开始。
+  BANDS:
+  - 1
+  # 仅控制内部读写内存，不是训练窗口，也不会生成切片文件。
+  READ_WINDOW_SIZE: 1024
+  INSPECT_SAMPLES: 3
+  # prepare试跑时可设小整数；正式运行用null。
+  MAX_SCENES: null
+  # 只填写已确认的无效编码；不默认把0当作无效。
+  INPUT_NODATA_VALUE: null
+  # 按用户要求：未声明无效域时保留所有有限数值，包括0。
+  ALLOW_ALL_VALID_SOURCE: true
+
+# 标签语义：水体1、非水体0、无效255；显示色带不改变数值。
+labels:
+  CLASS_FIELD: null
+  # 用户重新确认：所有SHP面为水体，class字段不区分水陆。
+  CLASS_MAP:
+    null: 1
+  # 本批BC数据面外已确认为非水体；其他未完整标注的数据应设255。
+  OUTSIDE_LABEL: 0
+  SCENE_CLASS_RULES: {}
+  # 仅人工复核的第二批允许原样栅格化拓扑无效面；空面仍报错。
+  ACCEPT_REVIEWED_GEOMETRY: true
+  LABEL_RULE: 用户确认：所有SHP面为水体，面外为非水体；不使用class字段区分水陆
+
+# 检查和快视图；仅改变显示，不改变训练影像。
+inspection:
+  BAND: 1
+  RADIOMETRY_WINDOW_SIZE: 256
+  GRID_SIZE: 3
+  SPLITS:
+  - val
+  - train
+  Z_DISPLAY_RANGE:
+  - -1.0
+  - 3.0
+  # 显示时按8×8有效功率取均值；不是功率域物理多视。
+  QUICKLOOK_LOOKS: 8
+  # 单面板最长边；大景自动增大平均窗口。
+  QUICKLOOK_MAX_SIDE: 1600
+  # 分条读取原SAR，控制内存。
+  STRIPE_ROWS: 128
+  PNG_COMPRESSION: 3
+  # 仅对已确认sigma0/beta0/gamma0成果显示dB。
+  QUICKLOOK_BACKSCATTER_DB_RANGE:
+  - -35.0
+  - 0.0
+
+# 仅由影像处理入口传入SNAP，不影响训练入口。
+snap:
+  # 全批滤波成果发布成功后，删除本批SNAP缓存影像；中断时保留。
+  CLEAN_SNAP_CACHE_ON_SUCCESS: true
+  # 同时滤波的整景数。每景独立启动一个 JVM。
+  SNAP_SCENE_WORKERS: 1
+  # 每个 GPT 进程的并行线程数与瓦片缓存。
+  SNAP_THREADS: 16
+  SNAP_TILE_CACHE: 512M
+  # 只影响新计算场景的中间格式；切换后复用已完成的 filtered GeoTIFF。
+  # 第 362 景对照先跑 BEAM-DIMAP。确认最终像元、掩膜、网格一致且耗时更短后，再切换此项。
+  SNAP_WRITER_FORMAT: GeoTIFF-BigTIFF
+
+# 离线预处理。每景独立估计有效功率的 P02/P98。
+processing:
+  # 大块读写，减少Python/GDAL调用；不改变输出像元。
+  NORMALIZE_READ_SIZE: 1024
+  # 单景无损压缩线程，不并发多景。
+  NORMALIZE_THREADS: 32
+  # DEFLATE快速档；只影响体积和耗时，不影响浮点值。
+  NORMALIZE_COMPRESSION_LEVEL: 1
+  # 未取得BC校正系数/厂商流程，保持关闭。
+  ENABLE_CALIBRATION: false
+  ENABLE_FILTER: true
+  # 原始ORG已确认为功率。
+  INPUT_DOMAIN: intensity
+  FILTER_WINDOW: 3
+  ENL: 1.0
+  # org/calibrated；需与其数据域匹配。
+  FILTER_INPUT_STAGE: org
+  # org/calibrated/filtered
+  NORMALIZE_INPUT_STAGE: filtered
+  # zscore 使用训练统计；scene_p02_p98 将每景有效功率映射到 float32 [0,1]。
+  # 后者自动写入 NORMALIZED_ROOT 同级的 <原目录名>_p02_p98；复用滤波成果时选 MODE: normalize。
+  NORMALIZATION_METHOD: scene_p02_p98
+  WINDOW_SIZE: 1024
+  HALO: 128
+  # 每个训练景固定抽样；val不参与参数估计。
+  NORMALIZATION_WINDOWS: 2
+  SEED: 42
+  # 已核实后填写sigma0/beta0/gamma0。
+  CALIBRATION_QUANTITY: null
+  CALIBRATION_OUTPUT_DOMAIN: intensity
+  # 校正LUT/系数/算法和网格匹配依据。
+  CALIBRATION_REFERENCE: ''
+  # 可选参数列表，如['wsl.exe','-d','Ubuntu-22.04','--','bash','...','{input_wsl}','{output_wsl}']。
+  CALIBRATION_COMMAND: null
