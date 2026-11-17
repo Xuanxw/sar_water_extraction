@@ -103,6 +103,9 @@ snap:
   # 每个 GPT 进程的并行线程数与瓦片缓存。
   SNAP_THREADS: 4
   SNAP_TILE_CACHE: 512M
+  # 只影响新计算场景的中间格式；切换后复用已完成的 filtered GeoTIFF。
+  # 第 362 景验证通过后可改为 BEAM-DIMAP；旧配置省略此项等同于 GeoTIFF-BigTIFF。
+  SNAP_WRITER_FORMAT: GeoTIFF-BigTIFF
 
 # 离线预处理；归一化参数仅由train估计。
 processing:

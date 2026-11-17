@@ -15,6 +15,8 @@ import shutil
 from time import perf_counter, sleep
 import xml.etree.ElementTree as ET
 
+from affine import Affine
+from rasterio.crs import CRS
 from filelock import FileLock, Timeout
 import numpy as np
 import rasterio
@@ -26,6 +28,7 @@ WORK_DIR = None
 GPT_THREADS = 4
 GPT_TILE_CACHE = '512M'
 GPT_SCENE_WORKERS = 1
+WRITER_SUFFIX = {"GeoTIFF-BigTIFF": ".tif", "BEAM-DIMAP": ".dim"}
 
 
 def configure_paths(gpt_path, cache_dir, work_dir, *, threads=4, tile_cache='512M', scene_workers=1):
@@ -76,10 +79,50 @@ def snap_runtime(gpt_path):
     return result
 
 
+def dimap_band_vrt(product, expected_names=("power_1",)):
+    """读取 BEAM .dim 声明的波段网格与 NoData。VRT 引用原始 .img，不重采样。"""
+    doc = ET.parse(product)
+    dims = doc.find("Raster_Dimensions")
+    w, h = int(dims.findtext("NCOLS")), int(dims.findtext("NROWS"))
+    if int(dims.findtext("NBANDS")) != len(expected_names):
+        raise ValueError("BEAM 波段数与本次滤波输入不一致")
+    # Java AffineTransform 的顺序是 m00,m10,m01,m11,m02,m12。
+    a, d, b, e, c, f = map(float, doc.findtext("Geoposition/IMAGE_TO_MODEL_TRANSFORM").split(","))
+    transform = Affine(a, b, c, d, e, f)
+    crs = CRS.from_wkt(doc.findtext("Coordinate_Reference_System/WKT"))
+    vrt = ET.Element("VRTDataset", rasterXSize=str(w), rasterYSize=str(h))
+    ET.SubElement(vrt, "SRS").text = crs.to_wkt()
+    ET.SubElement(vrt, "GeoTransform").text = ",".join(map(str, transform.to_gdal()))
+    files = {int(node.findtext("BAND_INDEX")): node for node in doc.findall("Data_Access/Data_File")}
+    bands = {int(node.findtext("BAND_INDEX")): node for node in doc.findall("Image_Interpretation/Spectral_Band_Info")}
+    for index, name in enumerate(expected_names):
+        band = bands[index]
+        if band.findtext("BAND_NAME") != name or band.findtext("DATA_TYPE") != "float32":
+            raise ValueError(f"BEAM 波段 {index + 1} 与预期 {name} (Float32) 不一致")
+        header = files[index].find("DATA_FILE_PATH").attrib["href"]
+        pixels = (product.parent / header).with_suffix(".img").resolve(strict=True)
+        with rasterio.open(pixels) as ds:
+            if (ds.width, ds.height, ds.count, ds.dtypes) != (w, h, 1, ("float32",)):
+                raise ValueError("BEAM 波段文件与 .dim 声明不一致")
+        layer = ET.SubElement(vrt, "VRTRasterBand", dataType="Float32", band=str(index + 1))
+        if band.findtext("NO_DATA_VALUE_USED", "").lower() == "true":
+            ET.SubElement(layer, "NoDataValue").text = str(float(band.findtext("NO_DATA_VALUE")))
+        source = ET.SubElement(layer, "SimpleSource")
+        ET.SubElement(source, "SourceFilename", relativeToVRT="1").text = pixels.relative_to(product.parent).as_posix()
+        ET.SubElement(source, "SourceBand").text = "1"
+    view = product.with_suffix(".vrt")
+    ET.ElementTree(vrt).write(view, encoding="utf-8", xml_declaration=True)
+    return view
+
+
 class SnapSpeckleFilter:
     """普通Lee整景缓存；功率域滤波后恢复输入域，标准化由image_process.py后续模式负责。"""
 
-    def __init__(self, config):
+    def __init__(self, config, *, writer_format="GeoTIFF-BigTIFF"):
+        # 写出格式只决定临时产品，不能进入已发布 GeoTIFF 的数值签名。
+        if writer_format not in WRITER_SUFFIX:
+            raise ValueError(f"不支持的 SNAP 写出格式：{writer_format}")
+        self.writer_format = writer_format
         self.config = dict(config)
         self._prepared = {}
 
@@ -151,8 +194,9 @@ class SnapSpeckleFilter:
         adapted = work/'input.tif'
         profile = self.prepare_input(source, bands, adapted)
         timings['input_preparation_seconds'] = round(perf_counter()-started, 3)
-        graph_path, raw_output = diagnostics/'graph.xml', work/'snap_output.tif'
-        self.write_graph(graph_path, adapted, raw_output, len(bands))
+        graph_path = diagnostics/'graph.xml'
+        raw_output = work / ('snap_output' + WRITER_SUFFIX[self.writer_format])
+        self.write_graph(graph_path, adapted, raw_output, len(bands), format_name=self.writer_format)
         # 将Java输出写入日志，报错保留原始原因；不退回旧Lee继续训练。
         log = diagnostics/'gpt.log'
         started = perf_counter()
@@ -168,7 +212,11 @@ class SnapSpeckleFilter:
 
         # SNAP可能改变NoData标记；用原有效域恢复，合法0值仍有效，标签网格不变。
         started = perf_counter()
-        self.restore_output(source, adapted, raw_output, output, profile)
+        if self.writer_format == "BEAM-DIMAP":
+            prefix = "sar" if self.config["input_domain"] == "amplitude" else "power"
+            names = [f"{prefix}_{i}" for i in range(1, len(bands) + 1)]
+            raw_output = dimap_band_vrt(raw_output, names)
+        self.restore_output(source, adapted, raw_output, output, profile, format_name=self.writer_format)
         timings['restore_mask_and_compress_seconds'] = round(perf_counter()-started, 3)
         return timings
 
@@ -190,7 +238,7 @@ class SnapSpeckleFilter:
                     dst.write(np.where(good[None], values.data, -9999).astype('float32'), window=window)
         return profile
 
-    def restore_output(self, source, adapted, raw_output, output, profile):
+    def restore_output(self, source, adapted, raw_output, output, profile, *, format_name="GeoTIFF-BigTIFF"):
         """校验原始网格，恢复输入有效域并无损压缩到同网格 GeoTIFF。"""
         profile = profile.copy()
         with rasterio.open(adapted) as original, rasterio.open(raw_output) as filtered:
@@ -208,7 +256,7 @@ class SnapSpeckleFilter:
                         raise ValueError(f'SNAP在有效区域输出非法值；查看 {raw_output}')
                     dst.write(np.where(good[None], values, -9999).astype('float32'), window=window)
                 dst.update_tags(input_domain=self.config['input_domain'], calibration='not_applied',
-                                speckle='SNAP GPT Lee', source=str(source))
+                                speckle='SNAP GPT Lee', snap_writer_format=format_name, source=str(source))
                 for b in range(1, profile['count']+1):
                     dst.set_band_unit(b, self.config['input_domain'])
 

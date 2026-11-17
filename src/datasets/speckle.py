@@ -5,7 +5,7 @@ import numpy as np
 class SpeckleFilter:
     """config=None 关闭；开启时显式指定线性幅度 amplitude 或线性功率 intensity。"""
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, *, writer_format="GeoTIFF-BigTIFF"):
         self.config, self.radius = None, 0
         self.snap = None
         if config is None or config.get('method', 'none') == 'none':
@@ -27,7 +27,7 @@ class SpeckleFilter:
         if config.get('pipeline_version', 1) != 1:
             raise ValueError('不支持该SNAP预处理版本')
         self.config.update(snap_runtime=runtime, pipeline_version=1, calibration='not_applied')
-        self.snap, self.radius = SnapSpeckleFilter(self.config), 0
+        self.snap, self.radius = SnapSpeckleFilter(self.config, writer_format=writer_format), 0
 
     def __call__(self, image, valid_mask):
         """输入[C,H,W]与[H,W]有效掩膜；各极化独立滤波，输出保持输入物理表达。"""

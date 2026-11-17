@@ -5,17 +5,14 @@ import subprocess
 import sys
 import tempfile
 import time
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 import rasterio
-from affine import Affine
-from rasterio.crs import CRS
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from configuration import load_yaml
-from datasets.snap_preprocess import SnapSpeckleFilter, snap_runtime
+from datasets.snap_preprocess import SnapSpeckleFilter, dimap_band_vrt, snap_runtime
 
 SCENE = "BC3-SM-ORG-VV-20240704T150208-008104"
 WRITERS = (("bigtiff", "GeoTIFF-BigTIFF", ".tif"), ("dimap", "BEAM-DIMAP", ".dim"))
@@ -28,37 +25,6 @@ def scene_input(prepared):
         raise ValueError(f"需要唯一且启用的场景 {SCENE}，请核对 {prepared}")
     row = matches[0]
     return (prepared / "images" / row["split"] / row["name"]).resolve(strict=True)
-
-
-def dimap_band_vrt(product):
-    """读取 BEAM .dim 声明的单 VV 网格与 NoData。VRT 引用原始 .img，不重采样。"""
-    doc = ET.parse(product)
-    dims = doc.find("Raster_Dimensions")
-    w, h = int(dims.findtext("NCOLS")), int(dims.findtext("NROWS"))
-    band = doc.find("Image_Interpretation/Spectral_Band_Info")
-    if (dims.findtext("NBANDS"), band.findtext("BAND_NAME"), band.findtext("DATA_TYPE")) != ("1", "power_1", "float32"):
-        raise ValueError("此对照要求 BEAM 输出为单波段 Float32 功率")
-    # Java AffineTransform 的顺序是 m00,m10,m01,m11,m02,m12。
-    a, d, b, e, c, f = map(float, doc.findtext("Geoposition/IMAGE_TO_MODEL_TRANSFORM").split(","))
-    transform = Affine(a, b, c, d, e, f)
-    crs = CRS.from_wkt(doc.findtext("Coordinate_Reference_System/WKT"))
-    header = doc.find("Data_Access/Data_File/DATA_FILE_PATH").attrib["href"]
-    pixels = (product.parent / header).with_suffix(".img").resolve(strict=True)
-    with rasterio.open(pixels) as ds:
-        if (ds.width, ds.height, ds.count, ds.dtypes) != (w, h, 1, ("float32",)):
-            raise ValueError("BEAM 波段文件与 .dim 声明不一致")
-    vrt = ET.Element("VRTDataset", rasterXSize=str(w), rasterYSize=str(h))
-    ET.SubElement(vrt, "SRS").text = crs.to_wkt()
-    ET.SubElement(vrt, "GeoTransform").text = ",".join(map(str, transform.to_gdal()))
-    layer = ET.SubElement(vrt, "VRTRasterBand", dataType="Float32", band="1")
-    if band.findtext("NO_DATA_VALUE_USED", "").lower() == "true":
-        ET.SubElement(layer, "NoDataValue").text = str(float(band.findtext("NO_DATA_VALUE")))
-    source = ET.SubElement(layer, "SimpleSource")
-    ET.SubElement(source, "SourceFilename", relativeToVRT="1").text = pixels.relative_to(product.parent).as_posix()
-    ET.SubElement(source, "SourceBand").text = "1"
-    view = product.with_suffix(".vrt")
-    ET.ElementTree(vrt).write(view, encoding="utf-8", xml_declaration=True)
-    return view
 
 
 def grid(ds):
@@ -131,7 +97,7 @@ def run_writer(folder, writer, src, lee, config):
     view = dimap_band_vrt(raw) if tag == "dimap" else raw
     restore_error = None
     try:
-        lee.restore_output(src, adapted, view, output, profile)
+        lee.restore_output(src, adapted, view, output, profile, format_name=format_name)
     except ValueError as error:
         # 即使生产网格检查拒绝输出，也保留中间产品，继续完成原生格式诊断。
         restore_error = str(error)

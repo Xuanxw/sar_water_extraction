@@ -62,6 +62,50 @@ class SnapParallelTests(unittest.TestCase):
                 self.assertEqual((status['complete'], status['reused'], status['generated']), (True, 1, 1))
 
     @unittest.skipUnless(os.environ.get('SNAP_TEST_GPT'), '需要指定真实 GPT 路径')
+    def test_change_yaml_writer_reuses_published_scene(self):
+        import json
+        import yaml
+        from test_sar_scene_dataset import SceneDatasetTests
+
+        template = Path(__file__).resolve().parents[1] / 'configs/image_process.yaml'
+        self.addCleanup(image_process.configure, template)
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            SceneDatasetTests().prepare(root/'prepared')
+            config = yaml.safe_load(template.read_text(encoding='utf-8'))
+            config['paths'].update(DATA_ROOT=str(root), OUTPUT_DIR='prepared', FILTERED_ROOT='filtered',
+                                   SNAP_WORK_DIR='work', SNAP_CACHE_DIR='cache', SNAP_GPT_PATH=os.environ['SNAP_TEST_GPT'])
+            config['run']['MODE'] = 'filter'
+            config['snap'].update(SNAP_SCENE_WORKERS=1, SNAP_THREADS=2, CLEAN_SNAP_CACHE_ON_SUCCESS=True)
+            config['snap'].pop('SNAP_WRITER_FORMAT')  # 已部署的旧 YAML。
+            path = root/'switch.yaml'
+            path.write_text(yaml.safe_dump(config), encoding='utf-8')
+            image_process.main(path)
+
+            first = root/'filtered/images/train/train.tif'
+            second = root/'filtered/images/val/val.tif'
+            stamp = first.stat().st_mtime_ns
+            with rasterio.open(second) as src:
+                self.assertEqual(src.tags()['snap_writer_format'], 'GeoTIFF-BigTIFF')
+                old_values, old_mask = src.read(), src.read_masks()
+                old_grid = (src.crs, src.transform, src.shape)
+            # 在临时数据集中模拟一景待生成。上一轮完整成功后，滤波缓存 TIFF 应已清理。
+            second.unlink()
+            self.assertFalse(list((root/'cache').glob('*/filtered.tif')))
+            config['snap']['SNAP_WRITER_FORMAT'] = 'BEAM-DIMAP'
+            path.write_text(yaml.safe_dump(config), encoding='utf-8')
+            image_process.main(path)
+
+            status = json.loads((root/'filtered/processing_status.json').read_text(encoding='utf-8'))
+            self.assertEqual((status['reused'], status['generated']), (1, 1))
+            self.assertEqual(first.stat().st_mtime_ns, stamp)
+            with rasterio.open(second) as src:
+                self.assertEqual(src.tags()['snap_writer_format'], 'BEAM-DIMAP')
+                self.assertEqual(old_grid, (src.crs, src.transform, src.shape))
+                np.testing.assert_array_equal(old_mask, src.read_masks())
+                np.testing.assert_array_equal(old_values, src.read())
+
+    @unittest.skipUnless(os.environ.get('SNAP_TEST_GPT'), '需要指定真实 GPT 路径')
     def test_serial_parallel_pixel_parity(self):
         rng = np.random.default_rng(137)
         with TemporaryDirectory() as temp:

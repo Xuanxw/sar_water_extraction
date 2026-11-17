@@ -61,7 +61,7 @@ def configure(config_path):
     global SNAP_CACHE_DIR, CLEAN_SNAP_CACHE_ON_SUCCESS, SNAP_WORK_DIR, NORMALIZE_WORK_DIR, NORMALIZE_READ_SIZE, NORMALIZE_THREADS, NORMALIZE_COMPRESSION_LEVEL, ENABLE_CALIBRATION
     global ENABLE_FILTER, INPUT_DOMAIN, FILTER_WINDOW, ENL, FILTER_INPUT_STAGE, NORMALIZE_INPUT_STAGE, WINDOW_SIZE, HALO
     global NORMALIZATION_WINDOWS, SEED, CALIBRATION_QUANTITY, CALIBRATION_OUTPUT_DOMAIN, CALIBRATION_REFERENCE, CALIBRATION_PRODUCTS_DIR, CALIBRATION_COMMAND, QUICKLOOK_BACKSCATTER_DB_RANGE
-    global SNAP_THREADS, SNAP_TILE_CACHE, SNAP_SCENE_WORKERS, NORMALIZATION_METHOD
+    global SNAP_WRITER_FORMAT, SNAP_THREADS, SNAP_TILE_CACHE, SNAP_SCENE_WORKERS, NORMALIZATION_METHOD
     CONFIG_PATH = Path(config_path).expanduser().resolve()
     CONFIG = load_yaml(CONFIG_PATH)
 
@@ -132,6 +132,9 @@ def configure(config_path):
     CALIBRATION_PRODUCTS_DIR = CONFIG["paths"]["CALIBRATION_PRODUCTS_DIR"]
     CALIBRATION_COMMAND = CONFIG["processing"]["CALIBRATION_COMMAND"]
     QUICKLOOK_BACKSCATTER_DB_RANGE = tuple(CONFIG["inspection"]["QUICKLOOK_BACKSCATTER_DB_RANGE"])
+    SNAP_WRITER_FORMAT = CONFIG["snap"].get("SNAP_WRITER_FORMAT", "GeoTIFF-BigTIFF")
+    if SNAP_WRITER_FORMAT not in tuple(snap_preprocess.WRITER_SUFFIX):
+        raise ValueError("snap.SNAP_WRITER_FORMAT 必须为 GeoTIFF-BigTIFF 或 BEAM-DIMAP")
     SNAP_THREADS = CONFIG["snap"]["SNAP_THREADS"]
     SNAP_TILE_CACHE = CONFIG["snap"]["SNAP_TILE_CACHE"]
     SNAP_SCENE_WORKERS = CONFIG["snap"].get("SNAP_SCENE_WORKERS", 1)
@@ -1057,7 +1060,8 @@ def _process_stage(stage):
     if stage == 'filtered':
         snap_preprocess.configure_paths(SNAP_GPT_PATH, SNAP_CACHE_DIR, SNAP_WORK_DIR,
                                         threads=SNAP_THREADS, tile_cache=SNAP_TILE_CACHE, scene_workers=SNAP_SCENE_WORKERS)
-        filtering = SpeckleFilter(dict(method='snap_lee', input_domain=domain, window_size=FILTER_WINDOW, enl=ENL))
+        filtering = SpeckleFilter(dict(method='snap_lee', input_domain=domain, window_size=FILTER_WINDOW, enl=ENL),
+                                  writer_format=SNAP_WRITER_FORMAT)
     parameters = dict(stage=stage, bc_org_domain='intensity', bands=list(BANDS), input_domain=parent.get('output_domain', INPUT_DOMAIN),
                       output_domain='standardized' if stage == 'normalized' else domain, quantity=quantity,
                       source_root=str(source_root), source_manifest_sha256=manifest_fingerprint(manifest),
@@ -1116,7 +1120,7 @@ def _process_stage(stage):
             if len({(row['split'], row[key]) for row in rows}) != len(rows):
                 raise ValueError(f'并行滤波清单中存在重复输出：{key}')
     if stage == 'filtered':
-        print(f'SNAP Lee：同时处理 {workers} 景，每景 GPT 线程 {SNAP_THREADS}，瓦片缓存 {SNAP_TILE_CACHE}', flush=True)
+        print(f'SNAP Lee：同时处理 {workers} 景，每景 GPT 线程 {SNAP_THREADS}，瓦片缓存 {SNAP_TILE_CACHE}，中间格式 {SNAP_WRITER_FORMAT}', flush=True)
     target.mkdir(parents=True, exist_ok=True)
     marker = target / '.preprocessing_incomplete'
     marker.write_text('处理中；请完成image_process.py后再训练', encoding='utf-8')
