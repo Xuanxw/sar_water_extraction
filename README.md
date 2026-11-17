@@ -380,7 +380,7 @@ python E:\Code_projects\sar_water_extraction\src\thres_segmentation\main.py E:\C
 
 这是独立入口，不加载模型检查点，也不读取train.yaml或image_process.yaml。处理参数全部来自命令行指定的YAML。
 
-- **密云ORG案例**：当前指向`configs/北京密云区/threshold_segmentation.yaml`。直接读取原始ORG，完成行政区裁剪、SNAP Lee、分位阈值及辅助修正，逐景输出SHP、质量JSON和人工核验点。支持按完成阶段续跑，不自动合并日期。操作见[案例说明](configs/北京密云区/README.md)。
+- **密云ORG案例**：当前指向`configs/北京密云区/corrected_amplitude_otsu_autoheight.yaml`。直接读取校正后的幅度ORG，完成行政区裁剪、幅度口径SNAP Lee、阈值与逐景自动高程包络修正，逐景输出SHP、质量JSON和人工核验点。支持按完成阶段续跑，不自动合并日期。操作见[案例说明](configs/北京密云区/README.md)。
 - **通用离线val**：切换到`configs/threshold_segmentation.yaml`。使用`paths.IMAGE_DIR/LABEL_DIR/SPLIT_MANIFEST`，复用已有离线滤波/归一化结果，不再次预处理。
 
 `water_percent=10`是整景有效范围内的第10百分位暗侧阈值，不是Otsu、模型概率或精度保证。NoData保持未知，辅助水体不是真值。参数和质量核查说明见[阈值分割说明](src/thres_segmentation/README.md)。

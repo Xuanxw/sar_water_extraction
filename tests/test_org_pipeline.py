@@ -26,7 +26,7 @@ from thres_segmentation.org_io import prepare_auxiliary, read_aoi, inventory
 
 class OrgProductionTests(unittest.TestCase):
     def make_config(self,root):
-        config=load_yaml(ROOT/'configs/北京密云区/threshold_segmentation.yaml')
+        config=load_yaml(ROOT/'configs/北京密云区/corrected_amplitude_otsu_autoheight.yaml')
         paths=config['paths']
         for key,name in [('ORG_ROOT','ORG'),('OUTPUT_DIR','out'),('CACHE_DIR','cache'),('AUXILIARY_CACHE_DIR','auxcache')]:
             paths[key]=root/name
@@ -59,6 +59,9 @@ class OrgProductionTests(unittest.TestCase):
             with rasterio.open(paths[key],'w',**profile) as dst:dst.write(values,1)
         options=config['org'];options.update(crop_buffer_m=2,save_quicklook=True,archive_intermediates=False)
         options['filter']['method']='none'
+        # 合成用例继续验证原GUI地形和历史放宽，不调用真实剖面核心。
+        options['postprocess'].update(terrain_method='gui_geometry',history_enabled=True,history_relax_percent=5.0)
+        config['threshold'].update(method='percentile',water_percent=10)
         options['auxiliary'].update(download_missing=False,buffer_m=2,landcover_resolution_m=1,dem_resolution_m=1)
         config['polygon_output']=dict(hole_max_pixels=0,morph_kernel_size=0,min_water_pixels=1,smooth_iterations=0)
         config['processing']['block_size']=13
@@ -215,7 +218,7 @@ class OrgProductionTests(unittest.TestCase):
 
     def test_inventory_is_dynamic_and_entry_uses_case_yaml(self):
         from thres_segmentation import main
-        config_path=ROOT/'configs/北京密云区/threshold_segmentation_20261112.yaml'
+        config_path=ROOT/'configs/北京密云区/corrected_amplitude_otsu_autoheight.yaml'
         self.assertTrue(config_path.is_file())
         with TemporaryDirectory() as temp:
             config=self.make_config(Path(temp))

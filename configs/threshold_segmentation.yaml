@@ -1,4 +1,4 @@
-# 通用离线val阈值配置；密云ORG案例见configs/北京密云区/threshold_segmentation.yaml。
+# 通用离线val阈值配置；密云ORG案例见configs/北京密云区/corrected_amplitude_otsu_autoheight.yaml。
 paths:
   # 数据搬迁后只修改本项；其余相对路径以此目录为基准。
   DATA_ROOT: I:\水体数据

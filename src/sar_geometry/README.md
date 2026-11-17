@@ -27,7 +27,8 @@ python src/sar_geometry/main.py configs/sar_geometry.yaml
 | `core.compute_radar_shadow_layover()` | 对已构造的同观测剖面计算阴影及叠掩 | 仅实验接口；调用者提供完整支持域、地表顺序、斜距及有向角 |
 | `mode: visibility` | 整景零Doppler观测剖面、阴影、叠掩和联合掩膜 | 输出独立米制地理网格；不修改水体 |
 | `validate_scene.py` | 同网格旧GUI对照、方向诊断、角点检查、快视图和性能记录 | 读取原地形成果；没有真值时不报告精度提升 |
-| 非零Doppler剖面、生产水体修正 | 尚未实现 | 不自动把斜视改成零Doppler，不以几何有效性替代排除掩膜 |
+| 非零Doppler剖面 | 尚未实现 | 不自动把斜视改成零Doppler |
+| 阈值生产中的剖面掩膜 | 已通过`thres_segmentation/profile_terrain.py`接入 | 仍记录几何未确认状态；独立配置控制每景自动高程包络 |
 
 名义计算前必须设置`DEM_PATH`，核实`radar_grid_confirmed`，明确`doppler_mode: zero/metadata`。使用元数据Doppler时还须明确`doppler_sign: 1/-1`。首版DEM仅接受WGS84水平基准、米制WGS84椭球高（`height_datum: WGS84_ellipsoid`），不会自动把正高转换成椭球高。配置中的空值表示尚未确认，不可为了通过检查直接猜填。
 
@@ -349,3 +350,9 @@ GAMMA参考运行采用明确版本和相同参数；调用本地授权环境由
 通用文件工具集中在`src/utils/files.py`：`sha256`、`write_json`、`stamp`、`signature`。栅格窗口遍历在`src/utils/raster.py`。算法模块直接导入，不转导或保留旧兼容函数。
 
 Python采用清楚的算法名称、逐步语句和必要中文说明；核心仍通过`core.py`调用已编译C++，当前尚未切换纯Python数值内核。
+
+### 逐景自动高程包络
+
+`terrain_support.py`集中实现同斜距地形范围调查和区域高程扫描，实验脚本与正式阈值流程共用，不保留重复算法。正式适配器中的`prepare_profile_height_envelope()`负责按景选择/下载共享DEM、记录包络，并将派生的`height_bounds_m`传给原整景核心。没有修改C++可见性判据。
+
+参数及运行方式见`configs/北京密云区/README.md`。新案例的`height_envelope.mode: regional_dem`要求明确的EGM2008正高DEM和格网N；旧固定包络配置继续按原参数执行。只有DEM覆盖有保护带的潜在同斜距域且没有缺测才生成区域界限。调查采用离散时刻/角度采样，仍不是连续域完备性证明。

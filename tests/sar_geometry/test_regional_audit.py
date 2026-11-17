@@ -58,7 +58,7 @@ class RegionalAuditTests(unittest.TestCase):
             with rasterio.open(source,'w',**p) as dst:dst.write(np.full((4,4),.1,np.float32),1)
             flags=np.zeros((4,4),np.uint8);flags[0,0]=1;flags[0,1]=255
             with rasterio.open(terrain,'w',**dict(p,dtype='uint8',nodata=255)) as dst:dst.write(flags,1)
-            c=load_yaml(ROOT/'configs/北京密云区/threshold_segmentation_profiles_20261113.yaml')
+            c=load_yaml(ROOT/'configs/北京密云区/corrected_amplitude_otsu_autoheight.yaml')
             c['processing']['block_size']=4;post=c['org']['postprocess']
             post.update(history_enabled=False,landcover_enabled=False,opening_radius_px=0,closing_radius_px=0)
             with patch('thres_segmentation.profile_terrain.generate_profile_terrain',return_value={'terrain_exclusion':terrain}):

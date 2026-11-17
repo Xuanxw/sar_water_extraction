@@ -16,7 +16,7 @@ from shapely import transform as transform_geometry, from_wkb, to_wkb, get_parts
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 from thres_segmentation.run_log import RunLog
 
-INPUT_ROOT=Path(r'E:\InSAR\水体提取\北京密云区\outputs\thres_seg_profiles_otsu_20261113')
+INPUT_ROOT=Path(r'E:\InSAR\水体提取\北京密云区\outputs\thres_seg_corrected_amplitude_base30_autoheight_20261116')
 OUTPUT_DIR=INPUT_ROOT/'merged'  # 跟随输入目录，避免合并到另一轮实验。
 TARGET_CRS='EPSG:32650'
 ROI_PATH=Path(r'E:\InSAR\水体提取\北京密云区\密云区行政划分.shp')  # 可设None。
