@@ -112,6 +112,8 @@ snap:
 
 # 离线预处理；归一化参数仅由train估计。
 processing:
+  # dem/all：在 DEM_TILE_DIR 复用原生 GLO-30 瓦片，true 时按 train 和 val 的范围补齐缺片。
+  DOWNLOAD_MISSING_DEM_TILES: false
   # 大块读写，减少Python/GDAL调用；不改变输出像元。
   NORMALIZE_READ_SIZE: 1024
   # 单景无损压缩线程，不并发多景。

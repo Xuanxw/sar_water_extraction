@@ -123,6 +123,37 @@ class SceneDEMTests(unittest.TestCase):
                 finally:
                     trainer.dataset.close()
 
+    def test_dem_entry_downloads_only_missing_tiles_then_reuses_scene(self):
+        with TemporaryDirectory() as tmp, patch.dict(vars(image_process)):
+            base = Path(tmp).resolve()
+            _, heights, _ = self.make_inputs(base)
+            missing = base / "tiles" / "Copernicus_DSM_COG_10_N40_00_E117_00_DEM.tif"
+            original = base / "available.tif"
+            missing.replace(original)
+            params = dict(paths=dict(DATA_ROOT=str(base), NORMALIZED_ROOT="normalized",
+                                     DEM_TILE_DIR="tiles", WINDOW_CACHE_DIR="cache"),
+                          run=dict(MODE="dem"), processing=dict(NORMALIZATION_METHOD="scene_p02_p98",
+                          DOWNLOAD_MISSING_DEM_TILES=True, WINDOW_SIZE=64, HALO=8))
+            config = base / "test.yaml"
+            config.write_text(yaml.safe_dump(params), encoding="utf-8")
+
+            def provide_tile(url, dest):
+                self.assertEqual(dest, missing)
+                self.assertTrue(url.endswith("/" + missing.name))
+                original.replace(dest)
+
+            with patch("datasets.dem_tile_download.download_tile", side_effect=provide_tile) as fetch:
+                image_process.main(config)
+                root = base / "normalized_p02_p98_vv_dem"
+                self.assertTrue((root / "split_manifest.csv").is_file())
+                dem = root / "dem" / "val" / "val.tif"
+                stamp = dem.stat().st_mtime_ns
+                with rasterio.open(dem) as f:
+                    self.assertEqual(f.read(1)[10, 10], heights[10, 10] + 1000)
+                image_process.main(config)
+                self.assertEqual(stamp, dem.stat().st_mtime_ns)
+                self.assertEqual(fetch.call_count, 1)
+
     def test_dem_preserves_relative_db_vv_and_its_protocol(self):
         with TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()

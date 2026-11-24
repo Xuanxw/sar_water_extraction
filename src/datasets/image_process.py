@@ -1362,7 +1362,14 @@ def prepare_dem_stage():
     """按最终归一化 VV 网格准备米制高程，单阶段和全流程共用相同的输入与清单。"""
     from datasets.scene_dem import prepare_scene_dems
     paths, processing = CONFIG["paths"], CONFIG["processing"]
-    prepare_scene_dems(stage_root("normalized"), paths["DEM_TILE_DIR"], paths["WINDOW_CACHE_DIR"],
+    vv_root = stage_root("normalized")
+    download = processing.get("DOWNLOAD_MISSING_DEM_TILES", False)
+    if not isinstance(download, bool):
+        raise ValueError("processing.DOWNLOAD_MISSING_DEM_TILES 需要 YAML 布尔值 true 或 false")
+    if download:
+        from datasets.dem_tile_download import ensure_dem_tiles
+        ensure_dem_tiles(vv_root, paths["DEM_TILE_DIR"], NORMALIZATION_METHOD)
+    prepare_scene_dems(vv_root, paths["DEM_TILE_DIR"], paths["WINDOW_CACHE_DIR"],
                        processing["WINDOW_SIZE"], processing["HALO"])
 
 
