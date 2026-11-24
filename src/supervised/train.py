@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from supervised.load.sar_scene_dataset import IGNORE_INDEX, SARSceneDataset, merge_scene_manifests
 from datasets.speckle import SpeckleFilter
+from datasets.relative_normalization import LOG_REPRESENTATION, RELATIVE_REPRESENTATIONS
 from datasets.manifest_paths import manifest_fingerprint, write_relative_manifest
 from supervised.models.losses import WaterSegmentationLoss
 from supervised.evaluation.metrics import metrics_from_counts
@@ -56,6 +57,7 @@ RESNET50 = "resnet50.tv_in1k"
 PVT_ENCODERS = tuple(f"pvt_v2_b{i}.in1k" for i in (2, 3, 4, 5))
 SUPPORTED_BACKBONES = {
     "sentinel1_water_unet": ("s1water_cnn",),
+    "unetpp": ("s1water_cnn",),
     "unet": ("plain_cnn", "mobilenet_v2"),
     "semantic_fpn": (PVT_B2, RESNET50),
     "uanet": (PVT_B2,),
@@ -242,6 +244,7 @@ class WaterSegmentationTrainer:
         low_water_pool_ratio=0.20, head_loss_weights=None, scene_options=None, class_weight_mode="none",
         resume_checkpoint=None, speckle=None, require_preprocessed=False, output_dir_is_final=False, require_normalized=False,
         quality_options=None, validation_inference=None, require_bc_power=False, patch_representation="stored",
+        training_extension=None,
     ):
         """准备固定划分、输入统计量、模型、优化器和实验目录。"""
         if scene_options is not None and patch_representation != "stored":
@@ -253,12 +256,17 @@ class WaterSegmentationTrainer:
         self.require_preprocessed = require_preprocessed
         self.inputs_normalized = False
         self.input_preprocessing = {}
+        self.relative_normalization = None
         self.model_kwargs, self.model_info = dict(model_kwargs), dict(model_info)
         self.resume_path = Path(resume_checkpoint) if resume_checkpoint is not None else None
         # 仅加载用户指定的本地训练检查点；先放CPU，避免临时占用两份显存。
         resume = torch.load(self.resume_path, map_location="cpu", weights_only=False) if self.resume_path else None
+        if resume is not None and resume.get('patch_representation', 'stored') != patch_representation:
+            raise ValueError('续跑检查点的切片输入表示与当前配置不同；新归一化实验请从头训练')
         self.resume_protocol_changed = (resume is not None and
             resume.get('validation_inference', {}) != self.validation_inference)
+        self.configure_training_extension(training_extension, resume, epochs, cosine_schedule)
+        self.new_run = resume is None or self.resume_protocol_changed or self.new_training_stage
         self.speckle = SpeckleFilter(speckle).config
         # 尽早拦截，避免先花时间统计整套影像后才发现续跑预处理不同。
         if resume is not None and SpeckleFilter(resume.get('speckle')).config != self.speckle:
@@ -330,7 +338,7 @@ class WaterSegmentationTrainer:
                     expected_stage = 'vv_dem' if self.model_info.get('input_channels') == ('VV', 'DEM') else 'normalized'
                     if ((record.get('bc_org_domain'), record.get('input_domain'), record.get('stage'),
                          record.get('complete')) != ('intensity','intensity',expected_stage,True)
-                            or record.get('output_domain') not in ('standardized', 'scene_p02_p98')):
+                            or record.get('output_domain') not in ('standardized', 'scene_p02_p98', 'scene_relative_db_p02_p98')):
                         raise ValueError(f'BC训练需要已完成的功率域标准化数据，请用新版image_process.py生成：{receipt}')
             if manifests is not None:
                 data_root = merge_scene_manifests(manifests, bands=bands, seed=seed, speckle=self.speckle,
@@ -381,6 +389,12 @@ class WaterSegmentationTrainer:
                 self.model_info["input_representation"] = "per_patch_per_band_valid_midrank; train_mean_std"
             elif patch_representation == "vv_rank_dem_m":
                 self.model_info["input_representation"] = "per_patch_valid_VV_midrank + DEM_m; train_channel_mean_std"
+            elif patch_representation == LOG_REPRESENTATION:
+                self.model_info["input_representation"] = (
+                    "DFC_stored_VV_relative_log10; training_only_shared_P02_P98_clip_0_1 + DEM_m; train_channel_mean_std")
+            elif patch_representation in RELATIVE_REPRESENTATIONS:
+                self.model_info["input_representation"] = (
+                    "training_only_shared_VV_P02_P98_clip_0_1 + DEM_m; train_channel_mean_std")
             split_path = self.image_dir.parent / "split_manifest.csv"
             self.split_info = {"split_strategy": "legacy_random", "split_manifest_sha256": ""}
             if split_path.is_file():
@@ -421,6 +435,18 @@ class WaterSegmentationTrainer:
                     self.dataset, [len(self.dataset) - val_size, val_size],
                     generator=torch.Generator().manual_seed(seed),
                 )
+        if self.scene_options is None and patch_representation in RELATIVE_REPRESENTATIONS:
+            # 划分完成后只读训练影像拟合；验证和续跑复用同一组端点，不逐块重估。
+            if resume is None:
+                self.relative_normalization = self.dataset.fit_relative_normalization(self.train_set.indices)
+            else:
+                parameters = resume.get('relative_normalization')
+                if parameters is None:
+                    raise ValueError('新归一化检查点缺少 relative_normalization，不能重新拟合代替续跑参数')
+                self.relative_normalization = self.dataset.set_relative_normalization(
+                    parameters, self.train_set.indices)
+            cprint(f"共享 VV 归一化：仅训练集拟合 P02/P98；参数={self.relative_normalization}",
+                   'cyan', flush=True)
         self.train_loader = DataLoader(self.train_set, batch_size=batch_size, shuffle=True, **self.loader_options)
         self.val_loader = DataLoader(self.val_set, batch_size=batch_size, shuffle=False, **self.loader_options)
         cprint(f"设备：{self.device}；训练/内部验证：{len(self.train_set)}/{len(self.val_set)}", color="cyan", flush=True)
@@ -473,11 +499,14 @@ class WaterSegmentationTrainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
         # 每次运行单独保存，不覆盖历史实验；CSV 字段沿用原有诊断记录。
-        self.run_dir = (self.resume_path.parent if resume is not None and not self.resume_protocol_changed else
+        self.run_dir = (self.resume_path.parent if not self.new_run else
                         self.output_dir / datetime.now().strftime(RUN_DIRECTORY_FORMAT))
-        if resume is None or self.resume_protocol_changed:
+        if self.new_run:
             self.run_dir.mkdir(parents=True, exist_ok=False)
-        if (resume is None or self.resume_protocol_changed) and split_path.is_file():
+            if self.relative_normalization is not None:
+                (self.run_dir / 'relative_normalization.json').write_text(
+                    json.dumps(self.relative_normalization, ensure_ascii=False, indent=2), encoding='utf-8')
+        if self.new_run and split_path.is_file():
             if self.scene_options is not None and self.dataset.scene_dem:
                 write_relative_manifest(split_path, self.run_dir / RESULT_FILES["split"])
             else:
@@ -490,7 +519,7 @@ class WaterSegmentationTrainer:
                 shutil.copy2(revision, self.run_dir / RESULT_FILES["labels"])
         if self.input_preprocessing.get('manifest_sources'):
             # 多目录检查点指向实验内的清单备份，清理合并缓存不影响后续验证。
-            if resume is None or self.resume_protocol_changed:
+            if self.new_run:
                 (self.run_dir/'preprocessing.json').write_text(
                     json.dumps(self.input_preprocessing, ensure_ascii=False, indent=2), encoding='utf-8')
             self.image_dir, self.label_dir = self.run_dir/'images', self.run_dir/'labels'
@@ -503,7 +532,7 @@ class WaterSegmentationTrainer:
             "accuracy", "specificity", "false_positive_rate", "false_negative_rate",
             "false_discovery_rate", "background_iou", "mean_iou", "balanced_accuracy", "kappa", "mcc",
         ]
-        if resume is None or self.resume_protocol_changed:
+        if self.new_run:
             with self.metrics_path.open("w", newline="", encoding="utf-8-sig") as stream:
                 csv.DictWriter(stream, fieldnames=self.metric_fields).writeheader()
         cprint(f"本次实验目录：{self.run_dir}", color="cyan", attrs=["bold"], flush=True)
@@ -527,10 +556,10 @@ class WaterSegmentationTrainer:
             if sampling in ("stratified_hard", "hybrid_hard"):
                 self.sampling_fields += ["water_ratio", "water_group"]
                 self.group_fields = ["epoch", "water_group", "group_name", "train_samples", "hard_pool_samples", "selected_count"]
-                if resume is None or self.resume_protocol_changed:
+                if self.new_run:
                     with (self.run_dir / RESULT_FILES["sampling_groups"]).open("w", newline="", encoding="utf-8-sig") as stream:
                         csv.DictWriter(stream, fieldnames=self.group_fields).writeheader()
-            if resume is None or self.resume_protocol_changed:
+            if self.new_run:
                 with (self.run_dir / RESULT_FILES["sampling"]).open("w", newline="", encoding="utf-8-sig") as stream:
                     csv.DictWriter(stream, fieldnames=self.sampling_fields).writeheader()
         cprint(f"采样配置：{self.sampling_config}", color="cyan", flush=True)
@@ -549,15 +578,100 @@ class WaterSegmentationTrainer:
                     with self.metrics_path.open('a',encoding='utf-8',newline='') as stream:
                         csv.DictWriter(stream,fieldnames=self.metric_fields).writerow(self.phase_metrics['train'])
                 cprint('验证融合协议改变：新目录继续训练，原指标/best/图件完整保留。', 'yellow', flush=True)
+            if self.new_training_stage:
+                self.best_loss, self.best_f1, self.best_balanced_accuracy = float('inf'), float('-inf'), float('-inf')
+                self.phase_metrics = ({'train': self.phase_metrics['train']} if self.resume_validation else {})
+                if self.resume_validation:
+                    with self.metrics_path.open('a', encoding='utf-8', newline='') as stream:
+                        csv.DictWriter(stream, fieldnames=self.metric_fields).writerow(self.phase_metrics['train'])
+                else:
+                    self.start_extension_schedule()
+                (self.run_dir/'extension_source.json').write_text(
+                    json.dumps(self.training_extension, ensure_ascii=False, indent=2), encoding='utf-8')
+                # 新分支首次训练或验证中断后，也能从本目录完整恢复；未验证时不参与选模。
+                self.save_checkpoint(resume['epoch'], phase=resume.get('resume_phase', 'epoch_end'), select_best=False)
+                cprint(f"延长训练：第{resume['epoch']+1}～{self.epochs}轮；"
+                       f"新LR={self.training_extension['config']['learning_rate']:g}，"
+                       f"最低LR={self.training_extension['config']['min_lr']:g}；"
+                       f"{'先按原LR补完验证，再启用新调度' if self.resume_validation else '新调度已启用'}。"
+                       '新目录独立选模，原实验保留。', 'cyan', flush=True)
         (self.run_dir/'validation_protocol.json').write_text(
             json.dumps(self.validation_inference,ensure_ascii=False,indent=2),encoding='utf-8')
+
+    def configure_training_extension(self, config, checkpoint, epochs, cosine_schedule):
+        """仅显式延长总轮数时重启一次余弦；普通续跑仍严格沿用原计划。"""
+        self.training_extension = None
+        self.new_training_stage = False
+        self.extension_schedule_pending = False
+        previous = checkpoint.get('training_extension') if checkpoint is not None else None
+        if config is None:
+            if previous is not None:
+                raise ValueError('延长阶段续跑必须保留原 training.EXTENSION 配置')
+            return
+        if not isinstance(config, dict) or set(config) != {'learning_rate', 'min_lr'}:
+            raise ValueError('training.EXTENSION 必须且只能包含 learning_rate、min_lr')
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value)
+               for value in config.values()):
+            raise ValueError('training.EXTENSION 学习率必须为有限数值')
+        policy = {key: float(value) for key, value in config.items()}
+        if not 0 <= policy['min_lr'] <= policy['learning_rate'] or policy['learning_rate'] <= 0:
+            raise ValueError('training.EXTENSION 需满足 0 <= min_lr <= learning_rate 且 learning_rate > 0')
+        if checkpoint is None:
+            raise ValueError('training.EXTENSION 需要指定原训练 RESUME_CHECKPOINT')
+        if 'optimizer_state_dict' not in checkpoint:
+            raise ValueError('延长训练检查点缺少优化器状态，不能完整续跑')
+        if not cosine_schedule or checkpoint.get('scheduler_state_dict') is None:
+            raise ValueError('training.EXTENSION 仅支持原实验使用余弦调度的完整检查点')
+        phase = checkpoint.get('resume_phase', 'epoch_end')
+        if phase not in ('epoch_end', 'train_end') or checkpoint.get('bn_calibration'):
+            raise ValueError('training.EXTENSION 仅接受 epoch_end/train_end；BN校准推理检查点不能续训')
+        if self.resume_protocol_changed:
+            raise ValueError('延长训练不能同时改变验证协议；请保持 validation_inference 一致')
+        epoch = int(checkpoint['epoch'])
+        if previous is not None:
+            if previous.get('config') != policy or previous.get('target_epochs') != epochs:
+                raise ValueError('延长阶段续跑的 EXTENSION 或目标 epochs 与检查点不同')
+            self.training_extension = dict(previous)
+        else:
+            if epochs <= checkpoint['epochs'] or epochs <= epoch:
+                raise ValueError('training.EXTENSION 的 epochs 必须大于原计划总轮数及检查点轮次')
+            if phase == 'train_end' and not checkpoint.get('phase_metrics', {}).get('train'):
+                raise ValueError('train_end 检查点缺少本轮训练指标，不能建立延长阶段')
+            self.new_training_stage = True
+            source_fields = ('model_name', 'model_kwargs', 'bands', 'learning_rate', 'batch_size', 'epochs',
+                             'seed', 'val_ratio', 'max_samples', 'loss_name', 'loss_kwargs', 'optimizer_name',
+                             'weight_decay', 'train_augmentation', 'head_loss_weights', 'sampling_config',
+                             'validation_inference', 'patch_representation', 'input_preprocessing', 'relative_normalization',
+                             'split_manifest_sha256', 'window_cache_key', 'train_windows_per_epoch')
+            self.training_extension = dict(
+                config=policy, target_epochs=epochs, source_checkpoint=str(self.resume_path.resolve()),
+                source_epoch=epoch, source_epochs=checkpoint['epochs'], source_phase=phase,
+                source_learning_rates=[group['lr'] for group in checkpoint['optimizer_state_dict']['param_groups']],
+                source_config={key: checkpoint[key] for key in source_fields if key in checkpoint},
+                first_training_epoch=epoch+1,
+                best_selection='仅新阶段验证；包含源 train_end 的补跑验证，不混用原 best')
+        # 初始 train_end 的旧验证不消耗新余弦步数；该状态由检查点边界推导，续跑不会再次重置。
+        self.extension_schedule_pending = (phase == 'train_end' and
+            epoch == self.training_extension['source_epoch'])
+
+    def start_extension_schedule(self):
+        """保留优化器矩状态；新余弦只计尚未训练的轮数。"""
+        policy = self.training_extension['config']
+        for group in self.optimizer.param_groups:
+            group['lr'] = group['initial_lr'] = policy['learning_rate']
+        remaining = self.epochs - self.training_extension['source_epoch']
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=remaining, eta_min=policy['min_lr'])
+        self.extension_schedule_pending = False
 
     def check_resume_compatibility(self, checkpoint):
         """续跑沿用原实验，拒绝把不同标签、波段或网络混入同一记录。"""
         same_model = lambda values: {k: v for k, v in values.items() if k != "pretrained"}
         if checkpoint.get('patch_representation', 'stored') != self.model_info.get('patch_representation', 'stored'):
             raise ValueError('续跑检查点的切片输入表示与当前配置不同')
-        if self.model_info.get('patch_representation') == 'vv_rank_dem_m':
+        if checkpoint.get('relative_normalization') != self.relative_normalization:
+            raise ValueError('续跑检查点与当前共享 VV 归一化参数不一致')
+        if self.model_info.get('patch_representation') in ('vv_rank_dem_m', *RELATIVE_REPRESENTATIONS):
             for field in ('input_channels', 'dem_band', 'dem_source', 'dem_unit'):
                 if checkpoint.get(field) != self.model_info.get(field):
                     raise ValueError(f'续跑检查点的 {field} 与当前 DEM 输入不同')
@@ -571,6 +685,10 @@ class WaterSegmentationTrainer:
                         train_augmentation=self.train_augmentation, sampling_config=self.sampling_config,
                         head_loss_weights=self.head_loss_weights, batch_size=self.batch_size,
                         seed=self.seed, epochs=self.epochs, max_samples=self.max_samples, learning_rate=self.learning_rate)
+        if self.new_training_stage:
+            expected.pop('epochs')  # 只有显式建立新阶段时允许改变总轮数。
+        if self.training_extension is not None:
+            expected.update(val_ratio=self.val_ratio, abnormal_f1_threshold=self.abnormal_f1_threshold)
         if same_model(checkpoint['model_kwargs']) != same_model(self.model_kwargs):
             raise ValueError('续跑模型结构与检查点不同；新实验请设RESUME_CHECKPOINT=None')
         for key, value in expected.items():
@@ -715,8 +833,8 @@ class WaterSegmentationTrainer:
                 self.sample_groups = torch.bucketize(self.sample_water_ratios, torch.tensor([0.,.01,.1,.5],dtype=torch.float64))
             if self.dataset.scene_dem:
                 cprint(f'复用离线 VV；训练景 DEM 高程 mean={mean[1]:.4f} m，std={std[1]:.4f} m', 'cyan', flush=True)
-            elif self.inputs_normalized and self.input_preprocessing.get('output_domain') == 'scene_p02_p98':
-                cprint('读取整景 P02/P98 归一化影像（float32 [0,1]）', 'cyan', flush=True)
+            elif self.inputs_normalized and self.input_preprocessing.get('output_domain') in ('scene_p02_p98', 'scene_relative_db_p02_p98'):
+                cprint(f"读取离线整景归一化影像 {self.input_preprocessing['output_domain']}（float32 [0,1]）", 'cyan', flush=True)
             elif self.inputs_normalized:
                 cprint(f"读取离线归一化影像；原训练统计mean={self.input_preprocessing['mean']}，std={self.input_preprocessing['std']}；训练不再标准化", 'cyan', flush=True)
             else:
@@ -1006,14 +1124,15 @@ class WaterSegmentationTrainer:
             cprint("验证中至少一个类别没有正确预测，不能把水体F1高视为训练成功。", "red", flush=True)
         return metrics
 
-    def save_checkpoint(self, epoch, phase="epoch_end"):
+    def save_checkpoint(self, epoch, phase="epoch_end", select_best=True):
         """保持最低验证 loss 选 best，另外保存 last 和满足条件的异常快照。"""
         metrics = self.phase_metrics.get("val", {})
         epoch_loss = metrics.get("loss", float("inf"))
-        improved = phase == "epoch_end" and epoch_loss < self.best_loss
+        evaluated = select_best and phase == "epoch_end"
+        improved = evaluated and epoch_loss < self.best_loss
         if improved:
             self.best_loss = epoch_loss
-        abnormal = phase == "epoch_end" and (not np.isfinite(epoch_loss) or (
+        abnormal = evaluated and (not np.isfinite(epoch_loss) or (
             metrics["tp"] + metrics["fn"] > 0 and metrics["f1"] < self.abnormal_f1_threshold
         ))
         # NumPy随机状态用普通列表保存，继续兼容weights_only=True的检查点读取器。
@@ -1048,6 +1167,10 @@ class WaterSegmentationTrainer:
             "loss_reduction": ("CE valid-pixel mean" if not self.criterion.binary else
                                "train: class-weighted BCE valid-pixel mean; val: unweighted BCE; optional Dice per-image mean, smooth=1"),
         }
+        if self.training_extension is not None:
+            checkpoint['training_extension'] = self.training_extension
+        if self.relative_normalization is not None:
+            checkpoint['relative_normalization'] = self.relative_normalization
         if self.sampling != "random":
             checkpoint.update(sampling_losses=self.sample_losses, sampling_last_seen=self.sample_last_seen,
                               sampling_plan=self.sampling_plan, hard_pool=self.hard_pool)
@@ -1060,13 +1183,13 @@ class WaterSegmentationTrainer:
                           scaler_state_dict=self.scaler.state_dict(),
                           scheduler_state_dict=self.scheduler.state_dict() if self.scheduler else None)
         filenames = [RESULT_FILES["last"]] if phase == "epoch_end" else [RESULT_FILES["train_end"]]
-        if phase == "epoch_end" and self.criterion.binary and metrics["f1"] > self.best_f1:
+        if evaluated and self.criterion.binary and metrics["f1"] > self.best_f1:
             self.best_f1 = metrics["f1"]
             filenames.append(RESULT_FILES["best_f1"])
         if self.criterion.binary:
             checkpoint["best_val_f1"] = self.best_f1
         # 两类平均召回率作为补充选模依据；全水/全非水的退化预测仅为0.5。
-        if phase == "epoch_end" and metrics["balanced_accuracy"] > self.best_balanced_accuracy:
+        if evaluated and metrics["balanced_accuracy"] > self.best_balanced_accuracy:
             self.best_balanced_accuracy = metrics["balanced_accuracy"]
             filenames.append(RESULT_FILES["best_balanced"])
         checkpoint["best_val_balanced_accuracy"] = self.best_balanced_accuracy
@@ -1097,7 +1220,9 @@ class WaterSegmentationTrainer:
                 self.phase_metrics["val"] = self.run_epoch(epoch, "val", self.val_loader)
                 self.resume_validation = False
                 # 本轮验证成功后才推进LR；保存的last对应下一轮的学习率。
-                if self.scheduler is not None:
+                if self.extension_schedule_pending:
+                    self.start_extension_schedule()
+                elif self.scheduler is not None:
                     self.scheduler.step()
                 self.save_checkpoint(epoch)
                 if self.quality_options.get("enabled", False):
@@ -1144,13 +1269,13 @@ def create_trainer(method=None):
         raise ValueError('DATA_LAYOUT应为full_scene或patch')
     architecture, backbone = select_model(method)
     mobile_unet = architecture == "unet" and backbone == "mobilenet_v2"
-    binary_method = architecture in ("uafnet", "deeplabv3plus", "sentinel1_water_unet") or mobile_unet
+    binary_method = architecture in ("uafnet", "deeplabv3plus", "sentinel1_water_unet", "unetpp") or mobile_unet
     # 在创建训练器时解析，单极化自动构建单通道网络，并重新统计该通道的均值和标准差。
     bands = tuple(POLARIZATION_BANDS[name] for name in POLARIZATIONS)
     input_channels = POLARIZATIONS
-    if PATCH_REPRESENTATION == "vv_rank_dem_m":
+    if PATCH_REPRESENTATION in ("vv_rank_dem_m", *RELATIVE_REPRESENTATIONS):
         if DATA_LAYOUT != "patch" or POLARIZATIONS != ("VV",):
-            raise ValueError("vv_rank_dem_m 需要 patch 布局并选择 VV 极化")
+            raise ValueError(f"{PATCH_REPRESENTATION} 需要 patch 布局并选择 VV 极化")
         if type(DEM_BAND) is not int or DEM_BAND < 1 or DEM_BAND in bands:
             raise ValueError("DEM_BAND 必须是独立的正整数文件波段编号")
         bands += (DEM_BAND,)
@@ -1161,7 +1286,7 @@ def create_trainer(method=None):
         bands += (DEM_BAND,)
         input_channels += ("DEM",)
     elif DEM_BAND is not None:
-        raise ValueError("DEM_BAND 需要配合 vv_rank_dem_m 输入表示")
+        raise ValueError("切片 DEM_BAND 需要配合 VV＋DEM 输入表示")
     if mobile_unet:
         from supervised.experimental.experimental_model_unet_mobilenet import AI4GWaterUNet
         model_class = AI4GWaterUNet
@@ -1180,6 +1305,22 @@ def create_trainer(method=None):
         model_info = dict(model_name=experiment, normalization="BatchNorm", pretrained=False,
                           decoder="nearest upsample + skip + three convolutions",
                           supervision="single_head_" + LOSS_NAME)
+    elif architecture == "unetpp":
+        from supervised.models.unetpp import UNetPlusPlus
+
+        if PRETRAINED:
+            raise ValueError("U-Net++ 结构对照从随机权重开始，请设 model.PRETRAINED: false")
+        model_class = UNetPlusPlus
+        model_kwargs = dict(in_channels=len(bands), num_classes=1)
+        experiment = "sentinel1_water_unetpp"
+        model_info = dict(
+            model_name=experiment, normalization="BatchNorm", pretrained=False,
+            decoder="UNet++ nested dense skips; two convolutions per node; nearest upsample",
+            encoder_channels=(32, 64, 128, 256, 512, 1024), deep_supervision=False,
+            supervision="single_head_" + LOSS_NAME,
+            implementation="S1 Water encoder + six-level UNet++-style decoder",
+            decoder_reference="https://arxiv.org/abs/1807.10165",
+        )
     elif architecture == "unet":
         model_class = UNet
         model_kwargs = dict(in_channels=len(bands), base_channels=BASE_CHANNELS)
@@ -1326,6 +1467,7 @@ def create_trainer(method=None):
         scene_options=dict(SCENE_OPTIONS, manifest_paths=MANIFEST_PATHS) if DATA_LAYOUT == "full_scene" else None,
         class_weight_mode=CLASS_WEIGHT_MODE,
         resume_checkpoint=RESUME_CHECKPOINT,
+        training_extension=CONFIG['training'].get('EXTENSION'),
         require_preprocessed=DATA_LAYOUT == "full_scene",
         require_normalized=DATA_LAYOUT == "full_scene",
         require_bc_power=DATA_LAYOUT == "full_scene",

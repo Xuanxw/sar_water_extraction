@@ -77,7 +77,7 @@ def save_water_presentation(image, prediction, path, title, input_caption="SAR i
 
 
 def save_raster_water_presentation(image_path, mask_path, destination, max_side=1200,
-                                  input_caption="Filtered SAR band 1"):
+                                  input_caption="Filtered SAR band 1", title=None, band=1):
     """同网格SAR与最终0/1/NoData掩膜生成概览；只读缩略数组，不载入整景。
 
     保留栅格无效掩膜，不把NoData当水体；显示拉伸不改变文件像元或水体矢量。
@@ -90,9 +90,9 @@ def save_raster_water_presentation(image_path, mask_path, destination, max_side=
             raise ValueError("展示图的SAR底图和水体掩膜必须位于同一网格")
         ratio = min(1., min(max_side, 1200) / max(image.shape))
         shape = (max(1, round(image.height*ratio)), max(1, round(image.width*ratio)))
-        sar = image.read(1, out_shape=shape, out_dtype="float32", masked=True,
+        sar = image.read(band, out_shape=shape, out_dtype="float32", masked=True,
                          resampling=Resampling.nearest).filled(np.nan)
         water = mask.read(1, out_shape=shape, out_dtype="int16", masked=True,
                           resampling=Resampling.nearest).filled(-1)
     save_water_presentation(sar, water, destination,
-                            f"{Path(mask_path).parent.name} | Final threshold water", input_caption)
+                            title or f"{Path(mask_path).parent.name} | Final threshold water", input_caption)

@@ -1,0 +1,34 @@
+# 无标签整景预测：python src/supervised/predict.py configs/predict.yaml
+# 输入是已地理编码的实数GeoTIFF。波段、单位、滤波及标准化必须与训练匹配。
+# 本入口不调用SNAP、不做辐射校正、不将幅度/功率/dB互相转换。
+paths:
+  CHECKPOINT_PATH: null  # 已验证的训练检查点.pth，填写绝对路径。
+  IMAGE_PATH: null       # 单景.tif/.tiff，或影像目录；不需要labels或manifest。
+  OUTPUT_DIR: E:/Code_projects/sar_water_extraction/outputs/prediction
+  EXCLUSION_MASKS: []    # 可选已计算的地形等排除图：1排除、0不排除、255/NoData未知。
+run:
+  DEVICE: auto           # auto / cpu / cuda / cuda:0
+  RECURSIVE: false       # 是否递归扫描影像目录。
+  RESUME: true           # 只复用同参数且成果齐全的景；中断景重新计算。
+  CONSOLE_COLOR: true
+input:
+  BANDS: null            # null沿用检查点；如[1,2]，须保持训练的通道顺序与含义。
+  INPUTS_NORMALIZED: true # 须与检查点一致；true时必须使用训练的同一组mean/std，不能按新景重算。
+  FILTER_ALREADY_APPLIED: true # 旧检查点含在线滤波时，确认输入已按同口径离线滤波。
+  DESCRIPTION: 与训练一致的BC离线滤波及标准化数据 # 仅记录，不会根据文字转换数值。
+inference:
+  THRESHOLD: 0.5         # 固定水体概率阈值；不在无标签影像上自动选阈值。
+  WINDOW_SIZE: null      # null沿用检查点；历史切片模型默认512，须为32的倍数。
+  HALO: null             # null沿用检查点；历史切片模型默认64，上下文不参与核心区写入。
+  STRIDE: null           # null沿用验证协议或半个核心；不得大于WINDOW_SIZE-2*HALO。
+  BLEND: null            # null沿用验证协议或gaussian；支持hann / gaussian / constant。
+  BATCH_SIZE: 1          # 显存不足时保持1。
+  NUM_WORKERS: 0         # 先用0，稳定后再增加，避免多个进程同时占用大量内存。
+  USE_AMP: true          # 只在CUDA启用混合精度。
+postprocess:
+  OPENING_RADIUS: 0      # 像元；0关闭。与原整景评估复用同一个开闭运算函数。
+  CLOSING_RADIUS: 0      # 像元；不跨NoData补水。当前不额外删除小水体或平滑岸线。
+  BLOCK_SIZE: 1024       # 后处理分块边长，包含跨块邻域，不改变原网格。
+output:
+  SAVE_PROBABILITY: true
+  QUICKLOOK_SIZE: 1200   # 概览最长边，P2-P98只用于显示。

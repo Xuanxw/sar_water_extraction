@@ -4,15 +4,23 @@ import numpy as np
 from rasterio.windows import Window
 
 
-def file_percentiles(path, count, percentiles):
-    """对临时文件内 count 个有效 float32 值求精确线性分位数；就地重排，仅用于临时文件。"""
+def file_percentiles(path, count, percentiles, *, transform=None):
+    """对临时文件中的有效 float32 值就地求分位数，返回 float64。
+
+    transform 可选，仅适用于单调非降的逐像元变换。先变换相邻秩值再线性插值，
+    等价于在变换后的全部像元上求分位数；调用方须先检查全部像元的定义域。
+    """
     ranks, remainder = np.divmod((count - 1) * np.asarray(percentiles, dtype="int64"), 100)
     upper = ranks + (remainder > 0)
     values = np.memmap(path, dtype="float32", mode="r+", shape=(count,))
     try:
         values.partition(np.unique(np.r_[ranks, upper]))
         low = values[ranks].astype("float64")
-        return low + (values[upper] - low) * remainder / 100
+        high = values[upper].astype("float64")
+        if transform is not None:
+            low = transform(low)
+            high = transform(high)
+        return low + (high - low) * remainder / 100
     finally:
         del values
 

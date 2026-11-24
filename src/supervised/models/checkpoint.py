@@ -17,6 +17,10 @@ def load_model(checkpoint):
         from .sentinel1_water_unet import UNetS1Water
 
         model = UNetS1Water(**checkpoint["model_kwargs"])
+    elif name == "sentinel1_water_unetpp":
+        from .unetpp import UNetPlusPlus
+
+        model = UNetPlusPlus(**checkpoint["model_kwargs"])
     elif name == "pvt_deeplabv3plus":
         from .pvt import PVTDeepLabV3Plus
 

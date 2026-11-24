@@ -74,7 +74,7 @@ BC整景没有内置土地覆盖波段，`landcover.enabled`必须关闭。`auxi
 
 `run.mode: org_scenes`独立处理原始ORG，递归检查最终ZIP/TIFF、匹配原始XML、裁剪AOI外扩范围，再执行SNAP Lee、整景分位阈值、土地覆盖/坡度/历史水体候选修正。没有真值不计算F1/IoU；每景输出水体SHP和质量JSON，不自动按日期合并。
 
-密云案例通过命令行选择专项配置，参数和操作见[密云案例说明](../../configs/北京密云区/README.md)。ORG流程以data_cache中的逐景progress.json记录阶段；产物使用相对路径，支持迁移缓存和成果，不再用全局/逐景路径签名拦截。resume=true复用已完成且文件存在的阶段；修改输入或参数后由用户设置resume=false重算。辅助瓦片按AOI共享，计算采用分块读写。独立合并工具为`scripts/merge_water_shp.py`。
+密云案例通过命令行选择专项配置，参数和操作见[密云案例说明](../../configs/北京密云区/README.md)。ORG流程以data_cache中的逐景progress.json记录阶段；产物使用相对路径，支持迁移缓存和成果，不再用全局/逐景路径签名拦截。resume=true复用已完成且文件存在的阶段；修改输入或参数后由用户设置resume=false重算。辅助瓦片按AOI共享，计算采用分块读写。独立合并工具为`scripts/products/merge_water_shp.py`。
 
 ORG配置只保留`paths/run/input/threshold/processing/output/quality_review/org`，不混入训练清单、标签或水深配置。`org`包含滤波、归一化表达、辅助下载和修正参数。`scene_zscore`仅使用等价阈值，不落盘另一份归一化图；它不会改变线性幅度分位数分类。
 
@@ -102,7 +102,7 @@ ORG批处理保留原分割栅格`water.tif`，水体矢量仅输出清理后的
 `polygon_output`配置依次控制：内部小孔填充、开闭运算、重新施加地形与土地覆盖排除、整景8连通小斑块筛除、面边界简化和平滑。
 默认孔洞上限200像素、3×3核、最小水体200像素、Chaikin平滑2次；小水体可能被删除，平滑后的面边界与栅格略有差别。
 `water_polygon.json`记录本次清理参数和数量；原`quality.json`仍对应原`water.tif`，不能当作新面成果的精度报告。
-已有成果可执行`python scripts/export_water_polygons.py 配置.yaml`补做，复用本地辅助缓存，不重新滤波或阈值分割。处理完成的景可续跑跳过。
+已有成果可执行`python scripts/products/export_water_polygons.py 配置.yaml`补做，复用本地辅助缓存，不重新滤波或阈值分割。处理完成的景可续跑跳过。
 `merge_water_shp.py`拼接逐景`water_polygon.shp`；输入内容更新后自动重做日期合并，原始逐景结果不变。
 
 ### 原GUI地形排除
@@ -123,7 +123,7 @@ ORG批处理保留原分割栅格`water.tif`，水体矢量仅输出清理后的
 
 `quicklook.png`显示最终`water_polygon.tif`，`terrain_quicklook.png`显示同一最终水体及地形掩膜。
 `quality.json`仍统计成面清理前的分割掩膜，成面后的数量见`water_polygon.json`。
-`scripts/repair_gui_terrain.py`只转调正式入口，不再维护另一套处理算法；按日期合并仍单独运行。
+`scripts/threshold/repair_gui_terrain.py`只转调正式入口，不再维护另一套处理算法；按日期合并仍单独运行。
 保持输入、辅助数据和配置一致即可复现同一处理结果；修改参数后需设置`resume: false`重新计算，
 不能把旧参数的已完成缓存当作新结果。
 

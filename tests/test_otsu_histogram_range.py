@@ -19,7 +19,7 @@ from utils.files import sha256
 import test_org_pipeline as org_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('otsu_audit', ROOT / 'scripts/inspect_otsu_outliers.py')
+spec = importlib.util.spec_from_file_location('otsu_audit', ROOT / 'scripts/threshold/inspect_otsu_outliers.py')
 audit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(audit)
 
@@ -51,12 +51,15 @@ class OtsuHistogramRangeTests(unittest.TestCase):
                 data = src.read(1, masked=True)
             valid = ~np.ma.getmaskarray(data)
             bounds = np.percentile(data.data[valid], [0, 99])
-            config['threshold'].update(method='otsu', mode='top', otsu_histogram_percentiles=[0, 99])
+            # 离线输入在存储值域中分割，三个入口须使用同一直方图域。
+            config['threshold'].update(method='otsu', mode='top', otsu_domain='linear',
+                                       otsu_histogram_percentiles=[0, 99])
             for size in (9, 128):
                 folder = root / f'size_{size}'
                 folder.mkdir()
                 config['processing']['block_size'] = size
                 stats = statistics(source, box(500000, 4000000, 500064, 4000064), config, folder)
+                self.assertEqual(stats['threshold_selection']['method_used'], 'otsu')
                 self.assertEqual(stats['threshold_selection']['histogram_min'], bounds[0])
                 self.assertEqual(stats['threshold_selection']['histogram_max'], bounds[1])
                 segmenter = ThresholdSegmenter(preprocessing='offline_normalized', method='otsu',

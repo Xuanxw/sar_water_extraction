@@ -122,7 +122,7 @@ class OrgProductionTests(unittest.TestCase):
             with patch.object(pipeline,'segment',side_effect=AssertionError('must not segment')):
                 pipeline.run_org_scenes(config)
             self.assertTrue(all(Path(row['water_polygon_shp']).is_file() for row in rows))
-            spec=importlib.util.spec_from_file_location('merge_water',ROOT/'scripts/merge_water_shp.py')
+            spec=importlib.util.spec_from_file_location('merge_water',ROOT/'scripts/products/merge_water_shp.py')
             module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
             merged=module.merge_results(root,Path(temp)/'merged','EPSG:32650')
             with fiona.open(merged/'2026-01-01_water_polygon.shp') as src:

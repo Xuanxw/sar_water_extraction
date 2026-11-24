@@ -91,7 +91,7 @@ class OtsuLogAmplitudeTests(unittest.TestCase):
             np.testing.assert_array_equal(masks[0], masks[1])
 
     def test_audit_explicit_single_scene_cache_preparation_and_resume(self):
-        script = Path(__file__).resolve().parents[1] / 'scripts/inspect_otsu_outliers.py'
+        script = Path(__file__).resolve().parents[1] / 'scripts/threshold/inspect_otsu_outliers.py'
         spec = importlib.util.spec_from_file_location('log_audit', script)
         audit = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(audit)

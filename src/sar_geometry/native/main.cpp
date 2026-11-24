@@ -1,5 +1,6 @@
 #include "geometry.h"
 #include "visibility.h"
+#include "gc_map2_v57.h"
 #include <bit>
 #include <algorithm>
 #include <cmath>
@@ -25,9 +26,9 @@ int main(int argc,char** argv) {
     try {
         // 管道按大块传输；关闭stdio同步，避免逐数值I/O锁成为计算瓶颈。
         std::ios::sync_with_stdio(false);std::cin.tie(nullptr);
-        if (argc!=2) throw std::runtime_error("usage: sar_geometry_core solve|visibility|version");
+        if (argc!=2) throw std::runtime_error("usage: sar_geometry_core solve|states|visibility|profiles|gamma57_scan|version");
         std::string command=argv[1];
-        if (command=="version") {std::cout<<"sar_geometry_core 0.3 protocol=1 openmp\n";return 0;}
+        if (command=="version") {std::cout<<"sar_geometry_core 0.4 protocol=1 openmp gamma57_scan\n";return 0;}
         if constexpr (std::endian::native!=std::endian::little) throw std::runtime_error("little endian host required");
 #ifdef _WIN32
         _setmode(_fileno(stdin),_O_BINARY);_setmode(_fileno(stdout),_O_BINARY);
@@ -77,6 +78,25 @@ int main(int argc,char** argv) {
                 const auto& p=input[i];result[i]=sar::solve(m,{p[0],p[1],p[2]},{p[3],p[4],p[5]});
             }
             for(const auto& r:result)write_values(r.data(),r.size());
+        } else if (command == "gamma57_scan") {
+            auto columns = count(1000000);
+            double direction = number();
+            if (!columns || n % columns || std::abs(direction) != 1)
+                throw std::runtime_error("invalid gamma57 scan shape/direction");
+            auto rows = n / columns;
+            std::vector<std::vector<float>> angle(rows, std::vector<float>(columns));
+            std::vector<std::vector<float>> range(rows, std::vector<float>(columns));
+            for (auto& row : angle) for (auto& x : row) x = static_cast<float>(number());
+            for (auto& row : range) for (auto& x : row) x = static_cast<float>(number());
+            std::vector<std::vector<std::uint8_t>> flags(rows);
+            // 一条横向剖面的状态不可分块重置；只在方位剖面之间并行。
+            #pragma omp parallel for schedule(static)
+            for (std::int64_t j = 0; j < static_cast<std::int64_t>(rows); ++j)
+                flags[j] = sar::scan_gc_map2_v57_shadow_layover(angle[j], range[j], static_cast<int>(direction));
+            for (const auto& row : flags) for (auto x : row) {
+                double value = x;
+                write_values(&value, 1);
+            }
         } else if (command=="profiles") {
             auto columns=count(1000000);
             if(!columns || n%columns)throw std::runtime_error("invalid profile shape");

@@ -39,7 +39,7 @@ PVT-UANet 没有调用原 `UNet`，也不是把 Transformer 串接到原 U-Net �
 | `src/supervised/models/common.py` | `FPN` | 自顶向下特征融合 |
 | `src/supervised/models/common.py` | `SemanticFPNDecoder` | 四尺度粗预测解码头 |
 | `src/supervised/models/checkpoint.py` | `load_model` | 按模型名和阶段重建已训练模型 |
-| `src/calibrate_bn.py` | `BNCalibrator` | 可选的训练后 BN 统计量校准 |
+| `scripts/models/calibrate_bn.py` | `BNCalibrator` | 可选的训练后 BN 统计量校准 |
 
 从项目根目录执行：
 
@@ -320,7 +320,7 @@ outputs/pvt_uanet_阶段/本次时间戳/
   → 返回模型供调用者使用
 ```
 
-[calibrate_bn.py](../scripts/calibrate_bn.py) 则是独立的可选入口：加载目标检查点，用训练影像重新统计 BN 的运行均值与方差，比较校准前后的验证结果并另存模型。`train.py` 不会自动调用它。具体参数选择和 BN/LN 的区别见第 20 章。
+[calibrate_bn.py](../scripts/models/calibrate_bn.py) 则是独立的可选入口：加载目标检查点，用训练影像重新统计 BN 的运行均值与方差，比较校准前后的验证结果并另存模型。`train.py` 不会自动调用它。具体参数选择和 BN/LN 的区别见第 20 章。
 
 对照源码时，可沿以下顺序阅读一次完整流程：
 
@@ -1351,7 +1351,7 @@ UAFM2： [1,32,128,128] + [1,2,128,128]
 - [公共训练器](../src/supervised/train.py)
 - [数据集读取](../src/supervised/datasets/water_dataset.py)
 - [模型重建与权重加载](../src/supervised/models/checkpoint.py)
-- [BN 校准脚本](../scripts/calibrate_bn.py)
+- [BN 校准脚本](../scripts/models/calibrate_bn.py)
 - [U-Net 函数含义与计算推导](unet_functions_and_derivations.md)
 - [PVT 第一阶段说明](stages/pvt_stage1.md)
 - [UANet 分阶段实现与 SAR 适配](stages/uanet_stages.md)

@@ -1,0 +1,98 @@
+# 新一轮四网络共用输入：仅固定训练集估计 VV P02/P98，所有分块复用同一端点。
+# 保留块间亮暗，DEM 保持米值；随后两通道仍使用训练集 mean/std。
+# 从随机权重训练 80 轮，单次余弦日程；不加载旧 rank 权重或 EXTENSION。
+# DFC 存储值物理缩放未确认，此配置不能直接套用于密云浮点 dB 或 TYSAR 功率。
+paths:
+  DATA_ROOT: ../..
+  RESUME_CHECKPOINT: null
+  IMAGE_DIR: data/Track1/train/images
+  LABEL_DIR: data/Track1/train/labels
+  MANIFEST_PATHS: []
+  OUTPUT_ROOT: outputs/s1
+  OUTPUT_DIR: outputs/s1/s1water_unetpp_vv_dem_trainnorm80
+  WINDOW_CACHE_DIR: data_cache/s1
+run:
+  RUN_DIRECTORY_FORMAT: '%Y%m%d_%H%M%S_%f'
+  RESULT_FILES:
+    metrics: metrics.csv
+    sampling: sampling.csv
+    sampling_groups: sampling_groups.csv
+    split: split_manifest.csv
+    labels: label_revision.json
+    error: training_error.log
+    last: last.pth
+    train_end: train_end.pth
+    best: best.pth
+    best_f1: best_f1.pth
+    best_balanced: best_balanced_accuracy.pth
+    abnormal: abnormal.pth
+    features: features
+    val_scenes: val_scenes_epoch_{epoch:03d}.csv
+data:
+  POLARIZATIONS:
+  - VV
+  POLARIZATION_BANDS:
+    VV: 1
+  DEM_BAND: 4
+  VAL_RATIO: 0.2
+  MAX_SAMPLES: null
+  DATA_LAYOUT: patch
+  PATCH_REPRESENTATION: vv_train_p02_p98_dem_m
+  SCENE_OPTIONS: {}
+model:
+  ARCHITECTURE: unetpp
+  BACKBONE: s1water_cnn
+  PRETRAINED: false
+  DEEPLAB_DECODER_CHANNELS: 256
+  DEEPLAB_LOW_LEVEL_CHANNELS: 48
+  DEEPLAB_ASPP_RATES:
+  - 3
+  - 6
+  - 9
+  DEEPLAB_DROPOUT: 0.1
+  BASE_CHANNELS: 32
+  DECODER_CHANNELS: 32
+  STAGE: uafm
+  UAFNET_FINAL_RESIDUAL: true
+  UAFNET_MBDC_DILATIONS: null
+  UAFNET_HIGH_RESOLUTION_REFINEMENT: false
+  UAFNET_REFINEMENT_DECODER: uafm
+training:
+  CPU_THREADS: 4
+  BATCH_SIZE: 2
+  EPOCHS: 80
+  LEARNING_RATE: 0.0001
+  SEED: 42
+  LOSS_NAME: bce
+  BCE_WEIGHT: 1.0
+  DICE_WEIGHT: 1.0
+  CLASS_WEIGHT_MODE: none
+  OPTIMIZER_NAME: adamw
+  WEIGHT_DECAY: 0.01
+  COSINE_SCHEDULE: true
+  TRAIN_AUGMENTATION: true
+  ABNORMAL_F1_THRESHOLD: 0.001
+  SAMPLING: random
+  HARD_WARMUP_EPOCHS: 2
+  HARD_SAMPLE_RATIO: 0.5
+  HARD_POOL_RATIO: 0.25
+  LOW_WATER_POOL_RATIO: 0.2
+  WATER_GROUP_NAMES:
+  - 无水体
+  - 水体≤1%
+  - 水体1%–10%
+  - 水体10%–50%
+  - 水体>50%
+  HEAD_LOSS_WEIGHTS:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+quality:
+  SAVE_VALIDATION_FIGURES: true
+  INTERVAL: 1
+  MAX_SCENES: null
+  PREVIEW_MAX_SIDE: 1200
+  SAVE_FEATURE_MAPS: false
+  FEATURE_MAP_INTERVAL: 5
+  FEATURE_MAP_SAMPLES: 2

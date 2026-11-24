@@ -35,13 +35,14 @@ with patch('configuration.load_yaml', side_effect=AssertionError('must not load 
     from supervised import train, post_process
     from thres_segmentation import main
     from sar_geometry import main as geometry
-    import history_threshold_comparison, slope_threshold_comparison
-    import repair_gui_terrain, export_water_polygons, preview_org_coverage
+    from scripts.threshold import history_threshold_comparison, slope_threshold_comparison
+    from scripts.threshold import repair_gui_terrain
+    from scripts.products import export_water_polygons, preview_org_coverage
     assert image_process.CONFIG is None
     assert train.CONFIG is None
     assert post_process.CONFIG is None
 '''
-        env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(ROOT/'src'), str(ROOT/'scripts')]),
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(ROOT/'src'), str(ROOT)]),
                    PYTHONDONTWRITEBYTECODE='1', OMP_NUM_THREADS='1')
         result = subprocess.run([sys.executable, '-B', '-c', code], env=env, cwd=ROOT,
                                 capture_output=True, text=True, timeout=60)

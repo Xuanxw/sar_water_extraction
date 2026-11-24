@@ -57,9 +57,22 @@ class ImageProcessTests(unittest.TestCase):
                     FILTER_INPUT_STAGE='org',NORMALIZE_INPUT_STAGE='filtered'), \
                     patch.object(tools,'prepare_dataset',side_effect=prepare), \
                     patch.object(tools,'process_stage',side_effect=lambda s:calls.append(s)), \
+                    patch('datasets.scene_dem.prepare_scene_dems', side_effect=lambda *args: calls.append('dem')) as dem, \
                     patch.object(tools,'export_quicklooks',side_effect=lambda:calls.append('quicklook')):
                 tools.main()
-                self.assertEqual(calls,['prepare','filtered','normalized','quicklook'])
+                self.assertEqual(calls, ['prepare', 'filtered', 'normalized', 'dem', 'quicklook'])
+                args = dem.call_args
+                calls.clear()
+                with patch.object(tools, 'MODE', 'dem'):
+                    tools.main()
+                self.assertEqual(calls, ['dem'])
+                self.assertEqual(dem.call_args, args)
+
+                calls.clear()
+                dem.side_effect = ValueError('缺少 DEM 瓦片')
+                with self.assertRaisesRegex(ValueError, '缺少 DEM 瓦片'):
+                    tools.main()
+                self.assertEqual(calls, ['prepare', 'filtered', 'normalized'])
                 calls.clear();(root/'split_manifest.csv').unlink()
                 with patch.object(tools,'prepare_dataset',return_value=None),self.assertRaisesRegex(RuntimeError,'尚未全部完成'):
                     tools.main()
@@ -144,6 +157,86 @@ class ImageProcessTests(unittest.TestCase):
                     check_preprocessed_input(target/'images', checkpoint)
                     with self.assertRaises(ValueError):
                         check_preprocessed_input(baseline.parent.parent, checkpoint)
+
+    def test_scene_relative_db_reuses_lee_and_preserves_linear_results(self):
+        with TemporaryDirectory() as temp:
+            opts = self.options(Path(temp))
+            fixture.SceneDatasetTests().prepare(opts['OUTPUT_DIR'])
+            raw_path = opts['OUTPUT_DIR'] / 'images/train/train.tif'
+            with rasterio.open(raw_path, 'r+') as dst:
+                raw = np.arange(1, dst.width * dst.height + 1, dtype='float32').reshape(dst.shape)
+                raw.flat[:33] = 0  # P02 位于零功率与正功率的两个相邻秩之间。
+                raw[-1, -1] = np.nan
+                dst.write(raw, 1)
+            with patch.multiple(tools, **opts, MODE='normalize', NORMALIZE_READ_SIZE=9), \
+                    patch.object(snap_preprocess, 'snap_runtime', return_value={'test': '1'}), \
+                    patch.object(snap_preprocess.SnapSpeckleFilter, 'run', side_effect=self.fake_gpt) as gpt:
+                tools.process_stage('filtered')
+                filtered = opts['FILTERED_ROOT'] / 'images/train/train.tif'
+                with patch.object(tools, 'NORMALIZATION_METHOD', 'scene_p02_p98'):
+                    tools.main()
+                    linear = tools.stage_root('normalized') / 'images/train/train.tif'
+                before = [hashlib.sha256(p.read_bytes()).digest() for p in (filtered, linear)]
+                with patch.object(tools, 'NORMALIZATION_METHOD', 'scene_relative_db_p02_p98'):
+                    tools.main()
+                    target = tools.stage_root('normalized')
+                    self.assertEqual(target.name, 'normalized_relative_db_p02_p98')
+                    record = tools.stage_record(target)
+                    self.assertEqual(record['output_domain'], 'scene_relative_db_p02_p98')
+                    self.assertEqual(record['percentile_domain'], 'relative_power_db')
+                    self.assertEqual(record['upstream']['filter']['method'], 'snap_lee')
+                    self.assertEqual(record['reference_power'], 1.0)
+                    self.assertEqual(record['power_floor'], 1e-6)
+                    db = 10 * np.log10(np.maximum(raw.astype('float64'), 1e-6))
+                    lo, hi = np.nanpercentile(db, (2, 98))
+                    expected = np.clip((db - lo) / (hi - lo), 0, 1).astype('float32')
+                    path = target / 'images/train/train.tif'
+                    with rasterio.open(path) as result, rasterio.open(filtered) as source:
+                        np.testing.assert_array_equal(result.read(1), expected)
+                        self.assertEqual(result.transform, source.transform)
+                        self.assertEqual(result.crs, source.crs)
+                        np.testing.assert_array_equal(result.read_masks(1), source.read_masks(1))
+                        np.testing.assert_allclose([float(result.tags(1)[k]) for k in ('p02', 'p98')],
+                                                   [lo, hi], rtol=1e-13)
+                    with rasterio.open(target / 'images/val/val.tif') as val:
+                        self.assertEqual(val.tags(1)['p02'], val.tags(1)['p98'])
+                        self.assertTrue(np.all(val.read(1, masked=True).compressed() == 0))
+                    tools.export_scene(raw_path)
+                    self.assertTrue((raw_path.parent / 'quicklooks_relative_db_p02_p98').is_dir())
+                    stamp = path.stat().st_mtime_ns
+                    tools.main()
+                    self.assertEqual(path.stat().st_mtime_ns, stamp)
+                    self.assertEqual(gpt.call_count, 2)
+                    self.assertEqual(before, [hashlib.sha256(p.read_bytes()).digest() for p in (filtered, linear)])
+                    with patch.object(tools, 'NORMALIZE_INPUT_STAGE', 'org'):
+                        with self.assertRaisesRegex(ValueError, 'Lee'):
+                            tools.main()
+
+    def test_db_percentiles_exclude_common_nodata_and_reject_valid_negative(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'input.tif'
+            values = np.array([[[-1, 0], [1, 100]], [[np.nan, 4], [np.nan, 40]]], dtype='float32')
+            transform = rasterio.transform.from_origin(100, 200, 3, 3)
+            with rasterio.open(source, 'w', driver='GTiff', count=2, width=2, height=2, dtype='float32',
+                               crs='EPSG:32650', transform=transform, nodata=np.nan) as dst:
+                dst.write(values)
+            with patch.multiple(tools, NORMALIZATION_METHOD='scene_relative_db_p02_p98',
+                                NORMALIZE_WORK_DIR=root/'work', NORMALIZE_READ_SIZE=1):
+                target = root / 'valid.tif'
+                tools.write_normalized_scene(source, target, (1, 2), None, None)
+                with rasterio.open(target) as dst:
+                    mask = np.array([[0, 255], [0, 255]], dtype='uint8')
+                    np.testing.assert_array_equal(dst.read_masks(), [mask, mask])
+                    self.assertEqual(dst.tags()['valid_pixels'], '2')
+                    for i in (1, 2):
+                        np.testing.assert_array_equal(dst.read(i, masked=True).compressed(), [0.0, 1.0])
+                with rasterio.open(source, 'r+') as src:
+                    values[1, 0, 0] = 1.0  # 使 -1 进入共同有效域。
+                    src.write(values)
+                with self.assertRaisesRegex(ValueError, '负值'):
+                    tools.write_normalized_scene(source, root/'invalid.tif', (1, 2), None, None)
+                self.assertFalse((root/'invalid.tif').exists())
 
     def test_reference_statistics_skip_reestimation_and_resume(self):
         with TemporaryDirectory() as temp:

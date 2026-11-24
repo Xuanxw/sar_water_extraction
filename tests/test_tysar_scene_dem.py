@@ -56,6 +56,10 @@ class SceneDEMTests(unittest.TestCase):
         return vv_root, heights, vv
 
     def test_prepare_train_validate_and_resume(self):
+        # main(config) 修改模块级配置，退出该用例时恢复先前的归一化方法与路径。
+        configured = patch.dict(vars(image_process))
+        configured.start()
+        self.addCleanup(configured.stop)
         with TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()
             vv_root, heights, vv = self.make_inputs(base)
@@ -88,7 +92,8 @@ class SceneDEMTests(unittest.TestCase):
             self.assertEqual(result.stat().st_mtime_ns, stamp)
             self.assertEqual(upstream, (vv_root/"split_manifest.csv").read_bytes())
             # 经正式配置工厂构建 2 通道 PVT，只用微型本地样本与随机初始化，验证一轮和检查点。
-            cfg = yaml.safe_load((REPO/"configs/168/train_tysar_vv_dem.yaml").read_text(encoding="utf-8"))
+            cfg = yaml.safe_load((REPO/"configs/train.yaml").read_text(encoding="utf-8"))
+            cfg["data"]["DEM_BAND"] = 2
             cfg["paths"].update(DATA_ROOT=str(base), IMAGE_DIR=str(derived/"images"), LABEL_DIR=str(derived/"labels"),
                                 MANIFEST_PATHS=[str(ds.manifest_path)], OUTPUT_DIR=str(base/"run"),
                                 OUTPUT_ROOT=str(base/"runs"), WINDOW_CACHE_DIR=str(cache))
@@ -117,6 +122,24 @@ class SceneDEMTests(unittest.TestCase):
                     self.assertEqual(source_path(saved["dem_path"], backup), result)
                 finally:
                     trainer.dataset.close()
+
+    def test_dem_preserves_relative_db_vv_and_its_protocol(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            linear, _, vv = self.make_inputs(base)
+            source = linear.with_name('normalized_relative_db_p02_p98')
+            linear.rename(source)
+            receipt = source / 'preprocessing.json'
+            metadata = json.loads(receipt.read_text(encoding='utf-8'))
+            metadata.update(output_domain='scene_relative_db_p02_p98', **image_process.RELATIVE_DB_TAGS)
+            receipt.write_text(json.dumps(metadata), encoding='utf-8')
+            target = prepare_scene_dems(source, base/'tiles', base/'cache', 64, 8)
+            derived = json.loads((target/'preprocessing.json').read_text(encoding='utf-8'))
+            self.assertEqual(derived['stage'], 'vv_dem')
+            for key in ('output_domain', 'reference_power', 'power_floor', 'percentile_domain'):
+                self.assertEqual(derived[key], metadata[key])
+            with rasterio.open(target/'images/train/train.vrt') as stack:
+                np.testing.assert_array_equal(stack.read(1), vv)
 
     def test_two_batches_share_train_dem_scale(self):
         with TemporaryDirectory() as tmp:

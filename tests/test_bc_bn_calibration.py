@@ -7,8 +7,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import torch
 from torch import nn
-sys.path[:0]=[str(Path(__file__).resolve().parents[1]/'src'),str(Path(__file__).resolve().parents[1]/'scripts'),str(Path(__file__).resolve().parent)]
-import calibrate_bn as bn
+sys.path[:0]=[str(Path(__file__).resolve().parents[1]/'src'),str(Path(__file__).resolve().parents[1]),str(Path(__file__).resolve().parent)]
+from scripts.models import calibrate_bn as bn
 import test_sar_scene_dataset as fixture
 from supervised.load.sar_scene_dataset import SARSceneDataset
 

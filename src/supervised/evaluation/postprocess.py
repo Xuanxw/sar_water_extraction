@@ -15,6 +15,9 @@ from supervised.models.checkpoint import load_model
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.landcover import read_landcover, merge_landcover
 from supervised.evaluation.boundary_eval import BoundaryEvaluator, save_boundary_figure
+from datasets.relative_normalization import (
+    RELATIVE_REPRESENTATIONS, apply_vv_train_p02_p98_dem_m, validate_relative_normalization,
+)
 from datasets.dfc_sample.s1_dataset import (
     WaterDataset, relative_backscatter_ranks, resolve_sample_path, sample_name, vv_rank_dem_m,
 )
@@ -54,6 +57,12 @@ class WaterEnsemble:
         self.members = []
         for path in checkpoint_paths:
             checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+            representation = checkpoint.get('patch_representation', 'stored')
+            normalization = checkpoint.get('relative_normalization')
+            if representation in RELATIVE_REPRESENTATIONS:
+                normalization = validate_relative_normalization(normalization, representation)
+                if list(checkpoint['bands']) != normalization['bands']:
+                    raise ValueError('检查点波段与拟合 VV/DEM 时的顺序不一致')
             model = load_model(checkpoint).to(self.device).eval()
             # 不保留优化器和整份 state_dict，避免多个模型占用不必要的 CPU 内存。
             self.members.append(dict(
@@ -64,7 +73,7 @@ class WaterEnsemble:
                 val_files=checkpoint["val_files"], ignore_index=checkpoint.get("ignore_index", -1),
                 speckle_filter=SpeckleFilter(checkpoint.get('speckle')),
                 inputs_normalized=checkpoint.get('inputs_normalized',False),
-                patch_representation=checkpoint.get('patch_representation', 'stored'),
+                patch_representation=representation, relative_normalization=normalization,
                 input_preprocessing=checkpoint.get('input_preprocessing',{}),
             ))
             print(f"集成成员：{path}；模型：{checkpoint['model_name']}；轮次：{checkpoint['epoch']}", flush=True)
@@ -72,7 +81,7 @@ class WaterEnsemble:
         self.bands = tuple(sorted({b for member in self.members for b in member["bands"]}))
 
     @torch.inference_mode()
-    def predict(self, image, valid_mask):
+    def predict(self, image, valid_mask, dem_affines=None):
         """返回各成员的水体概率和等权平均概率；不平均 logits 或二值掩膜。"""
         image, valid_mask = image.to(self.device), valid_mask.to(self.device)
         probabilities = []
@@ -86,12 +95,20 @@ class WaterEnsemble:
                 filtered = np.stack([filter_op(sample, mask) for sample, mask in zip(raw, masks)])
                 inputs = torch.from_numpy(filtered).to(self.device)
             representation = member.get('patch_representation', 'stored')
-            if representation in ('relative_backscatter_ranks', 'vv_rank_dem_m'):
-                transform = vv_rank_dem_m if representation == 'vv_rank_dem_m' else relative_backscatter_ranks
+            if representation in ('vv_rank_dem_m', *RELATIVE_REPRESENTATIONS) and dem_affines:
+                # 第二个输入通道为 DEM，按每张原图的 scale/offset 恢复米值，兼容混合通道集成。
+                affines = torch.as_tensor(dem_affines[member['bands'][1]], dtype=inputs.dtype, device=self.device)
+                inputs[:, 1] = inputs[:, 1] * affines[:, 0, None, None] + affines[:, 1, None, None]
+            if representation in ('relative_backscatter_ranks', 'vv_rank_dem_m', *RELATIVE_REPRESENTATIONS):
                 values = inputs.cpu().numpy()
                 masks = valid_mask.cpu().numpy()
-                transformed = np.stack([transform(v, m) for v, m in zip(values, masks)])
-                inputs = torch.from_numpy(transformed).to(self.device)
+                if representation in RELATIVE_REPRESENTATIONS:
+                    transformed = [apply_vv_train_p02_p98_dem_m(v, m, member['relative_normalization'])
+                                   for v, m in zip(values, masks)]
+                else:
+                    transform = vv_rank_dem_m if representation == 'vv_rank_dem_m' else relative_backscatter_ranks
+                    transformed = [transform(v, m) for v, m in zip(values, masks)]
+                inputs = torch.from_numpy(np.stack(transformed)).to(self.device)
             if not member.get("inputs_normalized", False):
                 inputs = (inputs - member["mean"]) / member["std"]
             inputs = inputs.masked_fill(~valid_mask.unsqueeze(1), 0)
@@ -319,6 +336,8 @@ def run_postprocess(checkpoint_paths, image_dir=None, label_dir=None,
         scene_options = {name: {} for name in selected}
     if use_external_water and any(not options.get("reference_path") for options in scene_options.values()):
         raise ValueError("use_external_water 需要 reference_path 或 download_history=True")
+    dem_bands = {member['bands'][1] for member in ensemble.members
+                 if member.get('patch_representation') in ('vv_rank_dem_m', *RELATIVE_REPRESENTATIONS)}
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     output_dir = (first["path"].parent / "quality" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                   if output_dir is None else Path(output_dir))
@@ -342,7 +361,15 @@ def run_postprocess(checkpoint_paths, image_dir=None, label_dir=None,
     for step, batch in enumerate(loader, 1):
         # 模型推理：各成员独立标准化/推理，平均概率后阈值化，得到后处理输入raw。
         image_valid = batch["valid_mask"].to(ensemble.device)
-        probabilities, average = ensemble.predict(batch["image"], image_valid)
+        if dem_bands:
+            dem_affines = {band: [] for band in dem_bands}
+            for name in batch["name"]:
+                with rasterio.open(selected[name]) as source:
+                    for band in dem_bands:
+                        dem_affines[band].append((source.scales[band - 1], source.offsets[band - 1]))
+            probabilities, average = ensemble.predict(batch["image"], image_valid, dem_affines)
+        else:
+            probabilities, average = ensemble.predict(batch["image"], image_valid)
         raw = (average >= threshold) & image_valid
         corrected = raw.clone()
         if with_labels:

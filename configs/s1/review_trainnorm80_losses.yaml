@@ -1,0 +1,30 @@
+# 两个BCE+Dice训练均完整结束后运行。BCE固定当前最佳权重；新实验按训练配置选最近完整80轮的best_f1。
+# 不校准BN；固定0.5及扫描阈值分别比较，未完成训练会报错而非选取中间结果。
+paths:
+  DATA_ROOT: ../..
+  CHECKPOINTS:
+    pvt_bce: outputs/s1/pvt_deeplabv3plus_vv_dem_trainnorm80/20261121_030233_181221/best_f1.pth
+    mobilenet_bce: outputs/s1/mobilenetv2_unet_vv_dem_trainnorm80/20261121_095623_103277/best_f1.pth
+  OUTPUT_DIR: outputs/s1/review_trainnorm80/loss_comparison
+  IMAGE_DIR: null
+  LABEL_DIR: null
+  TRAIN_CONFIGS:
+    pvt_bce_dice: configs/s1/train_pvt_deeplabv3plus_trainnorm80_bce_dice.yaml
+    mobilenet_bce_dice: configs/s1/train_mobilenetv2_unet_trainnorm80_bce_dice.yaml
+run:
+  MODE: thresholds
+  EXPECTED_EPOCHS:
+    pvt_bce: 59
+    mobilenet_bce: 14
+  DEVICE: cuda:0
+  CPU_THREADS: 2
+  NUM_WORKERS: 2
+  BATCH_SIZE: 2
+  CALIBRATION_SAMPLES: null
+  SEED: 42
+  LOG_EVERY: 25
+  MIN_PRECISION: 0.8
+  THRESHOLDS:
+    start: 0.01
+    stop: 0.99
+    step: 0.01

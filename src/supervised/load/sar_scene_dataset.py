@@ -289,6 +289,9 @@ def merge_scene_manifests(manifest_paths, **dataset_options):
         keys = ('stage', 'bands', 'input_domain', 'output_domain', 'quantity', 'filter',
                 'calibration_reference', 'mean', 'std', 'dem_source', 'dem_unit', 'vertical_datum')
         result = {k: record.get(k) for k in keys}
+        if record.get('output_domain') == 'scene_relative_db_p02_p98':
+            for key in ('percentile_domain', 'reference_power', 'power_floor', 'percentiles', 'output_range'):
+                result[key] = record.get(key)
         if record.get('upstream'):
             result['upstream'] = protocol(record['upstream'])
         return result

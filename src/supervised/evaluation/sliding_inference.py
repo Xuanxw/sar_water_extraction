@@ -33,7 +33,7 @@ def iter_scene_predictions(model, image_path, label_path=None, *, bands=(1,),
                            window_size=1024, halo=128, stride=None, blend='gaussian',
                            mean=None, std=None, inputs_normalized=False, device='cpu',
                            use_amp=False, batch_size=1, num_workers=0, speckle=None,
-                           boundary_context=True, window_transform=None):
+                           boundary_context=True, window_transform=None, return_labels=True):
     """逐块返回最终融合结果，每个原分辨率像素仅输出一次。
 
     scores 为单通道 logit（两类时为 logit1-logit0）；image 已位于模型输入域。
@@ -43,8 +43,11 @@ def iter_scene_predictions(model, image_path, label_path=None, *, bands=(1,),
     此时不适用于需要跨块邻域的边界指标。缓存高度仍只有 core。
     window_transform(image, valid) 返回窗级 (image, valid)，先于训练标准化。
     此时用于显示的 image 取最后覆盖该像素的窗口值，只有 scores 做融合。
+    return_labels=False用于无标签生产推理，不分配全为-1的int64标签块。
     """
     # 保留标签网格核验，但重叠输入窗口不读取/分配未被模型使用的标签。
+    if not return_labels and label_path is not None:
+        raise ValueError('return_labels=False时不应传入标签')
     ds = SceneWindows(image_path, label_path, bands, window_size, halo, speckle, stride, read_labels=False)
     if window_transform is not None and (boundary_context or ds.filter.config is not None):
         raise ValueError("逐窗变换需关闭滤波和标签边界上下文")
@@ -104,7 +107,7 @@ def iter_scene_predictions(model, image_path, label_path=None, *, bands=(1,),
                         image, valid = image[:, ys, xs], valid[ys, xs]
                         window = Window(left, start_row, width, row_count)
                         ys, xs = slice(0, row_count), slice(0, width)
-                    truth = np.full(valid.shape, -1, np.int64)
+                    truth = np.full(valid.shape, -1, np.int64) if return_labels else None
                     if labels is not None:
                         values = labels.read(1, window=window, masked=True)
                         known = valid & ~np.ma.getmaskarray(values) & np.isin(values.data, (0, 1))
@@ -116,7 +119,7 @@ def iter_scene_predictions(model, image_path, label_path=None, *, bands=(1,),
                                       where=denominator > 0)
                     # 全部字段均为当前小块独立数组或其上下文视图，不引用滚动缓冲。
                     yield dict(window=(start_row, left, row_count, width), scores=score,
-                               image=image[:, ys, xs], label=truth[ys, xs], valid_mask=final_valid,
+                               image=image[:, ys, xs], label=truth[ys, xs] if truth is not None else None, valid_mask=final_valid,
                                label_context=truth, valid_context=valid, core_slices=(ys, xs),
                                scene_shape=(ds.height, ds.width))
 

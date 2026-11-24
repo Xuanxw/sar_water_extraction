@@ -18,7 +18,6 @@ import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.windows import Window
-from scipy import ndimage
 import torch
 from torch.utils.data import DataLoader
 
@@ -28,6 +27,7 @@ from supervised.evaluation.boundary_eval import boundary_regions, confusion_coun
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.model_eval import threshold_counts, precision_matches
 from supervised.evaluation.sliding_inference import iter_scene_predictions
+from supervised.evaluation.mask_postprocess import clean_mask
 
 
 def legacy_scene_blocks(model, dataset, loader, mean, std, normalized, device, amp):
@@ -60,20 +60,6 @@ def write_rows(path, rows):
             writer = csv.DictWriter(f, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
-
-
-def clean_mask(raw, valid, opening_radius=0, closing_radius=0):
-    """可选圆形开闭运算；邻域含无效像素的位置保持raw，不跨NoData补水。"""
-    result = raw.copy()
-    for radius, operation in ((opening_radius, ndimage.binary_opening),
-                              (closing_radius, ndimage.binary_closing)):
-        if radius:
-            y, x = np.ogrid[-radius:radius+1, -radius:radius+1]
-            footprint = x*x+y*y <= radius*radius
-            changed = operation(result, structure=footprint)
-            safe = ndimage.binary_erosion(valid, structure=footprint, iterations=2, border_value=0)
-            result[safe] = changed[safe]
-    return result & valid
 
 
 def apply_scene_morphology(raw_path, label_path, post_path, windows, radii, opening_radius, closing_radius):

@@ -2,7 +2,8 @@
 # 每次一个MODE：prepare首次导入；labels重建标签；split检查划分；inspect抽查格式；radiometry统计功率。
 # calibrate/filter/normalize各执行单阶段；preprocess按开关串联校正、滤波、归一化。
 # preprocess不包括prepare/labels/检查/快视图；quicklook只读取已有成果。
-# all：prepare → 按开关预处理 → quicklook；不执行split/inspect/radiometry/labels。
+# all：prepare → 按开关预处理并完成 VV 归一化 → dem → quicklook。
+# 已完成 VV 归一化时，可在本文件设置 MODE: dem，单独准备或续跑 DEM。
 # 使用已准备的合批整景，功率滤波与标准化写入独立目录。
 
 # 相对数据路径以DATA_ROOT为基准；软件和仓库路径保留绝对路径。
@@ -24,7 +25,7 @@ paths:
   QUICKLOOK_IMAGE_ROOT: prepared_scenes\images
   CALIBRATED_ROOT: processed_power\calibrated
   FILTERED_ROOT: processed_power\filtered
-  # MODE=dem 使用本地 GLO-30 瓦片，在归一化结果旁生成独立的 _vv_dem 目录。
+  # all 和 dem 共用此 GLO-30 瓦片目录；成果写入最终 VV 目录同级的 <目录名>_vv_dem。
   DEM_TILE_DIR: E:/Code_projects/sar_water_extraction/data_cache/auxiliary/tiles/copernicus
   NORMALIZED_ROOT: processed_power\normalized
   # null则由本批train重新统计；batch 2复用batch 1，保持多批输入尺度一致。
@@ -128,8 +129,10 @@ processing:
   FILTER_INPUT_STAGE: org
   # org/calibrated/filtered
   NORMALIZE_INPUT_STAGE: filtered
-  # zscore 使用训练统计；scene_p02_p98 将每景有效功率映射到 float32 [0,1]。
-  # 后者自动写入 NORMALIZED_ROOT 同级的 <原目录名>_p02_p98；复用滤波成果时选 MODE: normalize。
+  # zscore 使用训练统计；scene_p02_p98 在整景线性功率上求分位数，输出到 <原目录名>_p02_p98。
+  # scene_relative_db_p02_p98 复用 Lee 功率，对有效像元计算 10*log10(max(P,1e-6)/1)，
+  # 再按每景对数域 P02/P98 映射到 [0,1]，输出到 <原目录名>_relative_db_p02_p98。
+  # 仅做新归一化时选 MODE: normalize、NORMALIZE_INPUT_STAGE: filtered、NORMALIZATION_REFERENCE: null。
   NORMALIZATION_METHOD: zscore
   WINDOW_SIZE: 1024
   HALO: 128

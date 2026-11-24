@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(sar_geometry_core LANGUAGES CXX)
-add_executable(sar_geometry_core main.cpp geometry.cpp visibility.cpp)
+add_executable(sar_geometry_core main.cpp geometry.cpp visibility.cpp gc_map2_v57.cpp)
 target_compile_features(sar_geometry_core PRIVATE cxx_std_20)
 find_package(OpenMP REQUIRED)
 target_link_libraries(sar_geometry_core PRIVATE OpenMP::OpenMP_CXX)

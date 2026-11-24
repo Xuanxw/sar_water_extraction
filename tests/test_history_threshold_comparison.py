@@ -10,13 +10,21 @@ from unittest.mock import patch
 import numpy as np
 import rasterio
 import yaml
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from history_threshold_comparison import main
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.threshold.history_threshold_comparison import main, require_bottom_q10_percentile
 import test_org_pipeline as fixtures
 from thres_segmentation.org_pipeline import run_org_scenes
 
 
 class HistoryComparisonTests(unittest.TestCase):
+    def test_q10_baseline_accepts_legacy_and_rejects_other_operating_points(self):
+        baseline = dict(water_percent=10, mode='bottom')
+        require_bottom_q10_percentile(baseline)
+        require_bottom_q10_percentile(dict(baseline, method='percentile', otsu_bins=1024))
+        for changes in (dict(method='otsu'), dict(mode='top'), dict(water_percent=30)):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                require_bottom_q10_percentile(dict(baseline, **changes))
+
     def test_three_levels_parity_monotonicity_resume_and_source_preserved(self):
         with TemporaryDirectory() as temp:
             root = Path(temp)
@@ -51,7 +59,7 @@ class HistoryComparisonTests(unittest.TestCase):
                     self.assertTrue(np.all((masks[1]!=1)|(masks[2]==1)))
                     self.assertGreater(int((masks[2]==1).sum()),int((masks[0]==1).sum()))
                     self.assertEqual([r.split(',')[0] for r in ids[0][1:]], [r.split(',')[0] for r in ids[2][1:]])
-                with patch('history_threshold_comparison.segment',side_effect=AssertionError('should resume')):
+                with patch('scripts.threshold.history_threshold_comparison.segment',side_effect=AssertionError('should resume')):
                     main(path)
                 self.assertTrue(all(hashlib.sha256(p.read_bytes()).hexdigest()==value for p,value in originals.items()))
 

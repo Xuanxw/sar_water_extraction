@@ -9,7 +9,7 @@ from time import perf_counter
 
 import numpy as np
 
-ROOT = Path("E:/Code_projects/sar_water_extraction")
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "src"))  # 从 evaluation 直接运行时找到项目数据集与模型模块。
 
 import torch
@@ -106,7 +106,8 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
     else:
         from datasets.dfc_sample.s1_dataset import WaterDataset
         dataset = WaterDataset(image_dir, label_dir, bands, speckle=checkpoint.get('speckle'),
-                               patch_representation=checkpoint.get('patch_representation', 'stored'))
+                               patch_representation=checkpoint.get('patch_representation', 'stored'),
+                               relative_normalization=checkpoint.get('relative_normalization'))
         if use_saved_val:
             dataset.select_files(checkpoint['val_files'])
     batch_size = checkpoint["batch_size"] if batch_size is None else batch_size

@@ -7,8 +7,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import fiona
 from shapely.geometry import box, mapping, shape
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-import merge_water_shp as merge
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from scripts.products import merge_water_shp as merge
 
 class MergeAppendTests(unittest.TestCase):
     def test_append_and_resume(self):

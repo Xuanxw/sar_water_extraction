@@ -19,7 +19,7 @@ from thres_segmentation.product_layout import scene_product
 from utils.files import sha256
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('base_scan', ROOT / 'scripts/base_threshold_scan.py')
+spec = importlib.util.spec_from_file_location('base_scan', ROOT / 'scripts/threshold/base_threshold_scan.py')
 scan = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scan)
 

@@ -11,9 +11,9 @@ import numpy as np
 import rasterio
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
-                str(Path(__file__).resolve().parents[1] / "scripts")]
+                str(Path(__file__).resolve().parents[1])]
 from utils.files import sha256
-from prepare_train_val_split import assign_split, move_split, scan_samples, write_csv
+from scripts.data.prepare_train_val_split import assign_split, move_split, scan_samples, write_csv
 
 
 class DataSplitTests(unittest.TestCase):

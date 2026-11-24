@@ -117,6 +117,28 @@ def interpolate_hermite_orbit_states(executable, orbit, times):
     return call_geometry_core(executable, 'states', payload, len(times), 6)
 
 
+def scan_gc_map2_v57_shadow_layover(executable, angle, slant_range, direction):
+    """复现v5.7内部float32扫描，返回行×列的0/1/4/16/20字节。
+
+    angle、slant_range是已经重排到同一内部网格的二维角度场和斜距米；0为目标
+    内部缺测哨兵，NaN/Inf不支持。direction为该角度场的有向比较系数±1，不能
+    根据左右视猜填。本接口只还原扫描，不把现有剖面构造宣称为GAMMA的内部网格。
+    """
+    angle = np.asarray(angle, dtype='float32')
+    slant_range = np.asarray(slant_range, dtype='float32')
+    if angle.ndim != 2 or angle.shape != slant_range.shape or angle.shape[1] == 0:
+        raise ValueError('angle和slant_range必须是同尺寸的二维完整横向剖面')
+    if direction not in (-1, 1) or not np.isfinite(angle).all() or not np.isfinite(slant_range).all():
+        raise ValueError('扫描需要有限float32值及明确的direction=±1；0沿用内部缺测约定')
+    columns = angle.shape[1]
+    payload = (
+        struct.pack('<QQQd', 1, angle.size, columns, direction)
+        + angle.astype('<f8').tobytes()
+        + slant_range.astype('<f8').tobytes()
+    )
+    return call_geometry_core(executable, 'gamma57_scan', payload, angle.size, 1).reshape(angle.shape).astype('uint8')
+
+
 def compute_radar_shadow_layover_batch(executable, points, bounds, angle_epsilon=1e-10, range_epsilon=1e-6):
     """完整方位剖面批处理。points行×列×4，bounds行×3；输出行×列×2的0/1/255。"""
     profile_points = np.asarray(points, dtype='<f8')

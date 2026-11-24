@@ -121,7 +121,7 @@ def prepare_scene_dems(vv_root, tile_dir, cache_dir, window_size, halo):
     record = json.loads(upstream.read_text(encoding="utf-8"))
     if (record.get("stage") != "normalized" or not record.get("complete")
             or record.get("bc_org_domain") != "intensity" or record.get("input_domain") != "intensity"
-            or record.get("output_domain") not in ("standardized", "scene_p02_p98")
+            or record.get("output_domain") not in ("standardized", "scene_p02_p98", "scene_relative_db_p02_p98")
             or (source/".preprocessing_incomplete").exists()):
         raise ValueError(f"请先完成单 VV 功率域归一化：{source}")
     manifest_hash = sha256(manifest)

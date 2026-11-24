@@ -1,0 +1,32 @@
+# 步骤1：四网络最佳 F1 + PVT 第80轮；只扫描，不校准BN，不更新权重。
+paths:
+  DATA_ROOT: ../..
+  CHECKPOINTS:
+    pvt_best: outputs/s1/pvt_deeplabv3plus_vv_dem_trainnorm80/20261121_030233_181221/best_f1.pth
+    mobilenet_best: outputs/s1/mobilenetv2_unet_vv_dem_trainnorm80/20261121_095623_103277/best_f1.pth
+    unetpp_best: outputs/s1/s1water_unetpp_vv_dem_trainnorm80/20261121_162828_114746/best_f1.pth
+    unet_best: outputs/s1/s1water_unet_vv_dem_trainnorm80/20261120_163236_505541/best_f1.pth
+    pvt_last: outputs/s1/pvt_deeplabv3plus_vv_dem_trainnorm80/20261121_030233_181221/last.pth
+  OUTPUT_DIR: outputs/s1/review_trainnorm80/thresholds
+  IMAGE_DIR: null
+  LABEL_DIR: null
+run:
+  MODE: thresholds
+  EXPECTED_EPOCHS:
+    pvt_best: 59
+    mobilenet_best: 14
+    unetpp_best: 37
+    unet_best: 35
+    pvt_last: 80
+  DEVICE: cuda:0
+  CPU_THREADS: 2
+  NUM_WORKERS: 2
+  BATCH_SIZE: 2
+  CALIBRATION_SAMPLES: null
+  SEED: 42
+  LOG_EVERY: 25
+  MIN_PRECISION: 0.8
+  THRESHOLDS:
+    start: 0.01
+    stop: 0.99
+    step: 0.01

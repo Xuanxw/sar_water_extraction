@@ -56,8 +56,9 @@ data:
 
 # 网络组合及输出头见 docs/model_structure.md。
 model:
-  ARCHITECTURE: deeplabv3plus  # unet / semantic_fpn / uanet / uafnet / deeplabv3plus / sentinel1_water_unet
+  ARCHITECTURE: deeplabv3plus  # unet / unetpp / semantic_fpn / uanet / uafnet / deeplabv3plus / sentinel1_water_unet
   # sentinel1_water_unet 搭配 s1water_cnn 和 PRETRAINED: false，沿用 BC 单 VV 的训练设置。
+  # unetpp 同样搭配 s1water_cnn、PRETRAINED: false；六尺度嵌套跳连，单输出头。
   BACKBONE: pvt_v2_b2.in1k    # 例如 semantic_fpn 也支持 resnet50.tv_in1k
   # 从本地缓存的ImageNet权重初始化编码器；解码器重新初始化。
   PRETRAINED: true

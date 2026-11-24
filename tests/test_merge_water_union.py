@@ -8,8 +8,8 @@ from unittest.mock import patch
 import fiona
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-import merge_water_shp as merge
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from scripts.products import merge_water_shp as merge
 
 class MergeUnionTests(unittest.TestCase):
     def test_optional_union_and_cached_resume(self):

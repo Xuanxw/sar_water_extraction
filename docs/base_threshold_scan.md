@@ -25,7 +25,7 @@
 ## 执行
 
 ```powershell
-python scripts/base_threshold_scan.py <新的功率输入扫描配置.yaml>
+python scripts/threshold/base_threshold_scan.py <新的功率输入扫描配置.yaml>
 ```
 
 历史配置只处理上述主要覆盖景，扫描Q30/40/50/60/70/80/90。清空`scene_ids: []`可处理所选日期的所有已完成场景；也可修改日期和分位数。改变参数时使用新的输出及缓存目录。

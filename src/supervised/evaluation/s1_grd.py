@@ -10,6 +10,7 @@ from rasterio.enums import MaskFlags
 from rasterio.windows import Window
 
 from datasets.copernicus_dem import aligned_dem_tiles, read_elevation
+from datasets.relative_normalization import RELATIVE_REPRESENTATIONS
 from datasets.dfc_sample.s1_dataset import relative_backscatter_ranks, vv_rank_dem_m
 from supervised.evaluation.sliding_inference import iter_scene_predictions
 from utils.raster import windows
@@ -24,6 +25,9 @@ def predict_grd_scene(model, source, destination, *, mean, std, patch_representa
     识别极化。VV、VH 同时精确为 0 dB 是该批数据确认的未覆盖编码。
     DEM 模式保留米值至训练统计量标准化。重叠窗按高斯权重融合 logits 再阈值化。
     """
+    if patch_representation in RELATIVE_REPRESENTATIONS:
+        raise ValueError("训练集 P02/P98 参数属于 DFC 存储值，不能直接应用于 Sigma0 dB 整景；"
+                         "须先核实两者的数值映射，不能回退到逐窗秩归一化。")
     mixed = patch_representation == "vv_rank_dem_m"
     if mixed:
         if tuple(bands) != (1, 4) or dem_path is None:

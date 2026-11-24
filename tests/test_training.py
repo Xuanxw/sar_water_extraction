@@ -13,15 +13,15 @@ from supervised import train
 # 测试显式加载样例配置，正式脚本仅使用命令行提供的文件。
 train.configure(Path(__file__).resolve().parents[1] / 'configs/train.yaml')
 class TrainingSelectionTests(unittest.TestCase):
-    def test_bc_s1water_preset_matches_pvt_training_protocol(self):
-        configs = Path(__file__).resolve().parents[1] / "configs"
-        default = configs / "train.yaml"
-        self.addCleanup(train.configure, default)
+    def test_bc_s1water_selection_preserves_pvt_training_protocol(self):
+        default = Path(__file__).resolve().parents[1] / "configs/train.yaml"
+        train.configure(default)
         presets = []
-        for path in (default, configs / "168/train_s1water_bc.yaml"):
-            train.configure(path)
-            # 只核对交给训练器的配方，测试不需要挂载服务器上的整景数据。
-            with patch.object(train, "WaterSegmentationTrainer") as factory:
+        for architecture, backbone, pretrained in (("deeplabv3plus", train.BACKBONE, True),
+                                                    ("sentinel1_water_unet", "s1water_cnn", False)):
+            with patch.multiple(train, ARCHITECTURE=architecture, BACKBONE=backbone,
+                                PRETRAINED=pretrained, OUTPUT_DIR=None), \
+                    patch.object(train, "WaterSegmentationTrainer") as factory:
                 train.create_trainer()
             presets.append(factory.call_args.kwargs)
 
@@ -32,16 +32,8 @@ class TrainingSelectionTests(unittest.TestCase):
         self.assertFalse(s1["model_info"]["pretrained"])
         self.assertIsNone(s1["resume_checkpoint"])
         self.assertNotEqual(pvt["output_dir"].name, s1["output_dir"].name)
-        for options in presets:
-            for key in ("image_dir", "label_dir"):
-                options[key] = options[key].parts[-3:]
-            windows = options["scene_options"].copy()
-            windows["manifest_paths"] = [p.parts[-3:] for p in windows["manifest_paths"]]
-            windows["cache_dir"] = str(windows["cache_dir"]).replace("\\", "/").split("/")[-2:]
-            options["scene_options"] = windows
         different = {key for key in pvt if pvt[key] != s1[key]}
         self.assertEqual(different, {"model_class", "model_kwargs", "model_info", "output_dir"})
-
 
     def test_yaml_selection_and_old_server_config(self):
         default = Path(__file__).resolve().parents[1] / "configs/train.yaml"

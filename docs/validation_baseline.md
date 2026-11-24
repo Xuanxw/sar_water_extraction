@@ -98,7 +98,7 @@ name 必须与输入目录相对文件名完全一致，并覆盖全部待评估
 
 ## 模型与传统阈值：统一评价协议
 
-运行 `python scripts/compare_threshold.py`。默认对比固定 Residual 模型与 VV、VH 各自的 Lee + 第10百分位暗水体分割，不应用土地覆盖补水，不用标签挑水体百分比，也不从两个波段结果中自动挑最好者。
+运行 `python src/compare_threshold.py`。默认对比固定 Residual 模型与 VV、VH 各自的 Lee + 第10百分位暗水体分割，不应用土地覆盖补水，不用标签挑水体百分比，也不从两个波段结果中自动挑最好者。
 
 对比使用检查点内的 `val_files`，其影像物理位置仍为 `data/Track1/train/images`，标签位于同名 labels 目录。这些图是从有标签池留出的内部验证子集，不是梯度训练使用的 `train_files`。官方 `data/Track1/val/images` 缺少参考标签，不能因文件夹名为 val 就在本地计算 F1/IoU。比赛官网明确 validation/test 不随影像提供参考标签，并以 F1 进行服务器评估：[DFC2024 官方说明](https://www.grss-ieee.org/community/technical-committees/2024-ieee-grss-data-fusion-contest/)。
 
@@ -128,4 +128,4 @@ $$
 当前脚本的区域 Bootstrap 是固定模型的区域抽样不确定性，不包含重新训练的随机性。CI不能修复训练重复、标签误差或反复调参偏差；近邻patch与像素也不能直接当独立样本以获得看似很窄的区间。场景类别“农田/城市”是分组分析标签，不是独立地理区域编号。
 
 
-阈值对照入口现已固定当前分组清单：运行 `scripts/compare_threshold.py` 前填写新 grouped 检查点，程序核对清单与名单后只评价物理 val 中的287张 active 图。`src/thres_segmentation/main.py` 也已按相同清单过滤，可先独立运行传统分割。
+阈值对照入口现已固定当前分组清单：运行 `src/compare_threshold.py` 前填写新 grouped 检查点，程序核对清单与名单后只评价物理 val 中的287张 active 图。`src/thres_segmentation/main.py` 也已按相同清单过滤，可先独立运行传统分割。

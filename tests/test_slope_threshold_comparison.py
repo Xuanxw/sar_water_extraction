@@ -12,8 +12,8 @@ import numpy as np
 import rasterio
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-import slope_threshold_comparison as experiment
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.threshold import slope_threshold_comparison as experiment
 import test_org_pipeline as fixtures
 from thres_segmentation.org_pipeline import run_org_scenes, statistics, segment
 from thres_segmentation.org_io import prepare_auxiliary, read_aoi

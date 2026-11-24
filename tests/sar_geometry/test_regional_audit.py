@@ -9,8 +9,8 @@ import rasterio
 from rasterio.transform import from_origin
 
 ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'src'));sys.path.insert(0,str(ROOT/'scripts'))
-from audit_terrain_disagreements import trace_sar_line_of_sight
+sys.path.insert(0,str(ROOT/'src'));sys.path.insert(0,str(ROOT))
+from scripts.terrain.audit_terrain_disagreements import trace_sar_line_of_sight
 from thres_segmentation.profile_terrain import align_profile_masks
 from thres_segmentation.org_pipeline import segment
 from configuration import load_yaml

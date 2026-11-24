@@ -1,5 +1,7 @@
 """将 SAR 栅格和同名标签读取为 PyTorch 张量。"""
 from pathlib import Path
+from numbers import Integral
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import rasterio
@@ -8,6 +10,11 @@ from torch.utils.data import DataLoader, Dataset
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from datasets.speckle import SpeckleFilter, read_filtered_window
+from datasets.relative_normalization import (
+    LOG_REPRESENTATION, RELATIVE_REPRESENTATIONS, apply_vv_train_p02_p98_dem_m,
+    relative_log10_power, relative_normalization_protocol, training_files_signature, validate_relative_normalization,
+)
+from utils.raster import file_percentiles
 
 # 直接修改这里的变量，然后运行 python src/supervised/datasets/water_dataset.py。
 DATA_ROOT = Path("E:/Code_projects/sar_water_extraction/data")
@@ -83,15 +90,19 @@ class WaterDataset(Dataset):
     默认读取原始存储值；relative_backscatter_ranks 按有效像元计算逐波段中秩。标签编码原样读取。
     """
 
-    def __init__(self, image_dir, label_dir=None, bands=None, speckle=None, patch_representation="stored"):
+    def __init__(self, image_dir, label_dir=None, bands=None, speckle=None, patch_representation="stored",
+                 relative_normalization=None):
         """建立文件列表；标签按相对路径和不含扩展名的文件名配对。"""
-        if patch_representation not in ("stored", "relative_backscatter_ranks", "vv_rank_dem_m"):
+        if patch_representation not in ("stored", "relative_backscatter_ranks", "vv_rank_dem_m", *RELATIVE_REPRESENTATIONS):
             raise ValueError(f"未知切片输入表示：{patch_representation}")
         self.patch_representation = patch_representation
-        self.image_dir = Path(image_dir)
         self.bands = bands
+        self.relative_normalization = None
+        if relative_normalization is not None:
+            self.set_relative_normalization(relative_normalization)
+        self.image_dir = Path(image_dir)
         self.speckle_filter = SpeckleFilter(speckle)
-        if patch_representation == "vv_rank_dem_m":
+        if patch_representation in ("vv_rank_dem_m", *RELATIVE_REPRESENTATIONS):
             if bands is None or len(bands) != 2 or bands[0] == bands[1]:
                 raise ValueError("VV + DEM 需要两个不同的文件波段，依次为 VV 和 DEM")
             if self.speckle_filter.config is not None:
@@ -118,23 +129,89 @@ class WaterDataset(Dataset):
         """返回影像数量，供 DataLoader 确定迭代长度。"""
         return len(self.image_paths)
 
-    def __getitem__(self, index):
-        """读取一个样本；坏文件或缺失标签直接保留库的异常，方便定位。"""
+    def read_image(self, index):
+        """只读原始所选通道和共同有效域；DEM 转成米值，不读标签或执行 VV 变换。"""
         image_path = self.image_paths[index]
         with rasterio.open(image_path) as src:
             from rasterio.windows import Window
             image, valid = read_filtered_window(src, self.bands, Window(0, 0, src.width, src.height), self.speckle_filter)
-            if self.patch_representation == "vv_rank_dem_m":
+            if self.patch_representation in ("vv_rank_dem_m", *RELATIVE_REPRESENTATIONS):
                 dem_index = self.bands[1] - 1
                 image[1] = image[1] * src.scales[dem_index] + src.offsets[dem_index]
+        return image, valid
+
+    def normalization_training_signature(self, indices):
+        """按相对文件名计算训练子集签名；与读取顺序和数据根目录无关。"""
+        indices = list(indices)
+        if not indices or any(isinstance(i, bool) or not isinstance(i, Integral) or not 0 <= i < len(self) for i in indices):
+            raise ValueError("拟合归一化需要非空、有效的训练索引")
+        if len(set(indices)) != len(indices):
+            raise ValueError("拟合归一化的训练索引不能重复")
+        names = [sample_name(self.image_paths[i], self.image_dir) for i in indices]
+        return training_files_signature(names, self.bands)
+
+    def set_relative_normalization(self, parameters, indices=None):
+        """恢复固定参数；提供训练索引时核验来源，续跑不得静默重新估计。"""
+        if self.patch_representation not in RELATIVE_REPRESENTATIONS:
+            raise ValueError("只有训练集共享分位数表示使用此归一化参数")
+        parameters = validate_relative_normalization(parameters, self.patch_representation)
+        current_bands = tuple(self.bands) if self.bands is not None else ()
+        if tuple(parameters["bands"]) != current_bands:
+            raise ValueError("归一化参数的 VV/DEM 波段顺序与当前输入不同")
+        if indices is not None:
+            signature = self.normalization_training_signature(indices)
+            if any(parameters[key] != value for key, value in signature.items()):
+                raise ValueError("归一化参数的训练文件划分与当前实验不同")
+        self.relative_normalization = parameters
+        return parameters
+
+    def fit_relative_normalization(self, indices):
+        """用训练索引内全部共同有效 VV 像元拟合 P02/P98；不读取或使用标签。
+
+        各块原始 VV 的 float32 值写入临时文件；对数方案在秩相邻值变换后插值，
+        内存只保留当前块；验证块和 DEM 数值不进入分位数统计，DEM 掩膜参与有效域。
+        """
+        if self.patch_representation not in RELATIVE_REPRESENTATIONS:
+            raise ValueError("只有训练集共享分位数表示需要拟合训练分位数")
+        log_input = self.patch_representation == LOG_REPRESENTATION
+        indices = list(indices)
+        signature = self.normalization_training_signature(indices)
+        count = 0
+        with TemporaryDirectory(prefix="sar_vv_percentiles_") as directory:
+            path = Path(directory) / "vv.float32"
+            with path.open("wb") as stream:
+                for position, index in enumerate(indices, 1):
+                    image, valid = self.read_image(index)
+                    if not np.isfinite(image[:, valid]).all():
+                        raise ValueError(f"有效 VV/DEM 含非有限值：{self.image_paths[index]}")
+                    values = np.asarray(image[0, valid], dtype=np.float32)
+                    if log_input and np.any(values < 0):
+                        raise ValueError(f"对数输入要求有效 VV 存储值非负：{self.image_paths[index]}")
+                    values.tofile(stream)
+                    count += values.size
+                    if position == 1 or position % 100 == 0 or position == len(indices):
+                        print(f"训练集 VV 分位数：{position}/{len(indices)} 块，累计 {count:,} 个有效像元", flush=True)
+            if count == 0:
+                raise ValueError("训练集没有共同有效的 VV/DEM 像元，无法拟合分位数")
+            transform = relative_log10_power if log_input else None
+            lower, upper = file_percentiles(path, count, [2, 98], transform=transform)
+        parameters = relative_normalization_protocol(self.patch_representation)
+        parameters.update(p02=float(lower), p98=float(upper), fit_pixels=count, **signature)
+        return self.set_relative_normalization(parameters, indices)
+
+    def __getitem__(self, index):
+        """读取一个样本；坏文件或缺失标签直接保留库的异常，方便定位。"""
+        image, valid = self.read_image(index)
         if self.patch_representation == "vv_rank_dem_m":
             image = vv_rank_dem_m(image, valid)
+        elif self.patch_representation in RELATIVE_REPRESENTATIONS:
+            image = apply_vv_train_p02_p98_dem_m(image, valid, self.relative_normalization)
         elif self.patch_representation == "relative_backscatter_ranks":
             image = relative_backscatter_ranks(image, valid)
         sample = {
             "image": torch.from_numpy(image),
             "valid_mask": torch.from_numpy(valid),
-            "name": sample_name(image_path, self.image_dir),
+            "name": sample_name(self.image_paths[index], self.image_dir),
         }
 
         if self.label_paths is not None:

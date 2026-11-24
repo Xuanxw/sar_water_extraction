@@ -14,6 +14,7 @@ from scipy import ndimage
 from shapely.geometry import shape, mapping, Polygon
 from shapely import make_valid, transform as transform_geometry
 from pyproj import Transformer
+from utils.water_vectors import polygon_parts
 
 DEFAULTS=dict(hole_max_pixels=200,morph_kernel_size=3,min_water_pixels=200,smooth_iterations=2)
 BLOCK_ROWS=256
@@ -86,13 +87,6 @@ def smooth_polygon(polygon,tolerance,iterations):
     result=Polygon(ring(simple.exterior.coords),[ring(h.coords) for h in simple.interiors])
     if result.is_empty or not result.is_valid:return simple,True
     return result,False
-
-
-def polygon_parts(geom):
-    if geom.geom_type=='Polygon':
-        if not geom.is_empty:yield geom
-    elif hasattr(geom,'geoms'):
-        for part in geom.geoms:yield from polygon_parts(part)
 
 
 def build_water_polygons(mask_path,destination,*,options=None,cover_path=None,slope_path=None,terrain_path=None,

@@ -41,6 +41,7 @@ import torch
 # 支持按文件路径直接执行。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from datasets import snap_preprocess
+from datasets.relative_normalization import LOG_POWER_FLOOR, relative_log10_power
 from datasets.speckle import SpeckleFilter
 from datasets.manifest_paths import source_path, relative_source, manifest_fingerprint, write_relative_manifest
 from supervised.load.sar_scene_dataset import SARSceneDataset
@@ -49,6 +50,17 @@ from utils.raster import file_percentiles, windows
 # 参数统一在YAML维护；以下只将配置绑定到现有函数使用的变量。
 from configuration import load_yaml, config_argument
 CONFIG_PATH = CONFIG = None
+
+# zscore 保留原目录；两种整景 P02/P98 的影像、清单与预览各自独立。
+SCENE_NORMALIZATION_SUFFIX = {
+    "scene_p02_p98": "_p02_p98",
+    "scene_relative_db_p02_p98": "_relative_db_p02_p98",
+}
+RELATIVE_DB_TAGS = {
+    "percentile_domain": "relative_power_db",
+    "reference_power": 1.0,
+    "power_floor": LOG_POWER_FLOOR,
+}
 
 
 def configure(config_path):
@@ -66,11 +78,13 @@ def configure(config_path):
     CONFIG = load_yaml(CONFIG_PATH)
 
     MODE = CONFIG["run"]["MODE"]
+    NORMALIZED_ROOT = CONFIG["paths"]["NORMALIZED_ROOT"]
+    NORMALIZATION_METHOD = CONFIG["processing"].get("NORMALIZATION_METHOD", "zscore")
+    if NORMALIZATION_METHOD not in ("zscore", *SCENE_NORMALIZATION_SUFFIX):
+        raise ValueError("NORMALIZATION_METHOD 可选 zscore、scene_p02_p98 或 scene_relative_db_p02_p98")
+    if MODE in ('dem', 'all') and CONFIG["paths"].get("DEM_TILE_DIR") is None:
+        raise ValueError(f"MODE={MODE} 需要在 paths.DEM_TILE_DIR 指定本地 Copernicus GLO-30 瓦片目录")
     if MODE == 'dem':
-        NORMALIZED_ROOT = CONFIG["paths"]["NORMALIZED_ROOT"]
-        NORMALIZATION_METHOD = CONFIG["processing"]["NORMALIZATION_METHOD"]
-        if NORMALIZATION_METHOD not in ("zscore", "scene_p02_p98"):
-            raise ValueError("DEM 输入需选择已完成的 zscore 或 scene_p02_p98 成果")
         return
     SPLIT_CSV = CONFIG["paths"]["SPLIT_CSV"]
     PREPARE_BATCH = CONFIG["run"]["PREPARE_BATCH"]
@@ -105,7 +119,6 @@ def configure(config_path):
     LABEL_RULE = CONFIG["labels"]["LABEL_RULE"]
     CALIBRATED_ROOT = CONFIG["paths"]["CALIBRATED_ROOT"]
     FILTERED_ROOT = CONFIG["paths"]["FILTERED_ROOT"]
-    NORMALIZED_ROOT = CONFIG["paths"]["NORMALIZED_ROOT"]
     NORMALIZATION_REFERENCE = CONFIG["paths"].get("NORMALIZATION_REFERENCE")
     WINDOW_CACHE_DIR = CONFIG["paths"]["WINDOW_CACHE_DIR"]
     SNAP_GPT_PATH = CONFIG["paths"]["SNAP_GPT_PATH"]
@@ -125,9 +138,6 @@ def configure(config_path):
     ENL = CONFIG["processing"]["ENL"]
     FILTER_INPUT_STAGE = CONFIG["processing"]["FILTER_INPUT_STAGE"]
     NORMALIZE_INPUT_STAGE = CONFIG["processing"]["NORMALIZE_INPUT_STAGE"]
-    NORMALIZATION_METHOD = CONFIG["processing"].get("NORMALIZATION_METHOD", "zscore")
-    if NORMALIZATION_METHOD not in ("zscore", "scene_p02_p98"):
-        raise ValueError("NORMALIZATION_METHOD 可选 zscore 或 scene_p02_p98")
     WINDOW_SIZE = CONFIG["processing"]["WINDOW_SIZE"]
     HALO = CONFIG["processing"]["HALO"]
     NORMALIZATION_WINDOWS = CONFIG["processing"]["NORMALIZATION_WINDOWS"]
@@ -864,9 +874,8 @@ def file_stamp(path):
 
 def stage_root(stage):
     if stage == 'normalized':
-        if NORMALIZATION_METHOD == 'scene_p02_p98':
-            return NORMALIZED_ROOT.with_name(NORMALIZED_ROOT.name + '_p02_p98')
-        return NORMALIZED_ROOT
+        suffix = SCENE_NORMALIZATION_SUFFIX.get(NORMALIZATION_METHOD, '')
+        return NORMALIZED_ROOT.with_name(NORMALIZED_ROOT.name + suffix)
     return {'org': OUTPUT_DIR, 'calibrated': CALIBRATED_ROOT,
             'filtered': FILTERED_ROOT, 'normalized': NORMALIZED_ROOT}[stage]
 
@@ -876,8 +885,8 @@ def stage_record(folder):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
 
 
-def scene_power_limits(src, bands, temporary):
-    """扫描整景共同有效的功率像素，逐波段求 P02/P98，不使用标签或训练集统计。"""
+def scene_power_limits(src, bands, temporary, *, relative_db=False):
+    """扫描整景共同有效的功率像素，逐波段在线性功率或相对 dB 上求 P02/P98。"""
     paths = [temporary / f'power_{i}.bin' for i in range(len(bands))]
     count = 0
     with ExitStack() as stack:
@@ -887,9 +896,13 @@ def scene_power_limits(src, bands, temporary):
             valid = ~np.ma.getmaskarray(raw).any(axis=0) & np.isfinite(raw.data).all(axis=0)
             count += np.count_nonzero(valid)
             for band, stream in zip(raw.data, streams):
-                band[valid].tofile(stream)
+                powers = band[valid]
+                if relative_db and np.any(powers < 0):
+                    raise ValueError(f'相对 dB 输入的有效线性功率出现负值：{src.name}')
+                powers.tofile(stream)
     # 全无效时发布同网格 NoData 影像，标签不会使无观测像元变成有效输入。
-    limits = [file_percentiles(path, count, (2, 98)) if count else (np.nan, np.nan)
+    transform = relative_log10_power if relative_db else None
+    limits = [file_percentiles(path, count, (2, 98), transform=transform) if count else (np.nan, np.nan)
               for path in paths]
     for path in paths:
         path.unlink()
@@ -906,10 +919,11 @@ def write_normalized_scene(source, pending, bands, mean, std):
     with TemporaryDirectory(prefix='normalize_', dir=NORMALIZE_WORK_DIR) as temporary:
         local = Path(temporary)/'normalized.tif'
         with rasterio.open(source) as src:
-            relative = NORMALIZATION_METHOD == 'scene_p02_p98'
+            relative = NORMALIZATION_METHOD in SCENE_NORMALIZATION_SUFFIX
+            relative_db = NORMALIZATION_METHOD == 'scene_relative_db_p02_p98'
             if relative:
                 started = time.perf_counter()
-                (low, high), count = scene_power_limits(src, bands, Path(temporary))
+                (low, high), count = scene_power_limits(src, bands, Path(temporary), relative_db=relative_db)
                 timings['percentile_seconds'] = time.perf_counter() - started
                 # P02=P98 时只区分高于该值的像元；常数景所有有效像元为 0。
                 offset = low[:, None, None]
@@ -933,17 +947,23 @@ def write_normalized_scene(source, pending, bands, mean, std):
                         valid=~np.ma.getmaskarray(raw).any(axis=0)&np.isfinite(raw.data).all(axis=0)
                         if np.any(raw.data[:, valid] < 0):
                             raise ValueError(f'标准化前的有效线性功率出现负值：{source}')
-                        values=(raw.data-offset)/divisor
+                        data = raw.data
+                        if relative_db:
+                            # 掩膜外的填充值不参与对数；有效零保留原掩膜，按固定下限转换。
+                            data = relative_log10_power(np.where(valid, data, 0.0))
+                        values=(data-offset)/divisor
                         if relative:
-                            values=np.where(scale == 0, raw.data > offset, np.clip(values, 0, 1))
+                            values=np.where(scale == 0, data > offset, np.clip(values, 0, 1))
                         values=np.where(valid[None],values,np.nan).astype('float32')
                         timings['calculate_seconds']+=time.perf_counter()-started
                         started=time.perf_counter()
                         dst.write(values,window=win)
                         timings['write_compress_seconds']+=time.perf_counter()-started
                 dst.update_tags(input_stage='normalized', input_domain='intensity', source=str(source),
-                                output_domain='scene_p02_p98' if relative else 'standardized',
+                                output_domain=NORMALIZATION_METHOD if relative else 'standardized',
                                 statistics='scene_valid_pixels' if relative else 'train_only')
+                if relative_db:
+                    dst.update_tags(**RELATIVE_DB_TAGS)
                 if relative:
                     dst.update_tags(valid_pixels=count)
                     for i, (p02, p98) in enumerate(zip(low, high), 1):
@@ -1012,12 +1032,16 @@ def process_scene_rows(rows, workers, process_one):
 
 
 def process_stage(stage):
-    if stage != 'filtered':
+    if stage == 'filtered':
+        lock_name = '.filter_stage.lock'
+    elif stage == 'normalized' and NORMALIZATION_METHOD == 'scene_relative_db_p02_p98':
+        lock_name = '.normalize_stage.lock'
+    else:
         return _process_stage(stage)
     target = stage_root(stage)
     target.mkdir(parents=True, exist_ok=True)
     # 同一正式目录只允许一个入口更新批级进度和完成标记。
-    with FileLock(str(target/'.filter_stage.lock'), timeout=0):
+    with FileLock(str(target/lock_name), timeout=0):
         return _process_stage(stage)
 
 
@@ -1077,14 +1101,21 @@ def _process_stage(stage):
                       calibration_reference=CALIBRATION_REFERENCE if stage == 'calibrated' else parent.get('calibration_reference',''),
                       calibration_command=CALIBRATION_COMMAND if stage == 'calibrated' else None)
     mean = std = None
-    relative = stage == 'normalized' and NORMALIZATION_METHOD == 'scene_p02_p98'
+    relative = stage == 'normalized' and NORMALIZATION_METHOD in SCENE_NORMALIZATION_SUFFIX
     if stage == 'normalized' and previous and previous.get('output_domain') != (
-            'scene_p02_p98' if relative else 'standardized'):
+            NORMALIZATION_METHOD if relative else 'standardized'):
         raise ValueError(f'已有另一种归一化结果，请检查输出目录：{target}')
     if relative:
         if NORMALIZATION_REFERENCE is not None:
             raise ValueError('整景 P02/P98 使用本景功率，请将 NORMALIZATION_REFERENCE 设为 null')
-        parameters.update(output_domain='scene_p02_p98', statistics_protocol='per_scene_valid_pixels',
+        if NORMALIZATION_METHOD == 'scene_relative_db_p02_p98':
+            parent_filter = parent.get('filter') or {}
+            if (NORMALIZE_INPUT_STAGE != 'filtered' or parent.get('stage') != 'filtered'
+                    or parent_filter.get('method') != 'snap_lee' or parent_filter.get('input_domain') != 'intensity'
+                    or parent.get('bands') != list(BANDS)):
+                raise ValueError('相对 dB 对照需要与当前波段一致的 Lee 线性功率成果，并设置 NORMALIZE_INPUT_STAGE: filtered')
+            parameters.update(RELATIVE_DB_TAGS)
+        parameters.update(output_domain=NORMALIZATION_METHOD, statistics_protocol='per_scene_valid_pixels',
                           percentiles=[2, 98], output_range=[0, 1], upstream=parent)
     elif stage == 'normalized':
         if NORMALIZATION_REFERENCE is not None:
@@ -1235,7 +1266,7 @@ def _process_stage(stage):
 
 def export_scene(path):
     """按已有成果输出原图/校正/滤波/归一化概览；缺失阶段明确标注。"""
-    output = path.parent / ('quicklooks_p02_p98' if NORMALIZATION_METHOD == 'scene_p02_p98' else 'quicklooks')
+    output = path.parent / ('quicklooks' + SCENE_NORMALIZATION_SUFFIX.get(NORMALIZATION_METHOD, ''))
     output.mkdir(exist_ok=True)
     figure = output / (path.stem + '.quick_overview.png')
     metadata = figure.with_suffix('.json')
@@ -1263,10 +1294,12 @@ def export_scene(path):
             width,height = src.width,src.height
         valid = counts > 0
         if stage == 'normalized':
-            relative = record.get('output_domain') == 'scene_p02_p98'
+            relative = record.get('output_domain') in SCENE_NORMALIZATION_SUFFIX
             limits = (0, 1) if relative else Z_DISPLAY_RANGE
             gray = display_bytes(values, valid, *limits)
             display = 'scene P02-P98 [0,1]' if relative else f'fixed z range {limits}'
+            if record.get('output_domain') == 'scene_relative_db_p02_p98':
+                display = 'relative power dB; scene P02-P98 [0,1]'
         elif record.get('quantity') in ('sigma0','beta0','gamma0'):
             positive = valid & (values > 0)
             db = 10 * np.log10(np.maximum(values,1e-30))
@@ -1319,24 +1352,29 @@ def export_quicklooks():
             errors.append(dict(image=str(path),error=str(error)))
             print(f'快视图失败 {path.name}：{error}',flush=True)
     for split in SPLITS:
-        folder=QUICKLOOK_IMAGE_ROOT/split/('quicklooks_p02_p98' if NORMALIZATION_METHOD == 'scene_p02_p98' else 'quicklooks')
+        folder = QUICKLOOK_IMAGE_ROOT / split / ('quicklooks' + SCENE_NORMALIZATION_SUFFIX.get(NORMALIZATION_METHOD, ''))
         folder.mkdir(exist_ok=True)
         save_record(folder/'overview_status.json',dict(complete=not errors,expected=len(files),errors=errors))
     print(f'快视图完成：成功{len(files)-len(errors)}/{len(files)}',flush=True)
 
 
+def prepare_dem_stage():
+    """按最终归一化 VV 网格准备米制高程，单阶段和全流程共用相同的输入与清单。"""
+    from datasets.scene_dem import prepare_scene_dems
+    paths, processing = CONFIG["paths"], CONFIG["processing"]
+    prepare_scene_dems(stage_root("normalized"), paths["DEM_TILE_DIR"], paths["WINDOW_CACHE_DIR"],
+                       processing["WINDOW_SIZE"], processing["HALO"])
+
+
 def main(config_path=None):
-    """按显式YAML执行；all串联准备、预处理和快视图。"""
+    """按 YAML 执行；all 依次准备整景、预处理 VV、准备 DEM、导出快视图。"""
     if config_path is not None:
         configure(config_path)
     if CONFIG is None:
         raise ValueError("请传入YAML路径，或先调用configure(config_path)")
     print(f"影像处理配置：{CONFIG_PATH}；模式：{MODE}", flush=True)
     if MODE == 'dem':
-        from datasets.scene_dem import prepare_scene_dems
-        paths, processing = CONFIG["paths"], CONFIG["processing"]
-        prepare_scene_dems(stage_root("normalized"), paths["DEM_TILE_DIR"], paths["WINDOW_CACHE_DIR"],
-                           processing["WINDOW_SIZE"], processing["HALO"])
+        prepare_dem_stage()
     elif MODE == 'labels':
         prepare_labels(OUTPUT_DIR, READ_WINDOW_SIZE)
     elif MODE in ('prepare','split','inspect'):
@@ -1359,13 +1397,14 @@ def main(config_path=None):
         if MODE == 'all':
             prepare_dataset(mode='prepare', reuse_complete=True)
             if not (OUTPUT_DIR/'split_manifest.csv').is_file():
-                raise RuntimeError('prepare尚未全部完成，保留续跑记录；本次不执行预处理和快视图')
+                raise RuntimeError('prepare尚未全部完成，保留续跑记录，请重跑 all')
         if ENABLE_CALIBRATION:
             process_stage('calibrated')
         if ENABLE_FILTER:
             process_stage('filtered')
         process_stage('normalized')
         if MODE == 'all':
+            prepare_dem_stage()
             export_quicklooks()
     elif MODE == 'quicklook':
         export_quicklooks()

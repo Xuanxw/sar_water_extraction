@@ -22,17 +22,18 @@ python E:\Code_projects\sar_water_extraction\src\supervised\train.py E:\Code_pro
 
 ### YAML 使用约定
 
-在仓库根目录启动，不同服务器直接选择自己的配置文件：
+在仓库根目录运行时，把配置路径作为第一个参数。168 的专用 YAML 保存在本地 `configs/168/`，由使用者上传到服务器。以下示例使用仓库通用配置。
 
 ```bash
-python src/datasets/image_process.py configs/168/image_process.yaml
-python src/supervised/train.py configs/168/train.yaml
+python src/datasets/image_process.py configs/image_process.yaml
+python src/supervised/train.py configs/train.yaml
 python src/supervised/post_process.py configs/post_process.yaml
+python src/supervised/predict.py configs/predict.yaml
 python src/thres_segmentation/main.py configs/threshold_segmentation.yaml
 python src/sar_geometry/main.py configs/sar_geometry.yaml
 ```
 
-`scripts/export_water_polygons.py`、`repair_gui_terrain.py`、`preview_org_coverage.py`、`history_threshold_comparison.py`、`slope_threshold_comparison.py`、`compare_gui_terrain_direction.py`同样要求第一个参数为对应YAML。`src/sar_geometry/validate_scene.py`可再接第二份YAML，作为已有粗采样成果的对照。
+面导出、覆盖快视图、阈值和地形对照等工具的入口见[脚本索引](scripts/README.md)。这些工具以对应 YAML 为第一个参数。`src/sar_geometry/validate_scene.py` 可再接第二份 YAML，用于比较已有粗采样成果。
 
 从Python调用时使用`main(config_path)`；需要单独调用预处理任务或训练工厂时，先显式调用该模块的`configure(config_path)`。未使用YAML的独立工具仍保持原入口。
 
@@ -43,6 +44,7 @@ python src/sar_geometry/main.py configs/sar_geometry.yaml
 
 - `train.yaml`：管理训练数据、续跑、模型和训练验证图件。
 - `post_process.yaml`：独立管理待评估检查点、后处理输出目录、阈值扫描和修正参数。
+- `predict.yaml`：无标签新影像的整景推理，填写检查点、影像文件或目录及输出目录；不需要训练清单或标签。
 - `image_process.yaml`：`paths` 管理源数据和各阶段目录；`run.MODE` 每次选一个任务；`processing` 管理滤波和归一化；`snap` 管理 GPT 线程、内存及成功后的缓存清理。
 - YAML 中使用 `null`、`true`、`false`，列表写成 `[1]` 或多行 `-`；不填写 Python 的 `Path(...)`、`None` 或元组语法。Windows 路径可不加引号或用单引号，避免双引号解析反斜杠。
 - 配置文件路径由命令行显式提供，相对路径以终端当前目录为准；从其他目录启动时可填写绝对路径。YAML 内部的数据路径解析规则保持不变。修改 YAML 后重新启动才生效，已运行的进程不会重新加载参数。
@@ -58,22 +60,39 @@ sar_water_extraction/
 │   ├── supervised/
 │   │   ├── train.py                   # 训练及本轮val质量图
 │   │   ├── post_process.py            # 独立模型推理、后处理和质量输出
+│   │   ├── predict.py                 # 无标签整景推理、水体面矢量与质量JSON
 │   │   ├── validation.py              # 固定模型验证与质量报告
 │   │   ├── models/                    # 模型、损失、检查点重建
 │   │   ├── evaluation/                # 指标、边界、后处理、阈值扫描
 │   │   └── experimental/              # MobileNetV2 + U-Net对照
 │   ├── datasets/                     # 读取、检查、BC数据准备与标签修订
-│   └── thres_segmentation/            # 独立传统阈值分割与GUI
+│   ├── thres_segmentation/            # 独立传统阈值分割与GUI
+│   ├── sar_geometry/                  # SAR成像几何、可见性、叠掩和阴影
+│   ├── validate_pts/                  # 人工抽样与水体标注质量核查
+│   ├── utils/                         # 公共栅格、矢量和文件工具
+│   └── reports/                       # 专题制图、应急简报、详图和设施核查清单
 ├── scripts/
-│   ├── compare_threshold.py           # 模型与传统法在同一val上对比
-│   ├── evaluate.py                    # model_eval的兼容入口
-│   └── ...                            # 场景分类、划分、BN校准等工具
+│   ├── data/                          # 数据下载、归一化核查、场景分类与划分
+│   ├── models/                        # BN 校准与 S1 选模推理
+│   ├── threshold/                     # 阈值实验与人工抽样评估
+│   ├── terrain/                       # SAR 几何与地形对照
+│   └── products/                      # 覆盖快视图、水体面导出与拼接
 ├── tests/                             # 合成数据回归测试
 ├── data/                              # 原始数据与固定划分清单
 ├── docs/                              # 算法说明与文献
 ├── outputs/                           # 训练检查点和质量输出
 └── codex_analysis/                    # 实验分析与对照报告
 ```
+
+## 洪涝应急成果
+
+已有精修水面、有效覆盖和设施数据时，从仓库根目录运行 `src/reports/build_products.py`。同一个案例 JSON 管理专题图、Word 简报、报告详图、QGIS 核查图层、Excel 清单和网页简报。
+
+```powershell
+python src/reports/build_products.py src/reports/miyun_boundaries.json outputs/miyun_brief --products brief
+```
+
+不同案例的输入、输出和依赖见 [报告模块说明](src/reports/README.md)。模型训练、整景推理和传统分割的配置仍分别位于 `configs`，`scripts` 用于数据检查、评估和实验工具。
 
 ## 数据准备
 
@@ -476,7 +495,7 @@ OUTPUT_DIR为null时，后处理目录位于检查点旁的 `postprocess/时间�
 验证损失不加权。切换策略应 `RESUME_CHECKPOINT: null` 并使用新的输出目录；
 输入、划分、采样、种子、训练步数和网络保持一致。正式训练直接运行train.py。
 
-BN诊断使用 `scripts/calibrate_bn.py`：在顶部设置 `RUN_DIR`、`CHECKPOINT_NAME`、
+BN诊断使用 `scripts/models/calibrate_bn.py`：在顶部设置 `RUN_DIR`、`CHECKPOINT_NAME`、
 `CALIBRATION_SAMPLES`。整景只从保存的train窗口固定随机取样，逐层恢复统计量；
 同一完整val比较前后结果。校准结果另存 `bn_calibration/`，属于推理对照，不可当作原训练续跑检查点。
 Lee滤波保持独立实验；需要确认幅度/功率表达，不能代替辐射校正。
@@ -499,7 +518,7 @@ python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py E:\Co
 
 | MODE | 功能 |
 |---|---|
-| `all` | 顺序执行prepare、按开关预处理、quicklook；未完成prepare时停止，重跑复用已完成阶段 |
+| `all` | 按顺序准备整景、预处理并归一化 VV、准备 DEM、导出快视图。中断后用同一配置续跑 |
 | `prepare` | 首次组织完整SAR与SHP标签，支持未完成目录续跑 |
 | `labels` | 原位重建标签；运行前停止读取这套标签的训练 |
 | `split` | 检查清单划分、重复景号和地理组隔离 |
@@ -509,6 +528,7 @@ python E:\Code_projects\sar_water_extraction\src\datasets\image_process.py E:\Co
 | `filter` | 对FILTER_INPUT_STAGE指定的线性域输入执行SNAP Lee |
 | `normalize` | 使用本批train统计或指定参考统计，生成浮点标准化整景 |
 | `preprocess` | 按ENABLE_CALIBRATION/ENABLE_FILTER开关依次完成处理，最后归一化 |
+| `dem` | 从 `paths.DEM_TILE_DIR` 读取本地 GLO-30 瓦片，按最终 VV 网格输出高程，在同级 `<最终VV目录名>_vv_dem/split_manifest.csv` 中记录每景的 `dem_path` |
 | `quicklook` | 显示ORG、校正后、滤波后、标准化后的四阶段概览，不启动这些处理 |
 
 辐射校正必须先明确 `CALIBRATION_QUANTITY`（sigma0/beta0/gamma0）、输出域和

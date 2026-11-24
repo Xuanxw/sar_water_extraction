@@ -6,8 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import fiona
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from evaluate_threshold_review import weighted_metrics, evaluate, prepare
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.threshold.evaluate_threshold_review import weighted_metrics, evaluate, prepare
 
 
 class ManualReviewTests(unittest.TestCase):

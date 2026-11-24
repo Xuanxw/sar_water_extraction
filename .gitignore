@@ -46,8 +46,14 @@ Thumbs.db
 src/*/_version_.py
 
 data/
+# scripts/data 存放数据准备脚本，仍忽略其中的本地数据文件。
+!/scripts/data/
+/scripts/data/*
+!/scripts/data/*.py
 outputs/
 codex*/
 # 可重建的整景窗口索引和归一化缓存
 /data_cache/
 /skills/
+
+/configs/168/

@@ -14,11 +14,13 @@ class MainProductsTests(unittest.TestCase):
             root=Path(d);config=fixtures.OrgProductionTests().make_config(root)
             config['org']['archive_intermediates']=True
             path=root/'config.yaml';path.write_text(yaml.safe_dump(json.loads(json.dumps(config,default=str)),allow_unicode=True),encoding='utf-8')
-            with patch.object(pipeline,'save_preview',wraps=pipeline.save_preview) as preview:
+            with patch.object(pipeline,'save_raster_water_presentation',wraps=pipeline.save_raster_water_presentation) as preview:
                 main(path)
             self.assertEqual(len(preview.call_args_list),2)
             self.assertTrue(all(call.args[1].name=='water_polygon.tif' for call in preview.call_args_list))
             output=config['paths']['OUTPUT_DIR'];products=list(output.glob('*/*/water_polygon.*'))
+            self.assertEqual(len(list(output.glob('*/*/quicklook.png'))),2)
+            self.assertEqual(len(list(output.glob('*/*/presentation/water_overlay.png'))),2)
             self.assertEqual(len(list(output.glob('*/*/terrain_quicklook.png'))),2)
             self.assertFalse(list(output.glob('*/*/water.tif')))
             self.assertFalse(list(output.glob('*/*/water.shp')))
@@ -29,7 +31,7 @@ class MainProductsTests(unittest.TestCase):
             self.assertEqual(before,{p:hashlib.sha256(p.read_bytes()).hexdigest() for p in before})
             self.assertFalse(list(output.glob('*/*/water.tif')))
     def test_repair_uses_official_entry(self):
-        path=fixtures.ROOT/'scripts/repair_gui_terrain.py'
+        path=fixtures.ROOT/'scripts/threshold/repair_gui_terrain.py'
         spec=importlib.util.spec_from_file_location('repair_entry',path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         self.assertIs(module.main,main)
 

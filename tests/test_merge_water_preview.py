@@ -13,8 +13,8 @@ from shapely import transform
 from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
 
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from merge_water_shp import merge_results
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from scripts.products.merge_water_shp import merge_results
 
 
 def write_polygon(path, geom, crs='EPSG:32650'):

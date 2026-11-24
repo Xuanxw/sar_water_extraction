@@ -1,0 +1,96 @@
+# DFC 原始 VV 存储值先取 10*log10(max(x,1e-6))，再按训练集共享 P02/P98 归一化。
+# 有效 0 保留；单位映射未经核实。DEM 保持米值，训练设置与同网络的 80 轮 BCE 基线一致。
+paths:
+  DATA_ROOT: ../..
+  RESUME_CHECKPOINT: outputs/s1/pvt_deeplabv3plus_vv_dem_log_trainnorm80/20261124_041028_253185/last.pth
+  IMAGE_DIR: data/Track1/train/images
+  LABEL_DIR: data/Track1/train/labels
+  MANIFEST_PATHS: []
+  OUTPUT_ROOT: outputs/s1
+  OUTPUT_DIR: outputs/s1/pvt_deeplabv3plus_vv_dem_log_trainnorm80
+  WINDOW_CACHE_DIR: data_cache/s1
+run:
+  RUN_DIRECTORY_FORMAT: '%Y%m%d_%H%M%S_%f'
+  RESULT_FILES:
+    metrics: metrics.csv
+    sampling: sampling.csv
+    sampling_groups: sampling_groups.csv
+    split: split_manifest.csv
+    labels: label_revision.json
+    error: training_error.log
+    last: last.pth
+    train_end: train_end.pth
+    best: best.pth
+    best_f1: best_f1.pth
+    best_balanced: best_balanced_accuracy.pth
+    abnormal: abnormal.pth
+    features: features
+    val_scenes: val_scenes_epoch_{epoch:03d}.csv
+data:
+  POLARIZATIONS:
+  - VV
+  POLARIZATION_BANDS:
+    VV: 1
+  DEM_BAND: 4
+  VAL_RATIO: 0.2
+  MAX_SAMPLES: null
+  DATA_LAYOUT: patch
+  PATCH_REPRESENTATION: vv_log_train_p02_p98_dem_m
+  SCENE_OPTIONS: {}
+model:
+  ARCHITECTURE: deeplabv3plus
+  BACKBONE: pvt_v2_b2.in1k
+  PRETRAINED: false
+  DEEPLAB_DECODER_CHANNELS: 256
+  DEEPLAB_LOW_LEVEL_CHANNELS: 48
+  DEEPLAB_ASPP_RATES:
+  - 3
+  - 6
+  - 9
+  DEEPLAB_DROPOUT: 0.1
+  BASE_CHANNELS: 32
+  DECODER_CHANNELS: 32
+  STAGE: uafm
+  UAFNET_FINAL_RESIDUAL: true
+  UAFNET_MBDC_DILATIONS: null
+  UAFNET_HIGH_RESOLUTION_REFINEMENT: false
+  UAFNET_REFINEMENT_DECODER: uafm
+training:
+  CPU_THREADS: 4
+  BATCH_SIZE: 2
+  EPOCHS: 80
+  LEARNING_RATE: 0.0001
+  SEED: 42
+  LOSS_NAME: bce
+  BCE_WEIGHT: 1.0
+  DICE_WEIGHT: 1.0
+  CLASS_WEIGHT_MODE: none
+  OPTIMIZER_NAME: adamw
+  WEIGHT_DECAY: 0.01
+  COSINE_SCHEDULE: true
+  TRAIN_AUGMENTATION: true
+  ABNORMAL_F1_THRESHOLD: 0.001
+  SAMPLING: random
+  HARD_WARMUP_EPOCHS: 2
+  HARD_SAMPLE_RATIO: 0.5
+  HARD_POOL_RATIO: 0.25
+  LOW_WATER_POOL_RATIO: 0.2
+  WATER_GROUP_NAMES:
+  - 无水体
+  - 水体≤1%
+  - 水体1%–10%
+  - 水体10%–50%
+  - 水体>50%
+  HEAD_LOSS_WEIGHTS:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+quality:
+  SAVE_VALIDATION_FIGURES: true
+  INTERVAL: 1
+  MAX_SCENES: null
+  PREVIEW_MAX_SIDE: 1200
+  SAVE_FEATURE_MAPS: false
+  FEATURE_MAP_INTERVAL: 5
+  FEATURE_MAP_SAMPLES: 2

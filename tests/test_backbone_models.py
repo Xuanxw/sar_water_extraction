@@ -3,12 +3,11 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
 
 import torch
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
-                str(Path(__file__).resolve().parents[1] / "scripts")]
+                str(Path(__file__).resolve().parents[1])]
 from supervised.models.checkpoint import load_model
 from supervised.models.pvt import PVTWaterNet
 from supervised.models.resnet import ResNet50WaterNet
@@ -59,47 +58,21 @@ class BackboneTests(unittest.TestCase):
                     self.assertGreater(sum(g.abs().sum().item() for g in gradients), 0)
 
     def test_training_entries_and_bn_calibration(self):
-        from supervised import train
-        from calibrate_bn import BNCalibrator
+        from patch_training_fixture import train_patch_model
 
-        class TinyDataset(torch.utils.data.Dataset):
-            def __init__(self, image_dir, label_dir=None, bands=None):
-                self.image_dir = Path(image_dir)
-                self.image_paths = [self.image_dir / f"{i}.tif" for i in range(4)]
-            def __len__(self):
-                return len(self.image_paths)
-            def __getitem__(self, i):
-                image = torch.randn(2, 64, 64, generator=torch.Generator().manual_seed(i))
-                return dict(image=image, label=(image[0] > 0).long(),
-                            valid_mask=torch.ones(64, 64, dtype=torch.bool), name=f"{i}.tif")
-
-        for method in ("pvt", "resnet50"):
-            # 临时目录固定在本项目 tests 内，结束时只清理该次测试生成的文件。
-            with self.subTest(method=method), TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
-                with patch.multiple(train, METHOD=method, DATA_LAYOUT="patch", POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2}), patch.object(train, "IMAGE_DIR", Path(folder) / "images"), \
-                     patch.object(train, "LABEL_DIR", Path(folder) / "labels"), \
-                     patch.object(train, "OUTPUT_DIR", Path(folder)), \
-                     patch.object(train, "LOSS_NAME", "ce"), \
-                     patch.object(train, "SAMPLING", "random"), \
-                     patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 1), \
-                     patch("datasets.dfc_sample.s1_dataset.WaterDataset", TinyDataset), \
-                     patch.object(torch.cuda, "is_available", return_value=False):
-                    trainer = train.create_trainer()
-                    trainer.train()
-                checkpoint = torch.load(trainer.run_dir / "last.pth", weights_only=True)
-                model = load_model(checkpoint).eval()
-                before = {k: v.clone() for k, v in model.state_dict().items()}
-                calibrator = BNCalibrator.__new__(BNCalibrator)
-                calibrator.model, calibrator.device = model, torch.device("cpu")
-                calibrator.mean, calibrator.std = trainer.mean, trainer.std
-                calibrator.train_loader = trainer.train_loader
+        for name, backbone in (("pvt", "pvt_v2_b2.in1k"), ("resnet50", "resnet50.tv_in1k")):
+            with self.subTest(model=name), TemporaryDirectory() as folder:
+                calibrator, _ = train_patch_model(Path(folder), "semantic_fpn", backbone)
+                self.assertEqual(calibrator.checkpoint["model_name"], name)
+                model = calibrator.model
+                before = {key: value.clone() for key, value in model.state_dict().items()}
                 calibrator.calibrate_layers()
                 changed = []
-                for name, value in model.state_dict().items():
-                    self.assertTrue(torch.isfinite(value).all())
-                    if not torch.equal(value, before[name]):
-                        changed.append(name)
-                        self.assertTrue(name.endswith(("running_mean", "running_var")))
+                for key, value in model.state_dict().items():
+                    self.assertTrue(torch.isfinite(value).all(), key)
+                    if not torch.equal(value, before[key]):
+                        changed.append(key)
+                        self.assertTrue(key.endswith(("running_mean", "running_var")), key)
                 self.assertTrue(changed)
 
 

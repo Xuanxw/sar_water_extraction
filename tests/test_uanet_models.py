@@ -3,12 +3,11 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
 
 import torch
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "src"),
-                str(Path(__file__).resolve().parents[1] / "scripts")]
+                str(Path(__file__).resolve().parents[1])]
 from supervised.models.pvt import PVTUANet
 from supervised.models.pvt import UncertaintyRank
 from supervised.models.checkpoint import load_model
@@ -64,46 +63,16 @@ class UANetTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(parameter.grad).all(), name)
 
     def test_training_and_calibration_use_final_prediction(self):
-        from supervised import train
-        from calibrate_bn import BNCalibrator
+        from patch_training_fixture import train_patch_model
 
-        class TinyDataset(torch.utils.data.Dataset):
-            def __init__(self, image_dir, label_dir=None, bands=None):
-                self.image_dir = Path(image_dir)
-                self.image_paths = [self.image_dir / f"{i}.tif" for i in range(4)]
-            def __len__(self):
-                return len(self.image_paths)
-            def __getitem__(self, i):
-                image = torch.randn(2, 64, 64, generator=torch.Generator().manual_seed(i))
-                label = (image[0] > 0).long()
-                label[:2] = -1
-                return dict(image=image, label=label, name=f"{i}.tif",
-                            valid_mask=torch.ones(64, 64, dtype=torch.bool))
-
-        with TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
-            with patch.multiple(train, METHOD="uanet", DATA_LAYOUT="patch", POLARIZATIONS=("VV","VH"), POLARIZATION_BANDS={"VV":1,"VH":2}), patch.object(train, "STAGE", "full"), \
-                 patch.object(train, "LOSS_NAME", "ce"), \
-                 patch.object(train, "SAMPLING", "random"), \
-                 patch.object(train, "IMAGE_DIR", Path(folder) / "images"), \
-                 patch.object(train, "LABEL_DIR", Path(folder) / "labels"), \
-                 patch.object(train, "OUTPUT_DIR", Path(folder)), \
-                 patch.object(train, "PRETRAINED", False), patch.object(train, "EPOCHS", 1), \
-                 patch("datasets.dfc_sample.s1_dataset.WaterDataset", TinyDataset), \
-                 patch.object(torch.cuda, "is_available", return_value=False):
-                trainer = train.create_trainer()
-                trainer.train()
-            checkpoint = torch.load(trainer.run_dir / "last.pth", weights_only=True)
-            self.assertEqual(checkpoint["model_kwargs"]["stage"], "full")
-            model = load_model(checkpoint).eval()
-            calibrator = BNCalibrator.__new__(BNCalibrator)
-            calibrator.model, calibrator.device = model, torch.device("cpu")
-            calibrator.mean, calibrator.std = trainer.mean, trainer.std
-            calibrator.val_loader = trainer.val_loader
-            calibrator.ignore_index = -1
+        with TemporaryDirectory() as folder:
+            calibrator, validation = train_patch_model(Path(folder), "uanet", "pvt_v2_b2.in1k")
+            self.assertEqual(calibrator.checkpoint["model_kwargs"]["stage"], "full")
             metrics = calibrator.evaluate()
+            self.assertEqual(metrics["valid_pixels"], 2 * 62 * 64)
             for key in ("tn", "fp", "fn", "tp"):
-                self.assertEqual(metrics[key], trainer.phase_metrics["val"][key])
-            self.assertAlmostEqual(metrics["loss"], trainer.phase_metrics["val"]["loss"], places=6)
+                self.assertEqual(metrics[key], validation[key])
+            self.assertAlmostEqual(metrics["loss"], validation["loss"], places=6)
 
 
 if __name__ == "__main__":

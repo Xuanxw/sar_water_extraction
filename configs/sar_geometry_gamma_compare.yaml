@@ -1,0 +1,15 @@
+# 只比较已有成果；必须先准备v5.7、同输入、同地图网格的参考产品。
+# 原始UCHAR需另提供由GAMMA导出的网格GeoTIFF，不用ORG变换猜测DEM_par角点。
+paths:
+  SHADOW_PATH: null
+  LAYOVER_PATH: null
+  GAMMA_LS_MAP: null
+  GAMMA_GRID_TIF: null  # format=uchar时必填；geotiff时不用。
+  OUTPUT_DIR: E:/Code_projects/sar_water_extraction/codex_analysis/sar_geometry/gamma57_comparison
+reference:
+  version: gc_map2 v5.7 28-Jul-2023
+  grid_domain: map  # 本接口不比较雷达网格ls_map_rdc。
+  format: geotiff  # geotiff / uchar
+  ls_scaling: 0  # 0=处理位码；1=显示码，255是叠掩而非NoData。
+  same_inputs_confirmed: false  # DEM/高程基准、轨道、MLI网格、Doppler及精化参数均一致后确认。
+block_size: 1024
