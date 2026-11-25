@@ -28,6 +28,7 @@ sys.path[:0] = [str(REPO / "src"), str(REPO)]
 from scripts.models.calibrate_bn import ChannelStatistics
 from configuration import config_argument, load_yaml
 from datasets.dfc_sample.s1_dataset import WaterDataset, sample_name
+from datasets.dfc_terrain import DFC_TERRAIN_CHANNELS, dfc_terrain_from_checkpoint
 from datasets.relative_normalization import RELATIVE_REPRESENTATIONS, training_files_signature, validate_relative_normalization
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.model_eval import threshold_counts
@@ -48,14 +49,18 @@ def checkpoint_protocol(checkpoint):
             "inputs_normalized", "speckle", "ignore_index", "train_files", "val_files",
             "split_manifest_sha256", "dem_source", "dem_unit")
     protocol = {key: checkpoint.get(key) for key in keys}
+    terrain_mode = dfc_terrain_from_checkpoint(checkpoint)
+    if terrain_mode is not None:
+        protocol["dfc_terrain"] = checkpoint["dfc_terrain"]
     if protocol["patch_representation"] in RELATIVE_REPRESENTATIONS:
         parameters = validate_relative_normalization(
             protocol["relative_normalization"], protocol["patch_representation"])
         signature = training_files_signature(checkpoint["train_files"], checkpoint["bands"])
         if any(parameters[key] != value for key, value in signature.items()):
             raise ValueError("固定 VV 分位数的训练文件签名与检查点不一致")
-        if tuple(checkpoint.get("input_channels", ())) != ("VV", "DEM"):
-            raise ValueError("固定 VV 分位数检查点需要 VV、DEM 两个输入通道")
+        expected_channels = DFC_TERRAIN_CHANNELS if terrain_mode is not None else ("VV", "DEM")
+        if tuple(checkpoint.get("input_channels", ())) != expected_channels:
+            raise ValueError(f"固定 VV 分位数检查点需要输入通道 {expected_channels}")
         protocol["relative_normalization"] = parameters
     elif protocol["relative_normalization"] is not None:
         raise ValueError("检查点的表示与固定 VV 分位数参数不匹配")
@@ -102,7 +107,8 @@ def prepare_experiment(config):
 
     options = dict(bands=first["bands"], speckle=first.get("speckle"),
                    patch_representation=first.get("patch_representation", "stored"),
-                   relative_normalization=first.get("relative_normalization"))
+                   relative_normalization=first.get("relative_normalization"),
+                   dfc_terrain_input=dfc_terrain_from_checkpoint(first))
     image_dir = paths.get("IMAGE_DIR") or Path(first["image_dir"])
     label_dir = paths.get("LABEL_DIR") or Path(first["label_dir"])
     train_data = WaterDataset(image_dir, **options)
@@ -138,6 +144,8 @@ def prepare_experiment(config):
     code_paths.update(MODEL_SOURCES[item["model_name"]] for item in checkpoints.values())
     if options["patch_representation"] in RELATIVE_REPRESENTATIONS:
         code_paths.add("src/datasets/relative_normalization.py")
+    if options["dfc_terrain_input"] is not None:
+        code_paths.add("src/datasets/dfc_terrain.py")
     packages = ["torch", "numpy", "rasterio"]
     if any(item["model_name"] == "pvt_deeplabv3plus" for item in checkpoints.values()):
         packages.append("timm")

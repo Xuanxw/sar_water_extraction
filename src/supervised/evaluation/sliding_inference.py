@@ -65,7 +65,8 @@ def iter_scene_predictions(model, image_path, label_path=None, *, bands=(1,),
     # 仅原始读取及已准备的整景 SNAP 缓存与读取窗口无关；未知/在线滤波安全回退。
     reuse_input = not boundary_context and type(ds.filter) is SpeckleFilter and (
         ds.filter.config is None or ds.filter.snap is not None)
-    cached_image = np.zeros((len(bands), ds.core, ds.width), np.float32) if reuse_input else None
+    display_channels = means.numel() if window_transform is not None else len(bands)
+    cached_image = np.zeros((display_channels, ds.core, ds.width), np.float32) if reuse_input else None
     cached_valid = np.zeros((ds.core, ds.width), bool) if reuse_input else None
     start_row = 0
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -126,9 +127,14 @@ def iter_scene_predictions(model, image_path, label_path=None, *, bands=(1,),
             loader_iterator = iter(loader)
             for batch in loader_iterator:
                 if window_transform is not None:
-                    for tile, mask in zip(batch['image'], batch['valid_mask']):
+                    raw = batch['image']
+                    if raw.shape[1] != display_channels:
+                        batch['image'] = raw.new_empty((raw.shape[0], display_channels, *raw.shape[2:]))
+                    for index, (tile, mask) in enumerate(zip(raw, batch['valid_mask'])):
                         values, valid_pixels = window_transform(tile.numpy(), mask.numpy())
-                        tile.copy_(torch.from_numpy(values))
+                        if values.shape != batch['image'][index].shape:
+                            raise ValueError("窗口变换输出的形状与模型通道统计不一致")
+                        batch['image'][index].copy_(torch.from_numpy(values))
                         mask.copy_(torch.from_numpy(valid_pixels))
                 valid = batch['valid_mask'].to(device, non_blocking=True)
                 image = batch['image'].to(device, non_blocking=True)

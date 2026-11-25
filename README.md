@@ -69,8 +69,7 @@ sar_water_extraction/
 │   ├── thres_segmentation/            # 独立传统阈值分割与GUI
 │   ├── sar_geometry/                  # SAR成像几何、可见性、叠掩和阴影
 │   ├── validate_pts/                  # 人工抽样与水体标注质量核查
-│   ├── utils/                         # 公共栅格、矢量和文件工具
-│   └── reports/                       # 专题制图、应急简报、详图和设施核查清单
+│   └── utils/                         # 公共栅格、矢量和文件工具
 ├── scripts/
 │   ├── data/                          # 数据下载、归一化核查、场景分类与划分
 │   ├── models/                        # BN 校准与 S1 选模推理
@@ -86,13 +85,7 @@ sar_water_extraction/
 
 ## 洪涝应急成果
 
-已有精修水面、有效覆盖和设施数据时，从仓库根目录运行 `src/reports/build_products.py`。同一个案例 JSON 管理专题图、Word 简报、报告详图、QGIS 核查图层、Excel 清单和网页简报。
-
-```powershell
-python src/reports/build_products.py src/reports/miyun_boundaries.json outputs/miyun_brief --products brief
-```
-
-不同案例的输入、输出和依赖见 [报告模块说明](src/reports/README.md)。模型训练、整景推理和传统分割的配置仍分别位于 `configs`，`scripts` 用于数据检查、评估和实验工具。
+水体提取和人工修订完成后，将各期水体面及有效覆盖范围交给独立仓库 `sar-flood-report`，生成水面变化图层、道路与建筑等地物的暴露专题图和应急监测报告。安装和运行方法见[独立仓库说明](../sar-flood-report/README.md)。
 
 ## 数据准备
 

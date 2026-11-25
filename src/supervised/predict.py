@@ -20,6 +20,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from configuration import config_argument, load_yaml
+from datasets.dfc_terrain import (DFC_SLOPE_RADIUS, DFC_TERRAIN_CHANNELS, dfc_terrain_from_checkpoint,
+                                  prepare_dfc_terrain, validate_dfc_terrain_grid)
 from datasets.relative_normalization import (
     RELATIVE_REPRESENTATIONS, apply_vv_train_p02_p98_dem_m, validate_relative_normalization,
 )
@@ -46,12 +48,16 @@ def prediction_settings(checkpoint, config):
         raise ValueError('该检查点需要滤波输入，请先完成匹配的离线滤波，并设置FILTER_ALREADY_APPLIED=true')
     mean = torch.as_tensor(checkpoint['mean']).flatten().tolist()
     std = torch.as_tensor(checkpoint['std']).flatten().tolist()
-    if (len(mean) != len(bands) or len(std) != len(bands)
+    terrain_mode = dfc_terrain_from_checkpoint(checkpoint)
+    channel_count = len(DFC_TERRAIN_CHANNELS) if terrain_mode is not None else len(bands)
+    if (len(mean) != channel_count or len(std) != channel_count
             or not np.isfinite([mean, std]).all() or min(std) <= 0):
         raise ValueError('检查点缺少匹配通道的有限均值和正标准差')
     size = inference.get('WINDOW_SIZE') or checkpoint.get('window_size', 512)
     halo = inference.get('HALO')
     halo = checkpoint.get('window_halo', 64) if halo is None else halo
+    if terrain_mode is not None and halo < DFC_SLOPE_RADIUS:
+        raise ValueError(f'DFC 地形推理的 HALO 至少需要 {DFC_SLOPE_RADIUS} 像元以覆盖坡度差分邻域')
     saved = checkpoint.get('validation_inference') or {}
     stride = inference.get('STRIDE') or saved.get('stride') or (size-2*halo)//2
     blend = inference.get('BLEND') or saved.get('blend', 'gaussian')
@@ -65,7 +71,10 @@ def prediction_settings(checkpoint, config):
         parameters = validate_relative_normalization(checkpoint.get('relative_normalization'), representation)
         if list(checkpoint['bands']) != parameters['bands']:
             raise ValueError('检查点波段与拟合 VV/DEM 时的顺序不一致')
-        transform = lambda image, valid: (apply_vv_train_p02_p98_dem_m(image, valid, parameters), valid)
+        if terrain_mode is None:
+            transform = lambda image, valid: (apply_vv_train_p02_p98_dem_m(image, valid, parameters), valid)
+        else:
+            transform = lambda image, valid: prepare_dfc_terrain(image, valid, terrain_mode, parameters)
     elif representation != 'stored':
         raise ValueError(f'尚未适配的检查点输入表示：{representation}')
     if transform is not None and normalized:
@@ -74,6 +83,8 @@ def prediction_settings(checkpoint, config):
                     mean=mean, std=std, inputs_normalized=normalized, patch_representation=representation,
                     relative_normalization=checkpoint.get('relative_normalization'),
                     batch_size=inference['BATCH_SIZE'], num_workers=inference.get('NUM_WORKERS', 0))
+    if terrain_mode is not None:
+        settings['dfc_terrain'] = checkpoint['dfc_terrain']
     return settings, transform
 
 
@@ -102,6 +113,8 @@ def predict_scene(model, image_path, destination, settings, config, *, checkpoin
     representation = settings.get('patch_representation', 'stored')
     if representation in ('vv_rank_dem_m', *RELATIVE_REPRESENTATIONS):
         with rasterio.open(image_path) as source:
+            if settings.get('dfc_terrain'):
+                validate_dfc_terrain_grid(source)
             if not all(b in source.indexes for b in settings['bands']):
                 raise ValueError(f'输入波段超出影像范围：{image_path}')
             vv, dem = [band - 1 for band in settings['bands']]
@@ -165,7 +178,7 @@ def predict_scene(model, image_path, destination, settings, config, *, checkpoin
             report['grid'] = dict(crs=str(source.crs), shape=list(source.shape), transform=list(source.transform))
             # 概览只读缩略图；推理使用滚动融合缓冲，不创建整景张量。
             call_options = {key: value for key, value in settings.items()
-                            if key not in ('patch_representation', 'relative_normalization')}
+                            if key not in ('patch_representation', 'relative_normalization', 'dfc_terrain')}
             blocks = iter_scene_predictions(model, image_path, device=device, use_amp=use_amp,
                 boundary_context=False, return_labels=False, window_transform=window_transform, **call_options)
             logit_threshold = math.log(threshold / (1-threshold))

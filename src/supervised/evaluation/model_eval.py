@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader, Subset
 
 from supervised.load.sar_scene_dataset import SARSceneDataset, check_preprocessed_input
 from datasets.manifest_paths import manifest_fingerprint
+from datasets.dfc_terrain import dfc_terrain_from_checkpoint
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.sliding_inference import iter_scene_predictions
@@ -107,7 +108,8 @@ def evaluate(checkpoint_path=CHECKPOINT_PATH, image_dir=None, label_dir=None,
         from datasets.dfc_sample.s1_dataset import WaterDataset
         dataset = WaterDataset(image_dir, label_dir, bands, speckle=checkpoint.get('speckle'),
                                patch_representation=checkpoint.get('patch_representation', 'stored'),
-                               relative_normalization=checkpoint.get('relative_normalization'))
+                               relative_normalization=checkpoint.get('relative_normalization'),
+                               dfc_terrain_input=dfc_terrain_from_checkpoint(checkpoint))
         if use_saved_val:
             dataset.select_files(checkpoint['val_files'])
     batch_size = checkpoint["batch_size"] if batch_size is None else batch_size

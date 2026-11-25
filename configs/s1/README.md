@@ -29,6 +29,29 @@ python -u src/supervised/train.py configs/s1/train_pvt_deeplabv3plus_trainnorm80
 python -u scripts/models/calibrate_s1_unet_bn.py configs/s1/review_trainnorm80_losses.yaml
 ```
 
+## PVT＋DeepLabv3+ 地形输入对照
+
+本轮按同一清单使用 1,144 个训练块和 270 个验证块（原 287 个验证块中暂时排除 17 个待复核标签）。四组均从头训练 80 轮，使用同一随机种子、BCE、对数 VV 和训练集共享 P02/P98。模型输入固定为 VV、高程、坡度三个通道，停用的通道恒为零。每组都使用第 1、4 波段的共同有效域。
+
+| 配置后缀 | 启用的输入 | 比较目的 |
+| --- | --- | --- |
+| `vv_only` | VV | 取得单极化参照 |
+| `elevation` | VV＋高程 | 测量绝对高程的贡献 |
+| `slope` | VV＋坡度 | 测量局部坡度的贡献 |
+| `elevation_slope` | VV＋高程＋坡度 | 检验同时提供两类地形信息的收益 |
+
+DFC 第 4 波段是已对齐的 Copernicus 高程。坡度由这幅高程按 DFC 名义 10 米格距计算，两侧各取相距中心 30 米的样本，得到角度。该值是从分块估计的坡度。三通道采用训练集统计量统一标准化。历史双通道权重另作参考，四组之间按同一验证掩膜和 0.50 阈值比较 Precision、Recall、F1、IoU。[DFC 数据规格](https://www.grss-ieee.org/community/technical-committees/2024-ieee-grss-data-fusion-contest/)
+
+在仓库根目录依次启动，结果分别写入 `outputs/s1/pvt_deeplabv3plus_log_terrain_<后缀>` 下的时间戳子目录。
+
+```powershell
+foreach ($group in 'vv_only', 'elevation', 'slope', 'elevation_slope') {
+    $config = "configs/s1/train_pvt_deeplabv3plus_log_terrain_${group}.yaml"
+    python -u src/supervised/train.py $config
+    if ($LASTEXITCODE -ne 0) { throw "训练中断 $config" }
+}
+```
+
 ## 历史配置与密云推理
 
 早期实验按每块有效 VV 的经验秩归一化，包含四个初始配置、四个扩训配置、一份 BN 对照和一份 PVT 损失对照。需要复现时，在仓库根目录恢复[历史配置包](../../docs/archive/s1_rank_configs.zip)，再按[扩训说明](../../docs/s1_extended_training.md)或[BN 与损失对照说明](../../docs/s1_bn_loss_experiment.md)运行。

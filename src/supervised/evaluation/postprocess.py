@@ -18,6 +18,7 @@ from supervised.evaluation.boundary_eval import BoundaryEvaluator, save_boundary
 from datasets.relative_normalization import (
     RELATIVE_REPRESENTATIONS, apply_vv_train_p02_p98_dem_m, validate_relative_normalization,
 )
+from datasets.dfc_terrain import dfc_terrain_from_checkpoint, prepare_dfc_terrain, validate_dfc_terrain_grid
 from datasets.dfc_sample.s1_dataset import (
     WaterDataset, relative_backscatter_ranks, resolve_sample_path, sample_name, vv_rank_dem_m,
 )
@@ -74,6 +75,7 @@ class WaterEnsemble:
                 speckle_filter=SpeckleFilter(checkpoint.get('speckle')),
                 inputs_normalized=checkpoint.get('inputs_normalized',False),
                 patch_representation=representation, relative_normalization=normalization,
+                dfc_terrain_input=dfc_terrain_from_checkpoint(checkpoint),
                 input_preprocessing=checkpoint.get('input_preprocessing',{}),
             ))
             print(f"集成成员：{path}；模型：{checkpoint['model_name']}；轮次：{checkpoint['epoch']}", flush=True)
@@ -81,11 +83,13 @@ class WaterEnsemble:
         self.bands = tuple(sorted({b for member in self.members for b in member["bands"]}))
 
     @torch.inference_mode()
-    def predict(self, image, valid_mask, dem_affines=None):
-        """返回各成员的水体概率和等权平均概率；不平均 logits 或二值掩膜。"""
+    def predict(self, image, valid_mask, dem_affines=None, *, return_valid=False):
+        """返回成员概率及均值；可同时取得所有模型输入均有效的像元掩膜。"""
         image, valid_mask = image.to(self.device), valid_mask.to(self.device)
+        common_valid = valid_mask
         probabilities = []
         for member in self.members:
+            member_valid = valid_mask
             indices = [self.bands.index(b) for b in member["bands"]]
             inputs = image[:, indices]
             # 输入是文件存储值，不能假定已做辐射校正；复现各成员训练时的滤波和标准化。
@@ -102,7 +106,13 @@ class WaterEnsemble:
             if representation in ('relative_backscatter_ranks', 'vv_rank_dem_m', *RELATIVE_REPRESENTATIONS):
                 values = inputs.cpu().numpy()
                 masks = valid_mask.cpu().numpy()
-                if representation in RELATIVE_REPRESENTATIONS:
+                if member.get('dfc_terrain_input') is not None:
+                    transformed, supported = zip(*(prepare_dfc_terrain(
+                        v, m, member['dfc_terrain_input'], member['relative_normalization'])
+                        for v, m in zip(values, masks)))
+                    member_valid = torch.from_numpy(np.stack(supported)).to(self.device)
+                    common_valid = common_valid & member_valid
+                elif representation in RELATIVE_REPRESENTATIONS:
                     transformed = [apply_vv_train_p02_p98_dem_m(v, m, member['relative_normalization'])
                                    for v, m in zip(values, masks)]
                 else:
@@ -111,7 +121,7 @@ class WaterEnsemble:
                 inputs = torch.from_numpy(np.stack(transformed)).to(self.device)
             if not member.get("inputs_normalized", False):
                 inputs = (inputs - member["mean"]) / member["std"]
-            inputs = inputs.masked_fill(~valid_mask.unsqueeze(1), 0)
+            inputs = inputs.masked_fill(~member_valid.unsqueeze(1), 0)
             with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
                 outputs = member["model"](inputs)
                 logits = outputs[-1] if isinstance(outputs, (tuple, list)) else outputs
@@ -119,8 +129,13 @@ class WaterEnsemble:
             # 可能舍入成0.5，导致quality比训练的logit>=0多判水体。网络本身仍沿用AMP。
             probability = (logits[:, 0].double().sigmoid() if logits.shape[1] == 1
                            else logits.float().softmax(dim=1)[:, 1])
+            if member.get('dfc_terrain_input') is not None:
+                probability = probability.masked_fill(~member_valid, float('nan'))
             probabilities.append(probability)
-        return probabilities, torch.stack(probabilities).mean(dim=0)
+        average = torch.stack(probabilities).mean(dim=0)
+        if return_valid:
+            return probabilities, average, common_valid
+        return probabilities, average
 
 
 def terrain_gradient(dem, pixel_size=None, height_scale=None):
@@ -338,6 +353,7 @@ def run_postprocess(checkpoint_paths, image_dir=None, label_dir=None,
         raise ValueError("use_external_water 需要 reference_path 或 download_history=True")
     dem_bands = {member['bands'][1] for member in ensemble.members
                  if member.get('patch_representation') in ('vv_rank_dem_m', *RELATIVE_REPRESENTATIONS)}
+    has_terrain = any(member.get('dfc_terrain_input') is not None for member in ensemble.members)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     output_dir = (first["path"].parent / "quality" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                   if output_dir is None else Path(output_dir))
@@ -365,16 +381,22 @@ def run_postprocess(checkpoint_paths, image_dir=None, label_dir=None,
             dem_affines = {band: [] for band in dem_bands}
             for name in batch["name"]:
                 with rasterio.open(selected[name]) as source:
+                    if has_terrain:
+                        validate_dfc_terrain_grid(source)
                     for band in dem_bands:
                         dem_affines[band].append((source.scales[band - 1], source.offsets[band - 1]))
-            probabilities, average = ensemble.predict(batch["image"], image_valid, dem_affines)
+            if has_terrain:
+                probabilities, average, image_valid = ensemble.predict(
+                    batch["image"], image_valid, dem_affines, return_valid=True)
+            else:
+                probabilities, average = ensemble.predict(batch["image"], image_valid, dem_affines)
         else:
             probabilities, average = ensemble.predict(batch["image"], image_valid)
         raw = (average >= threshold) & image_valid
         corrected = raw.clone()
         if with_labels:
             label = batch["label"].to(ensemble.device)
-            valid = label != first["ignore_index"]
+            valid = (label != first["ignore_index"]) & image_valid
         for i, name in enumerate(batch["name"]):
             image_path = resolve_sample_path(image_dir, name)
             options = scene_options[name]
@@ -406,7 +428,7 @@ def run_postprocess(checkpoint_paths, image_dir=None, label_dir=None,
                             else Path(scratch) / (kind + ".tif"))
                     path.parent.mkdir(parents=True, exist_ok=True)
                     array = mask.cpu().numpy().astype(np.uint8)
-                    array[~batch["valid_mask"][i].numpy()] = 255
+                    array[~image_valid[i].cpu().numpy()] = 255
                     with rasterio.open(path, "w", **profile) as target:
                         target.write(array, 1)
                     # ------ 后处理3：DEM/DSM用于几何水深估计（由analyze_water按配置执行）。------

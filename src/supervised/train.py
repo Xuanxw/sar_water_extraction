@@ -27,6 +27,7 @@ from termcolor import cprint
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from supervised.load.sar_scene_dataset import IGNORE_INDEX, SARSceneDataset, merge_scene_manifests
+from datasets.dfc_terrain import DFC_TERRAIN_CHANNELS, dfc_terrain_from_checkpoint, dfc_terrain_protocol
 from datasets.speckle import SpeckleFilter
 from datasets.relative_normalization import LOG_REPRESENTATION, RELATIVE_REPRESENTATIONS
 from datasets.manifest_paths import manifest_fingerprint, write_relative_manifest
@@ -244,7 +245,7 @@ class WaterSegmentationTrainer:
         low_water_pool_ratio=0.20, head_loss_weights=None, scene_options=None, class_weight_mode="none",
         resume_checkpoint=None, speckle=None, require_preprocessed=False, output_dir_is_final=False, require_normalized=False,
         quality_options=None, validation_inference=None, require_bc_power=False, patch_representation="stored",
-        training_extension=None,
+        training_extension=None, dfc_terrain_input=None,
     ):
         """准备固定划分、输入统计量、模型、优化器和实验目录。"""
         if scene_options is not None and patch_representation != "stored":
@@ -258,9 +259,21 @@ class WaterSegmentationTrainer:
         self.input_preprocessing = {}
         self.relative_normalization = None
         self.model_kwargs, self.model_info = dict(model_kwargs), dict(model_info)
+        self.in_channels = len(bands)
+        terrain = None
+        if dfc_terrain_input is not None:
+            if scene_options is not None or patch_representation != LOG_REPRESENTATION or tuple(bands) != (1, 4):
+                raise ValueError("DFC_TERRAIN_INPUT 需要 DFC patch 的相对对数 VV=1、DEM=4")
+            terrain = dfc_terrain_protocol(dfc_terrain_input)
+            self.in_channels = len(DFC_TERRAIN_CHANNELS)
+            if self.model_kwargs.get("in_channels") != self.in_channels:
+                raise ValueError("地形对照各组模型均需三个输入通道")
+            self.model_info.update(dfc_terrain=terrain, input_channels=DFC_TERRAIN_CHANNELS)
         self.resume_path = Path(resume_checkpoint) if resume_checkpoint is not None else None
         # 仅加载用户指定的本地训练检查点；先放CPU，避免临时占用两份显存。
         resume = torch.load(self.resume_path, map_location="cpu", weights_only=False) if self.resume_path else None
+        if resume is not None and dfc_terrain_from_checkpoint(resume) != dfc_terrain_input:
+            raise ValueError("续跑检查点的 DFC 地形输入或坡度计算协议与当前配置不同")
         if resume is not None and resume.get('patch_representation', 'stored') != patch_representation:
             raise ValueError('续跑检查点的切片输入表示与当前配置不同；新归一化实验请从头训练')
         self.resume_protocol_changed = (resume is not None and
@@ -383,9 +396,13 @@ class WaterSegmentationTrainer:
         else:
             from datasets.dfc_sample.s1_dataset import WaterDataset, sample_name
             self.dataset = WaterDataset(self.image_dir, self.label_dir, bands, speckle=self.speckle,
-                                        patch_representation=patch_representation)
+                                        patch_representation=patch_representation, dfc_terrain_input=dfc_terrain_input)
             self.model_info["patch_representation"] = patch_representation
-            if patch_representation == "relative_backscatter_ranks":
+            if terrain is not None:
+                self.model_info["input_representation"] = (
+                    f"DFC_relative_log_VV_train_P02_P98 + terrain({dfc_terrain_input}); train_channel_mean_std")
+                cprint(f"DFC 地形对照：{terrain}", "cyan", flush=True)
+            elif patch_representation == "relative_backscatter_ranks":
                 self.model_info["input_representation"] = "per_patch_per_band_valid_midrank; train_mean_std"
             elif patch_representation == "vv_rank_dem_m":
                 self.model_info["input_representation"] = "per_patch_valid_VV_midrank + DEM_m; train_channel_mean_std"
@@ -503,6 +520,9 @@ class WaterSegmentationTrainer:
                         self.output_dir / datetime.now().strftime(RUN_DIRECTORY_FORMAT))
         if self.new_run:
             self.run_dir.mkdir(parents=True, exist_ok=False)
+            if terrain is not None:
+                (self.run_dir / 'dfc_terrain.json').write_text(
+                    json.dumps(terrain, ensure_ascii=False, indent=2), encoding='utf-8')
             if self.relative_normalization is not None:
                 (self.run_dir / 'relative_normalization.json').write_text(
                     json.dumps(self.relative_normalization, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -641,7 +661,7 @@ class WaterSegmentationTrainer:
             source_fields = ('model_name', 'model_kwargs', 'bands', 'learning_rate', 'batch_size', 'epochs',
                              'seed', 'val_ratio', 'max_samples', 'loss_name', 'loss_kwargs', 'optimizer_name',
                              'weight_decay', 'train_augmentation', 'head_loss_weights', 'sampling_config',
-                             'validation_inference', 'patch_representation', 'input_preprocessing', 'relative_normalization',
+                             'validation_inference', 'patch_representation', 'dfc_terrain', 'input_preprocessing', 'relative_normalization',
                              'split_manifest_sha256', 'window_cache_key', 'train_windows_per_epoch')
             self.training_extension = dict(
                 config=policy, target_epochs=epochs, source_checkpoint=str(self.resume_path.resolve()),
@@ -840,7 +860,7 @@ class WaterSegmentationTrainer:
             else:
                 cprint(f"训练窗口统计：mean={mean}；std={std}；缓存可复用", 'cyan', flush=True)
             return
-        channel_sum = np.zeros(len(self.bands), dtype=np.float64)
+        channel_sum = np.zeros(self.in_channels, dtype=np.float64)
         channel_square_sum = np.zeros_like(channel_sum)
         pixel_count = 0
         if self.sampling in ("stratified_hard", "hybrid_hard"):
@@ -870,7 +890,7 @@ class WaterSegmentationTrainer:
         # [1,C,1,1] 可广播到任意批次；下限避免除零。
         self.mean = torch.tensor(mean, dtype=torch.float32, device=self.device).view(1, -1, 1, 1)
         self.std = torch.tensor(std, dtype=torch.float32, device=self.device).clamp_min(1e-6).view(1, -1, 1, 1)
-        cprint(f"输入通道：{self.bands}；均值：{mean}；标准差：{std}", color="cyan", flush=True)
+        cprint(f"模型输入：{self.model_info.get('input_channels', self.bands)}；均值：{mean}；标准差：{std}", color="cyan", flush=True)
 
     def blended_validation_batches(self):
         """逐景融合后输出互不重复的核心块；计分和图件都使用这份最终预测。"""
@@ -1141,7 +1161,7 @@ class WaterSegmentationTrainer:
         # 保留已有字段；state_dict包含BN缓冲区。
         checkpoint = {
             "model_state_dict": self.model.state_dict(), **self.model_info, **getattr(self, "split_info", {}),
-            "model_kwargs": self.model_kwargs, "in_channels": len(self.bands),
+            "model_kwargs": self.model_kwargs, "in_channels": self.in_channels,
             "bands": self.bands, "mean": self.mean.cpu().flatten(), "std": self.std.cpu().flatten(),
             "inputs_normalized": self.inputs_normalized, "input_preprocessing": self.input_preprocessing,
             "speckle": self.speckle,  # 评价/预测恢复相同预处理；旧检查点缺此字段表示关闭。
@@ -1273,6 +1293,7 @@ def create_trainer(method=None):
     # 在创建训练器时解析，单极化自动构建单通道网络，并重新统计该通道的均值和标准差。
     bands = tuple(POLARIZATION_BANDS[name] for name in POLARIZATIONS)
     input_channels = POLARIZATIONS
+    terrain_input = CONFIG["data"].get("DFC_TERRAIN_INPUT")
     if PATCH_REPRESENTATION in ("vv_rank_dem_m", *RELATIVE_REPRESENTATIONS):
         if DATA_LAYOUT != "patch" or POLARIZATIONS != ("VV",):
             raise ValueError(f"{PATCH_REPRESENTATION} 需要 patch 布局并选择 VV 极化")
@@ -1287,10 +1308,12 @@ def create_trainer(method=None):
         input_channels += ("DEM",)
     elif DEM_BAND is not None:
         raise ValueError("切片 DEM_BAND 需要配合 VV＋DEM 输入表示")
+    if terrain_input is not None:
+        input_channels = DFC_TERRAIN_CHANNELS
     if mobile_unet:
         from supervised.experimental.experimental_model_unet_mobilenet import AI4GWaterUNet
         model_class = AI4GWaterUNet
-        model_kwargs = dict(in_channels=len(bands), num_classes=1, pretrained=PRETRAINED)
+        model_kwargs = dict(in_channels=len(input_channels), num_classes=1, pretrained=PRETRAINED)
         model_info = dict(model_name="ai4g_mobilenetv2_unet_dfc", decoder="SMP U-Net",
                           normalization="BatchNorm", pretrained=PRETRAINED, supervision="single_head_" + LOSS_NAME)
         experiment = "ai4g_mobilenetv2_unet"
@@ -1300,7 +1323,7 @@ def create_trainer(method=None):
         if PRETRAINED:
             raise ValueError("BC 单极化结构对照从随机权重开始，请设 model.PRETRAINED: false")
         model_class = UNetS1Water
-        model_kwargs = dict(in_channels=len(bands), num_classes=1)
+        model_kwargs = dict(in_channels=len(input_channels), num_classes=1)
         experiment = "sentinel1_water_unet"
         model_info = dict(model_name=experiment, normalization="BatchNorm", pretrained=False,
                           decoder="nearest upsample + skip + three convolutions",
@@ -1311,7 +1334,7 @@ def create_trainer(method=None):
         if PRETRAINED:
             raise ValueError("U-Net++ 结构对照从随机权重开始，请设 model.PRETRAINED: false")
         model_class = UNetPlusPlus
-        model_kwargs = dict(in_channels=len(bands), num_classes=1)
+        model_kwargs = dict(in_channels=len(input_channels), num_classes=1)
         experiment = "sentinel1_water_unetpp"
         model_info = dict(
             model_name=experiment, normalization="BatchNorm", pretrained=False,
@@ -1323,14 +1346,14 @@ def create_trainer(method=None):
         )
     elif architecture == "unet":
         model_class = UNet
-        model_kwargs = dict(in_channels=len(bands), base_channels=BASE_CHANNELS)
+        model_kwargs = dict(in_channels=len(input_channels), base_channels=BASE_CHANNELS)
         model_info = dict(model_name="unet", normalization="BatchNorm", base_channels=BASE_CHANNELS)
         experiment = "unet_baseline"
 
     elif architecture == "semantic_fpn":
         is_pvt = backbone == PVT_B2
         model_class = PVTWaterNet if is_pvt else ResNet50WaterNet
-        model_kwargs = dict(in_channels=len(bands), num_classes=2,
+        model_kwargs = dict(in_channels=len(input_channels), num_classes=2,
                             decoder_channels=DECODER_CHANNELS, pretrained=PRETRAINED)
         model_info = dict(model_name="pvt" if is_pvt else "resnet50", stage="backbone_projection_decoder",
                           normalization="LayerNorm + decoder BatchNorm" if is_pvt else "BatchNorm")
@@ -1338,7 +1361,7 @@ def create_trainer(method=None):
 
     elif architecture == "uanet":
         model_class = PVTUANet
-        model_kwargs = dict(in_channels=len(bands), num_classes=2,
+        model_kwargs = dict(in_channels=len(input_channels), num_classes=2,
                             decoder_channels=DECODER_CHANNELS, pretrained=PRETRAINED, stage=STAGE)
         # 保留旧检查点名称 pvt_uanet，兼容既有加载器和实验记录。
         model_info = dict(model_name="pvt_uanet", backbone="pvt_v2_b2.in1k", stage=STAGE,
@@ -1348,7 +1371,7 @@ def create_trainer(method=None):
 
     elif architecture == "deeplabv3plus":
         model_class = PVTDeepLabV3Plus
-        model_kwargs = dict(in_channels=len(bands), num_classes=1, pretrained=PRETRAINED,
+        model_kwargs = dict(in_channels=len(input_channels), num_classes=1, pretrained=PRETRAINED,
                             backbone_name=backbone, decoder_channels=DEEPLAB_DECODER_CHANNELS,
                             low_level_channels=DEEPLAB_LOW_LEVEL_CHANNELS,
                             atrous_rates=DEEPLAB_ASPP_RATES, dropout=DEEPLAB_DROPOUT)
@@ -1369,7 +1392,7 @@ def create_trainer(method=None):
     elif architecture == "uafnet":
         # 水体论文的单模型结构；损失由 LOSS_NAME 选择，BCE+Dice 属于本项目对照实验。
         model_class = PVTUANet
-        model_kwargs = dict(in_channels=len(bands), num_classes=1,
+        model_kwargs = dict(in_channels=len(input_channels), num_classes=1,
                             decoder_channels=DECODER_CHANNELS, pretrained=PRETRAINED, stage="uafm",
                             backbone_name=backbone, final_residual=UAFNET_FINAL_RESIDUAL)
         if UAFNET_REFINEMENT_DECODER not in ("uafm", "unetpp"):
@@ -1438,6 +1461,8 @@ def create_trainer(method=None):
     # 保留原 VV/VH 目录；单极化或其他组合独立保存，防止比较时混淆。
     if input_channels != ("VV", "VH"):
         experiment += "_" + "_".join(name.lower() for name in input_channels)
+    if terrain_input is not None:
+        experiment += f"_{terrain_input}"
     model_info.update(architecture=architecture, backbone=backbone, polarizations=POLARIZATIONS,
                       polarization_bands=dict(zip(POLARIZATIONS, bands)), input_channels=input_channels)
     if DEM_BAND is not None:
@@ -1472,6 +1497,7 @@ def create_trainer(method=None):
         require_normalized=DATA_LAYOUT == "full_scene",
         require_bc_power=DATA_LAYOUT == "full_scene",
         patch_representation=PATCH_REPRESENTATION,
+        dfc_terrain_input=terrain_input,
         output_dir_is_final=OUTPUT_DIR is not None,
         quality_options=VALIDATION_QUALITY_OPTIONS,
         validation_inference=CONFIG.get('validation_inference') if DATA_LAYOUT == 'full_scene' else None,

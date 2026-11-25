@@ -1,4 +1,0 @@
-# 在项目 requirements.txt 之外，仅当输出 Word 与 Excel 时安装。
-python-docx>=1.1,<2
-openpyxl>=3.1,<4
-pypdf>=5,<7

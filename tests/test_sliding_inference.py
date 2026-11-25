@@ -153,6 +153,32 @@ def confusion(blocks, threshold):
 
 
 class SlidingInferenceTests(unittest.TestCase):
+    def test_derived_channels_on_overlapping_windows(self):
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            original, _ = make_scene(folder)
+            valid = np.isfinite(original)
+            # One source band produces three model inputs and three display channels.
+            def transform(tile, mask):
+                return np.stack((tile[0], tile[0] * 2, tile[0] * 3)), mask
+
+            image = np.zeros((3, *original.shape), dtype=np.float32)
+            scores = np.zeros_like(original)
+            coverage = np.zeros_like(valid)
+            for block in iter_scene_predictions(
+                    PixelModel(), folder/'image.tif', window_size=32, halo=8, stride=8,
+                    mean=[1, 2, 3], std=[2, 4, 6], batch_size=2, boundary_context=False,
+                    window_transform=transform, return_labels=False):
+                y, x, h, w = block['window']
+                image[:, y:y+h, x:x+w] = block['image']
+                scores[y:y+h, x:x+w] = block['scores']
+                coverage[y:y+h, x:x+w] = block['valid_mask']
+            np.testing.assert_array_equal(coverage, valid)
+            expected = (original[valid] - 1) / 2
+            for band in image:
+                np.testing.assert_allclose(band[valid], expected, atol=1e-6)
+            np.testing.assert_allclose(scores[valid], expected, atol=1e-6)
+
     def test_default_and_core_only_match_legacy_bitwise(self):
         for shape, stride, normalized, label in (((35, 47), 7, False, True),
                 ((35, 47), 8, True, True), ((35, 47), 16, False, False),

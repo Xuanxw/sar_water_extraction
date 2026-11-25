@@ -10,6 +10,9 @@ from torch.utils.data import DataLoader, Dataset
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from datasets.speckle import SpeckleFilter, read_filtered_window
+from datasets.dfc_terrain import (
+    dfc_terrain_protocol, dfc_terrain_valid_mask, prepare_dfc_terrain, validate_dfc_terrain_grid,
+)
 from datasets.relative_normalization import (
     LOG_REPRESENTATION, RELATIVE_REPRESENTATIONS, apply_vv_train_p02_p98_dem_m,
     relative_log10_power, relative_normalization_protocol, training_files_signature, validate_relative_normalization,
@@ -91,12 +94,17 @@ class WaterDataset(Dataset):
     """
 
     def __init__(self, image_dir, label_dir=None, bands=None, speckle=None, patch_representation="stored",
-                 relative_normalization=None):
+                 relative_normalization=None, dfc_terrain_input=None):
         """建立文件列表；标签按相对路径和不含扩展名的文件名配对。"""
         if patch_representation not in ("stored", "relative_backscatter_ranks", "vv_rank_dem_m", *RELATIVE_REPRESENTATIONS):
             raise ValueError(f"未知切片输入表示：{patch_representation}")
         self.patch_representation = patch_representation
         self.bands = bands
+        self.dfc_terrain_input = dfc_terrain_input
+        if dfc_terrain_input is not None:
+            dfc_terrain_protocol(dfc_terrain_input)
+            if patch_representation != LOG_REPRESENTATION or tuple(bands or ()) != (1, 4):
+                raise ValueError("DFC 地形对照需要相对对数 VV、源文件第 1 波段 VV 和第 4 波段高程")
         self.relative_normalization = None
         if relative_normalization is not None:
             self.set_relative_normalization(relative_normalization)
@@ -129,15 +137,23 @@ class WaterDataset(Dataset):
         """返回影像数量，供 DataLoader 确定迭代长度。"""
         return len(self.image_paths)
 
-    def read_image(self, index):
-        """只读原始所选通道和共同有效域；DEM 转成米值，不读标签或执行 VV 变换。"""
+    def _read_bands(self, index):
         image_path = self.image_paths[index]
         with rasterio.open(image_path) as src:
             from rasterio.windows import Window
+            if self.dfc_terrain_input is not None:
+                validate_dfc_terrain_grid(src)
             image, valid = read_filtered_window(src, self.bands, Window(0, 0, src.width, src.height), self.speckle_filter)
             if self.patch_representation in ("vv_rank_dem_m", *RELATIVE_REPRESENTATIONS):
                 dem_index = self.bands[1] - 1
                 image[1] = image[1] * src.scales[dem_index] + src.offsets[dem_index]
+        return image, valid
+
+    def read_image(self, index):
+        """原始 VV 和米制 DEM；地形对照用共同可估坡度的像元拟合分位数。"""
+        image, valid = self._read_bands(index)
+        if self.dfc_terrain_input is not None:
+            valid = dfc_terrain_valid_mask(valid)
         return image, valid
 
     def normalization_training_signature(self, indices):
@@ -201,13 +217,18 @@ class WaterDataset(Dataset):
 
     def __getitem__(self, index):
         """读取一个样本；坏文件或缺失标签直接保留库的异常，方便定位。"""
-        image, valid = self.read_image(index)
-        if self.patch_representation == "vv_rank_dem_m":
-            image = vv_rank_dem_m(image, valid)
-        elif self.patch_representation in RELATIVE_REPRESENTATIONS:
-            image = apply_vv_train_p02_p98_dem_m(image, valid, self.relative_normalization)
-        elif self.patch_representation == "relative_backscatter_ranks":
-            image = relative_backscatter_ranks(image, valid)
+        if self.dfc_terrain_input is not None:
+            # 坡度需要完整地形邻域；VV 只在各组均可评价的像元上转换。
+            image, valid = self._read_bands(index)
+            image, valid = prepare_dfc_terrain(image, valid, self.dfc_terrain_input, self.relative_normalization)
+        else:
+            image, valid = self.read_image(index)
+            if self.patch_representation == "vv_rank_dem_m":
+                image = vv_rank_dem_m(image, valid)
+            elif self.patch_representation in RELATIVE_REPRESENTATIONS:
+                image = apply_vv_train_p02_p98_dem_m(image, valid, self.relative_normalization)
+            elif self.patch_representation == "relative_backscatter_ranks":
+                image = relative_backscatter_ranks(image, valid)
         sample = {
             "image": torch.from_numpy(image),
             "valid_mask": torch.from_numpy(valid),

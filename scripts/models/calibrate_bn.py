@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader, Subset
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from datasets.dfc_sample.s1_dataset import WaterDataset, sample_name
+from datasets.dfc_terrain import dfc_terrain_from_checkpoint
 from datasets.manifest_paths import manifest_fingerprint
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.sliding_inference import iter_scene_predictions
@@ -113,7 +114,9 @@ class BNCalibrator:
                 raise ValueError('校准/验证窗口越过原划分')
         else:
             options = dict(bands=self.checkpoint['bands'], speckle=self.checkpoint.get('speckle'),
-                           patch_representation=self.checkpoint.get('patch_representation', 'stored'))
+                           patch_representation=self.checkpoint.get('patch_representation', 'stored'),
+                           relative_normalization=self.checkpoint.get('relative_normalization'),
+                           dfc_terrain_input=dfc_terrain_from_checkpoint(self.checkpoint))
             train_data = WaterDataset(self.checkpoint['image_dir'], **options)
             val_data = WaterDataset(self.checkpoint['image_dir'], self.checkpoint['label_dir'], **options)
             file_indices = {sample_name(path,train_data.image_dir):i for i,path in enumerate(train_data.image_paths)}
