@@ -139,8 +139,12 @@ def scan_gc_map2_v57_shadow_layover(executable, angle, slant_range, direction):
     return call_geometry_core(executable, 'gamma57_scan', payload, angle.size, 1).reshape(angle.shape).astype('uint8')
 
 
-def compute_radar_shadow_layover_batch(executable, points, bounds, angle_epsilon=1e-10, range_epsilon=1e-6):
-    """完整方位剖面批处理。points行×列×4，bounds行×3；输出行×列×2的0/1/255。"""
+def compute_radar_shadow_layover_batch(executable, points, bounds, angle_epsilon=1e-10, range_epsilon=1e-6, *, layover_scan='interval'):
+    """完整方位剖面批处理。points行×列×4，bounds行×3，输出阴影/叠掩0/1/255。
+
+    interval 使用斜距折返区间，ordered 沿地表顺序扫描并回填折返的近侧分支。
+    两者均保留缺测和外围高程包络约束。有向仰角单位弧度，斜距单位米。
+    """
     profile_points = np.asarray(points, dtype='<f8')
     support_bounds = np.asarray(bounds, dtype='<f8')
     if (
@@ -150,13 +154,27 @@ def compute_radar_shadow_layover_batch(executable, points, bounds, angle_epsilon
     ):
         raise ValueError('剖面或支持域边界尺寸不一致')
     rows, cols = profile_points.shape[:2]
+    if layover_scan == 'ordered_subpixel':
+        # 有序扫描内核接收float32。先在float64中逐剖面移去共同斜距，
+        # 使厘米级斜距差不因数百公里的共同量而变为相等。同步平移米制包络。
+        profile_points = profile_points.copy()
+        support_bounds = support_bounds.copy()
+        ranges = profile_points[:, :, 1]
+        valid = (profile_points[:, :, 3] == 1) & np.isfinite(ranges) & (ranges > 0)
+        minimum = np.min(ranges, axis=1, where=valid, initial=np.inf)
+        origin = np.where(np.isfinite(minimum), minimum - 1.0, 0.0)
+        ranges[:] = np.where(valid, ranges - origin[:, None], 0.0)
+        support_bounds[:, 1:] -= origin[:, None]
     payload = (
         struct.pack('<QQQdd', 1, rows * cols, cols, angle_epsilon, range_epsilon)
         + support_bounds.tobytes()
         + profile_points.tobytes()
     )
+    commands = {'interval': 'profiles', 'ordered': 'profiles_ordered', 'ordered_subpixel': 'profiles_ordered'}
+    if layover_scan not in commands:
+        raise ValueError(f'未知的剖面叠掩扫描方式：{layover_scan}')
     return (
-        call_geometry_core(executable, 'profiles', payload, rows * cols, 2)
+        call_geometry_core(executable, commands[layover_scan], payload, rows * cols, 2)
         .reshape(rows, cols, 2)
         .astype('uint8')
     )

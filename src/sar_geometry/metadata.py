@@ -126,7 +126,10 @@ def read_bc_metadata(path, xml_member=None):
     if look not in ('left', 'right'):
         raise ValueError(f'未知视向：{look}')
     product = field('adsHeader', 'productType')
-    if '-SM-' not in (xml_member or path.name).upper():
+    # 部分 BC3 SAFE 的注释保留 s1b-s1 前缀，条带模式标在产品目录名中。
+    product_name = path.parent.parent.name if path.parent.name.lower() == 'annotation' else ''
+    named_bc_stripmap = product_name.upper().startswith('BC') and '-SM-' in product_name.upper()
+    if '-SM-' not in (xml_member or path.name).upper() and not named_bc_stripmap:
         raise ValueError('首版只支持明确标记为SM的BC Stripmap产品')
     grid = dict(
         wavelength=LIGHT_SPEED / float(field(general, 'radarFrequency')),

@@ -48,6 +48,9 @@ def main(config_path):
     try:
         log(f'[01] 读取BC注释；模式={config["mode"]}')
         metadata = read_bc_metadata(config['paths']['XML_PATH'], config.get('xml_member'))
+        if config['mode'] == 'profile_layover':
+            from sar_geometry.profile_layover import run_profile_layover
+            return run_profile_layover(config, metadata, log)
         info = dict(
             **metadata['description'],
             radar_grid=metadata['grid'],
@@ -81,7 +84,7 @@ def main(config_path):
                 write_json(output / 'geometry_quality.json', report)
             return report
         if config['mode'] != 'nominal':
-            raise ValueError('mode应为inspect/nominal/visibility')
+            raise ValueError('mode应为inspect/nominal/visibility/profile_layover')
         if config['paths']['DEM_PATH'] is None:
             raise ValueError('nominal需要明确DEM_PATH')
         model = build_bc_range_doppler_model(metadata, config['model'])

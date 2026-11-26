@@ -22,6 +22,7 @@ from .core import interpolate_hermite_orbit_states
 from .metadata import build_bc_range_doppler_model
 from .profiles import (
     ElevationSampler,
+    DemPostingGrid,
     build_zero_doppler_terrain_profiles,
     sample_zero_doppler_visibility,
     A,
@@ -59,6 +60,9 @@ def prepare_inputs(config, log):
     """
     paths = config['paths']
     options = config['scene']
+    dem_kernel = options.get('dem_resampling', 'bilinear')
+    if dem_kernel not in ('bilinear', 'cubic'):
+        raise ValueError('dem_resampling 支持 bilinear 或 cubic')
     out = Path(paths['OUTPUT_DIR'])
     cache = out / 'data_cache'
     cache.mkdir(parents=True, exist_ok=True)
@@ -72,6 +76,7 @@ def prepare_inputs(config, log):
         geoid=str(paths['GEOID_PATH']),
         resolution=options['resolution_m'],
         dem_resolution=options.get('dem_resolution_m', options['resolution_m']),
+        dem_resampling=dem_kernel,
         buffer=options['support_buffer_m'],
         crs=options['output_crs'],
         nodata=options['org_nodata'],
@@ -112,7 +117,7 @@ def prepare_inputs(config, log):
         reference.with_suffix('.partial.tif').replace(reference)
     b = options['support_buffer_m']
     expanded = (bounds[0] - b, bounds[1] - b, bounds[2] + b, bounds[3] + b)
-    # DEM保留源信息尺度，细网格仅在采样时双线性求高程，不将整个20公里支持域放大。
+    # 在指定间距的支持网格上重建高程。cubic 采用 GDAL 的三次卷积，输入源 DEM 不变。
     dem_resolution = options.get('dem_resolution_m', options['resolution_m'])
     profile = make_terrain_raster_grid(expanded, dem_resolution, options['output_crs'])
     to_ll = Transformer.from_crs(profile['crs'], 4326, always_xy=True)
@@ -136,7 +141,7 @@ def prepare_inputs(config, log):
                             height=profile['height'],
                             nodata=np.nan,
                             dtype='float32',
-                            resampling=Resampling.bilinear,
+                            resampling=Resampling[dem_kernel],
                         )
                     )
                 )
@@ -267,6 +272,19 @@ def run_zero_doppler_terrain_visibility(config, metadata, log=print):
     paths = config['paths']
     options = config['scene']
     execution = config['execution']
+    scan = options.get('layover_scan', 'interval')
+    versions = {'interval': VERSION, 'ordered': 'zero_doppler_plane_profiles_ordered_0.5',
+                'ordered_subpixel': 'zero_doppler_plane_profiles_ordered_subpixel_0.6'}
+    if scan not in versions:
+        raise ValueError(f'未知的剖面叠掩扫描方式：{scan}')
+    algorithm = versions[scan]
+    vote_threshold = options.get('layover_vote_threshold', 0.5)
+    if not 0 < vote_threshold <= 1 or (scan != 'ordered_subpixel' and vote_threshold != 0.5):
+        raise ValueError('叠掩表决阈值应在 (0, 1]，自定义阈值需要 ordered_subpixel 模式')
+    posting = None
+    if options.get('map_posting_factor') is not None:
+        posting = DemPostingGrid(paths['DEM_TILES'], options['map_posting_factor'])
+        algorithm += '_dem_posting_0.7'
     exe = paths['CORE_PATH']
     output = Path(paths['OUTPUT_DIR'])
     cache = output / 'data_cache'
@@ -294,7 +312,7 @@ def run_zero_doppler_terrain_visibility(config, metadata, log=print):
     if missing > 0:
         log(f'[WARN] 成像时间有{missing:.6f}s无轨道支持；这些区域保留未知，不外推。')
     identity = dict(
-        version=VERSION,
+        version=algorithm,
         xml=hashlib.sha256(metadata['xml_bytes']).hexdigest(),
         dem=sha256(dem),
         reference=sha256(reference),
@@ -302,6 +320,8 @@ def run_zero_doppler_terrain_visibility(config, metadata, log=print):
         model=config['model'],
         scene=options,
     )
+    if posting is not None:
+        identity['posting_grid'] = posting.identity
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     progress = cache / 'scene_progress.json'
     state = json.loads(progress.read_text()) if progress.exists() else {}
@@ -355,6 +375,7 @@ def run_zero_doppler_terrain_visibility(config, metadata, log=print):
                 theta,
                 options['height_bounds_m'],
                 options['height_tolerance_m'],
+                layover_scan=scan,
             )
             masks[start:end] = result
             masks.flush()
@@ -366,7 +387,7 @@ def run_zero_doppler_terrain_visibility(config, metadata, log=print):
                 log(f'[03] 完整剖面 {end}/{len(times)}；本次阶段{perf_counter()-phase:.1f}s')
     finally:
         sampler.close()
-    # 映射采用(t,theta)最近邻，不用有多值的(t,range)插值；不会抹掉叠掩分支。
+    # 在单值的(t,theta)地表坐标上查询剖面，按选定模式判定地图中心的类别。
     phase = perf_counter()
     partials = {n: cache / (n + '.partial.tif') for n in names}
     with rasterio.open(reference) as ref, rasterio.open(dem) as elevation:
@@ -388,6 +409,7 @@ def run_zero_doppler_terrain_visibility(config, metadata, log=print):
         ) as source:
             transform = Transformer.from_crs(CRS.from_user_input(ref.crs).to_3d(), 4978, always_xy=True)
             with ExitStack() as stack:
+                post_points = posting.bind(stack, dem) if posting is not None else None
                 writers = {
                     n: stack.enter_context(
                         rasterio.open(
@@ -409,7 +431,8 @@ def run_zero_doppler_terrain_visibility(config, metadata, log=print):
                         transform.transform(a.c + (cc + 0.5) * a.a, a.f + (rr + 0.5) * a.e, h), axis=-1
                     ).reshape(-1, 3)
                     value, good, radar_covered = sample_zero_doppler_visibility(
-                        exe, model, p, times, theta, masks
+                        exe, model, p, times, theta, masks, subpixel_layover=(scan == 'ordered_subpixel'),
+                        post_points=post_points, layover_vote_threshold=vote_threshold,
                     )
                     covered = (ref.read(1, window=win).ravel() == 1) & radar_covered
                     value[~covered] = 255
@@ -445,7 +468,11 @@ def run_zero_doppler_terrain_visibility(config, metadata, log=print):
     report = dict(
         complete=True,
         cache_reused_this_run=False,
-        algorithm=VERSION,
+        algorithm=algorithm,
+        layover_scan=scan,
+        map_posting_factor=options.get('map_posting_factor'),
+        layover_vote_threshold=vote_threshold,
+        dem_resampling=options.get('dem_resampling', 'bilinear'),
         production_ready=False,
         geometry_confirmed=config['model']['radar_grid_confirmed'],
         geometry_assumption=options.get('geometry_assumption_note'),

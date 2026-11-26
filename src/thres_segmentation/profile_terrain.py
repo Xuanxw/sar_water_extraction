@@ -15,7 +15,7 @@ from shapely.geometry import box
 from shapely.ops import unary_union
 from sar_geometry.scene import run_zero_doppler_terrain_visibility, combine_shadow_layover_masks
 from sar_geometry.metadata import read_bc_metadata, build_bc_range_doppler_model
-from sar_geometry.profiles import sample_zero_doppler_visibility
+from sar_geometry.profiles import DemPostingGrid, sample_zero_doppler_visibility
 from sar_geometry.terrain_support import bound_same_range_terrain, scan_regional_dem_envelope
 from thres_segmentation.auxiliary_data import tile_specs, download_tile
 from utils.files import write_json
@@ -41,7 +41,7 @@ def visibility_transition_band(shadow, layover, radius=1):
 def refine_sar_visibility_boundaries(reference, geometry_dir, output, geometry, annotation, block_size, log):
     """将细网格稳定类别对齐至SAR，转折带按原生像元中心重新求解RD。
 
-    DEM仅按块双线性求椭球高；阴影/叠掩不做双线性插值。复用完整观测剖面，
+    DEM按块双线性求椭球高，叠掩沿用整景的剖面查询模式，阴影取最近邻。复用完整观测剖面，
     不在局部窗口内重建阴影。未知仍为255，真实边界精度受源DEM及剖面采样限制。
     """
     started = perf_counter()
@@ -69,12 +69,20 @@ def refine_sar_visibility_boundaries(reference, geometry_dir, output, geometry, 
     masks = np.load(geometry_dir / 'data_cache/profiles.npy', mmap_mode='r')
     settings = dict(geometry['model'], radar_grid_confirmed=True)
     model = build_bc_range_doppler_model(annotation, settings)
+    sample_options = {}
+    if geometry.get('scene', {}).get('layover_scan') == 'ordered_subpixel':
+        sample_options['subpixel_layover'] = True
+        sample_options['layover_vote_threshold'] = geometry['scene'].get('layover_vote_threshold', 0.5)
     names = ('shadow_mask', 'layover_mask', 'terrain_exclusion')
     products = {name: output / (name + '.tif') for name in names}
     refined_count = valid_count = 0
     # 转折带严格使用与整景相同的DEM/轨道/轴；只减少稳定核心的重复求解。
     with rasterio.Env(GDAL_CACHEMAX=64 * 1024 * 1024), ExitStack() as stack:
         stack.callback(masks._mmap.close)
+        factor = geometry.get('scene', {}).get('map_posting_factor')
+        if factor is not None:
+            posting = DemPostingGrid(geometry['paths']['DEM_TILES'], factor)
+            sample_options['post_points'] = posting.bind(stack, geometry_dir / 'data_cache/dem_ellipsoid.tif')
         src = stack.enter_context(rasterio.open(reference))
         native_grid = dict(crs=str(src.crs), width=src.width, height=src.height, transform=list(src.transform))
         profile = dict(src.profile, driver='GTiff', count=1, dtype='uint8', nodata=255,
@@ -113,7 +121,8 @@ def refine_sar_visibility_boundaries(reference, geometry_dir, output, geometry, 
                     h = heights.read(1, window=win, masked=True).filled(np.nan)[refine]
                     points = np.column_stack(to_ecef.transform(x, y, h))
                     value, _, _ = sample_zero_doppler_visibility(
-                        geometry['paths']['CORE_PATH'], model, points, times, theta, masks
+                        geometry['paths']['CORE_PATH'], model, points, times, theta, masks,
+                        **sample_options,
                     )
                     s[refine], l[refine] = value[:, 0], value[:, 1]
                 s[~valid] = l[~valid] = 255

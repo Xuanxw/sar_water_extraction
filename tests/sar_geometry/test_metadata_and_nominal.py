@@ -48,6 +48,17 @@ def setup(root,rows=3):
 
 
 class MetadataTests(unittest.TestCase):
+    def test_strip_mode_from_bc_safe_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / 'BC3-SM-SLC-test' / 'annotation'
+            parent.mkdir(parents=True)
+            xml = parent / 's1b-s1-slc-vv.xml'
+            xml.write_text(xml_text(), encoding='utf8')
+            self.assertGreater(read_bc_metadata(xml)['grid']['rows'], 0)
+            other = Path(tmp) / xml.name
+            other.write_bytes(xml.read_bytes())
+            with self.assertRaisesRegex(ValueError, 'SM'):
+                read_bc_metadata(other)
     def test_exact_image_fields_and_zip(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);c=setup(root);p=c['paths']['XML_PATH']

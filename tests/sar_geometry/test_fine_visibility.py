@@ -19,6 +19,45 @@ from thres_segmentation.profile_terrain import (
 
 
 class FineVisibilityTests(unittest.TestCase):
+    def test_dem_kernel_invalidates_cache_and_preserves_nodata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = scene_config(Path(tmp))
+            source = config['paths']['DEM_TILES'][0]
+            with rasterio.open(source, 'r+') as ds:
+                rows, cols = np.indices(ds.shape)
+                values = (600 + 90 * np.cos(cols / 2) * np.sin(rows / 4)).astype('f4')
+                values[110:125, 120:135] = ds.nodata
+                ds.write(values, 1)
+            config['scene']['dem_resolution_m'] = 15
+            path, _ = prepare_inputs(config, lambda _: None)
+            with rasterio.open(path) as ds:
+                original = ds.read(1)
+            config['scene']['dem_resampling'] = 'cubic'
+            path, _ = prepare_inputs(config, lambda _: None)
+            with rasterio.open(path) as ds:
+                cubic = ds.read(1)
+            self.assertGreater(np.nanmax(np.abs(cubic - original)), .1)
+            self.assertTrue(np.any(~np.isfinite(cubic)))
+
+    def test_elevation_sampling_across_column_chunks(self):
+        from sar_geometry.profiles import ElevationSampler
+        with tempfile.TemporaryDirectory() as tmp:
+            config = scene_config(Path(tmp))
+            path = config['paths']['DEM_TILES'][0]
+            with rasterio.open(path, 'r+') as ds:
+                field = np.arange(ds.width * ds.height, dtype='f4').reshape(ds.shape)
+                field[140:150, 140:150] = ds.nodata
+                ds.write(field, 1)
+            sampler = ElevationSampler(path)
+            try:
+                x = np.linspace(-.04, .06, 1050)
+                y = np.linspace(5.06, 4.95, len(x))
+                expected = sampler.sample(x, y)
+                actual = sampler.sample(np.stack([x, x]), np.stack([y, y]))
+                np.testing.assert_allclose(actual, np.stack([expected, expected]), equal_nan=True)
+            finally:
+                sampler.close()
+
     def test_transition_halo_matches_whole_and_keeps_unknown(self):
         shadow = np.zeros((20, 23), np.uint8)
         shadow[7:13, 8:15] = 1

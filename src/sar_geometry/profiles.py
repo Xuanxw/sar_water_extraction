@@ -4,8 +4,10 @@
 V·(P-S)=0；地表角theta按近侧到远侧递增。非零Doppler斜视需要另一种曲面。
 """
 
+from contextlib import closing
+from functools import partial
 import numpy as np
-from pyproj import Transformer
+from pyproj import CRS, Transformer
 from scipy.ndimage import map_coordinates
 import rasterio
 from rasterio.windows import Window
@@ -77,6 +79,14 @@ class ElevationSampler:
         self.src.close()
 
     def sample(self, lon, lat):
+        # 细网格上，斜穿整景的细长剖面对应一个很大的轴对齐包围窗。
+        # 沿横向拆分取高程，每个窗仍读足双线性邻域；整条剖面的折返判定在拼回后进行。
+        if np.ndim(lon) == 2 and lon.shape[1] > 512:
+            result = np.empty(lon.shape, dtype='float64')
+            for start in range(0, lon.shape[1], 512):
+                part = slice(start, start + 512)
+                result[:, part] = self.sample(lon[:, part], lat[:, part])
+            return result
         x, y = self.transformer.transform(lon, lat)
         inv = ~self.src.transform
         col = inv.a * x + inv.b * y + inv.c - 0.5
@@ -100,7 +110,7 @@ class ElevationSampler:
 
 
 def build_zero_doppler_terrain_profiles(
-    executable, model, sampler, times, theta, height_bounds, tolerance_m=0.05
+    executable, model, sampler, times, theta, height_bounds, tolerance_m=0.05, *, layover_scan='interval'
 ):
     """生成完整横向剖面并批量分类，返回掩膜/位置/有效标记及数值残差。
 
@@ -160,7 +170,7 @@ def build_zero_doppler_terrain_profiles(
             np.linalg.norm(far_hi, axis=-1),
         )
     )
-    masks = compute_radar_shadow_layover_batch(executable, points, bounds)
+    masks = compute_radar_shadow_layover_batch(executable, points, bounds, layover_scan=layover_scan)
     error = float(np.max(np.abs(residual[valid]))) if valid.any() else None
     return masks, surface_points, valid, error
 
@@ -180,18 +190,92 @@ def map_ecef_to_zero_doppler_profile(executable, model, points, solved):
     return solved[:, 2], theta, valid_geometry
 
 
-def sample_zero_doppler_visibility(executable, model, points, times, theta, masks):
+class DemPostingGrid:
+    """由源 DEM 像元中心和指定细分倍数定义叠掩回填格点。"""
+
+    def __init__(self, tiles, factor):
+        if type(factor) is not int or factor < 1 or not tiles:
+            raise ValueError('map_posting_factor 需要正整数和源 DEM')
+        with rasterio.open(tiles[0]) as ref:
+            crs, affine = ref.crs, ref.transform
+        if crs is None or affine.b or affine.d or affine.a <= 0 or affine.e >= 0:
+            raise ValueError('源 DEM 格点回填需要具有 CRS 的北向上网格')
+        for path in tiles[1:]:
+            with rasterio.open(path) as src:
+                t = src.transform
+                offset = (~affine) * (t.c, t.f)
+                if (src.crs != crs or t.b or t.d or
+                        not np.allclose([t.a, t.e], [affine.a, affine.e], atol=0, rtol=1e-9) or
+                        not np.allclose(offset, np.rint(offset), atol=1e-5, rtol=0)):
+                    raise ValueError('源 DEM 瓦片需要共用网格间距和像元中心格点')
+        self.center = affine * (.5, .5)
+        self.step = (affine.a / factor, affine.e / factor)
+        self.identity = dict(crs=crs.to_wkt(), center=self.center, step=self.step)
+        self.from_ecef = Transformer.from_crs(4978, CRS.from_user_input(crs).to_3d(), always_xy=True)
+        self.to_geo = Transformer.from_crs(crs, 4326, always_xy=True)
+        self.to_ecef = Transformer.from_crs(4979, 4978, always_xy=True)
+
+    def surface_points(self, points, sampler):
+        """N×3 ECEF 米坐标→最近细分 DEM 中心的地表 ECEF 点。缺高程时返回 NaN。"""
+        x, y, _ = self.from_ecef.transform(*points.T)
+        x = self.center[0] + np.floor((x - self.center[0]) / self.step[0] + .5) * self.step[0]
+        y = self.center[1] + np.floor((y - self.center[1]) / self.step[1] + .5) * self.step[1]
+        lon, lat = self.to_geo.transform(x, y)
+        h = sampler.sample(lon, lat)
+        return np.column_stack(self.to_ecef.transform(lon, lat, h))
+
+    def bind(self, stack, dem):
+        sampler = stack.enter_context(closing(ElevationSampler(dem)))
+        return partial(self.surface_points, sampler=sampler)
+
+
+def sample_zero_doppler_visibility(executable, model, points, times, theta, masks, *,
+                                   subpixel_layover=False, post_points=None, layover_vote_threshold=0.5):
+    """求原点的覆盖与阴影，可选在源 DEM 细分格点复查已知叠掩。"""
+    if not 0 < layover_vote_threshold <= 1 or (not subpixel_layover and layover_vote_threshold != 0.5):
+        raise ValueError('叠掩表决阈值应在 (0, 1]，自定义阈值需要 ordered_subpixel 模式')
+    value, good, covered = _query_profile_masks(
+        executable, model, points, times, theta, masks, subpixel_layover, layover_vote_threshold)
+    if post_points is not None:
+        indices = np.flatnonzero(value[:, 1] != 255)
+        if indices.size:
+            posted = post_points(points[indices])
+            finite = np.isfinite(posted).all(axis=1)
+            if finite.any():
+                result, _, _ = _query_profile_masks(
+                    executable, model, posted[finite], times, theta, masks, subpixel_layover, layover_vote_threshold)
+                known = result[:, 1] != 255
+                value[indices[finite][known], 1] = result[known, 1]
+    return value, good, covered
+
+
+def _query_profile_masks(executable, model, points, times, theta, masks, subpixel_layover, layover_vote_threshold):
     """将N×3 ECEF点映射到完整观测剖面，返回N×2类别、收敛与幅宽内标记。
 
     坐标为米/秒/弧度；类别为0可见、1遮挡、255未知。仅对连续坐标求解，
-    类别采用最近邻，不在0/1/255之间插值。域外及失败保留255。
+    默认采用最近邻。亚像元模式仅对四邻域均已知的叠掩按双线性权重表决。
+    阴影及含未知邻点的叠掩使用最近邻。域外及失败保留255。
     """
     solved = solve_range_doppler_points(executable, model, points)
     t, angle, good = map_ecef_to_zero_doppler_profile(executable, model, points, solved)
-    row = np.rint(np.where(good, (t - times[0]) / (times[1] - times[0]), -1)).astype('int64')
-    col = np.rint(np.where(good, (angle - theta[0]) / (theta[1] - theta[0]), -1)).astype('int64')
+    row_coord = np.where(good, (t - times[0]) / (times[1] - times[0]), -1)
+    col_coord = np.where(good, (angle - theta[0]) / (theta[1] - theta[0]), -1)
+    row = np.rint(row_coord).astype('int64')
+    col = np.rint(col_coord).astype('int64')
     covered = solved[:, 5] == 0
     sample = covered & good & (row >= 0) & (row < len(times)) & (col >= 0) & (col < len(theta))
     value = np.full((len(points), 2), 255, dtype='uint8')
     value[sample] = masks[row[sample], col[sample]]
+    if subpixel_layover:
+        y = np.clip(row_coord[sample], 0, len(times) - 1)
+        x = np.clip(col_coord[sample], 0, len(theta) - 1)
+        r0, c0 = np.floor(y).astype('int64'), np.floor(x).astype('int64')
+        r1, c1 = np.minimum(r0 + 1, len(times) - 1), np.minimum(c0 + 1, len(theta) - 1)
+        top_left, top_right = masks[r0, c0, 1], masks[r0, c1, 1]
+        bottom_left, bottom_right = masks[r1, c0, 1], masks[r1, c1, 1]
+        known = (top_left < 2) & (top_right < 2) & (bottom_left < 2) & (bottom_right < 2)
+        dy, dx = y - r0, x - c0
+        support = ((1 - dy) * ((1 - dx) * top_left + dx * top_right)
+                   + dy * ((1 - dx) * bottom_left + dx * bottom_right))
+        value[np.flatnonzero(sample)[known], 1] = support[known] >= layover_vote_threshold
     return value, good, covered

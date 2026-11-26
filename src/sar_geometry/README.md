@@ -363,6 +363,20 @@ Python采用清楚的算法名称、逐步语句和必要中文说明；核心�
 
 `scene.resolution_m`控制地理计算网格，`scene.dem_resolution_m`独立控制支持域DEM存储间隔；不设置后者时沿用计算网格间隔。细网格DEM值按双线性采样获得，源DEM的真实信息分辨率没有增加。
 
-`profiles.sample_zero_doppler_visibility()`统一实现ECEF点→RD→零Doppler地表角坐标→完整剖面类别查询。只有连续坐标参与计算，0/1/255类别采用最近邻，域外和失败为未知。
+`profiles.sample_zero_doppler_visibility()` 先对 ECEF 点求解 RD，再按零多普勒时刻和地表角查完整剖面。默认模式使用最近邻。选择 `scene.layover_scan: ordered_subpixel` 后，四邻点已知时按双线性权重表决，阈值由 `scene.layover_vote_threshold` 指定，默认为 0.5。含未知邻点时取最近邻，阴影也取最近邻。域外和失败为未知。可用 `scene.map_posting_factor` 在源 DEM 细分格点复查已知叠掩，甘孜和密云的参数见同目录 `GAMMA_ALIGNMENT.md`。
 
 阈值适配器的`scene.refine_sar_boundaries`开启原生SAR边界复核：在细网格用3×3邻域标出阴影/叠掩/未知转折带，包含跨块halo；转折带逐原生像元求解RD，稳定核心最近邻对齐。该计算复用整条剖面，不在窗口内部重新计算遮挡。`visibility_transition.tif`只是重算位置，不能用作地形排除掩膜。剖面采样间隔仍需独立记录；最终像元尺寸不等于地形分类精度。
+
+### BC 条带数据的叠掩剖面
+
+`mode: profile_layover` 以原始 BC XML、单幅已拼接的 WGS84 椭球高 DEM 和有地理参考的 SAR 有效范围为输入。适用于本次验证的零多普勒条带、3×3 多视、逐多视方位行、距离系数 0.8、DEM 两向六倍细分和 10 m 投影输出。输入可用 `paths.XML_PATH`、`paths.DEM_PATH`、`paths.ORG_PATH` 指定。配置 `model.height_datum: WGS84_ellipsoid`、`model.doppler_mode: zero` 和以米为单位的 `scene.output_crs`。运行方式是 `python src/sar_geometry/main.py 配置.yaml`。用同一原生源码目录的 CMake 工程构建 `sar_geometry_core` 和 `sar_profile_regrid`，用 `paths.CORE_PATH` 和 `paths.REGRID_PATH` 指向可执行文件和共享库。
+
+地形表面由源 DEM 像元中心上的二次 B 样条插值得到。扫描横向坐标为卫星机体系内的横轨距离，间距为多视距离采样间距除以 0.8。各方位行保留整条剖面的地表顺序，最后在细分 DEM 格点用四邻双线性权重判别叠掩，阈值为 0.50。
+
+`scene.profile_orbit` 控制 XML 状态向量与多视方位行的对应关系。
+
+- `xml_hermite` 使用原始时刻和 Hermite 轨道求解所有坐标。省略参数时采用此项。
+- `bc_azimuth` 保留上述物理斜距、横轨距离和视角，将方位行登记到 BC 多视时间轴。这是甘孜 BC3、密云 BC5 两景对照采用的配置。
+- `bc_mli` 也按 BC 多视时间约定求斜距和机体系坐标。两种 BC 多视模式限于本次核对的长状态向量序列（超过 31 条）。状态向量仍取自原始 XML，不需要 GAMMA LUT 或叠掩类别。
+
+`layover_native.tif` 为经纬度六倍 DEM 格点的结果，`layover_10m.tif` 为 SAR 有效范围内的 10 m 栅格。值 0 表示未判叠掩，1 表示叠掩，255 表示未知或域外。多边形化应只取值 1。`geometry_quality.json` 记录多视网格、DEM 裁窗、剖面间距、轨道处理和表决阈值。

@@ -26,9 +26,9 @@ int main(int argc,char** argv) {
     try {
         // 管道按大块传输；关闭stdio同步，避免逐数值I/O锁成为计算瓶颈。
         std::ios::sync_with_stdio(false);std::cin.tie(nullptr);
-        if (argc!=2) throw std::runtime_error("usage: sar_geometry_core solve|states|visibility|profiles|gamma57_scan|version");
+        if (argc!=2) throw std::runtime_error("usage: sar_geometry_core solve|states|visibility|profiles|profiles_ordered|gamma57_scan|version");
         std::string command=argv[1];
-        if (command=="version") {std::cout<<"sar_geometry_core 0.4 protocol=1 openmp gamma57_scan\n";return 0;}
+        if (command=="version") {std::cout<<"sar_geometry_core 0.5 protocol=1 openmp gamma57_scan profiles_ordered\n";return 0;}
         if constexpr (std::endian::native!=std::endian::little) throw std::runtime_error("little endian host required");
 #ifdef _WIN32
         _setmode(_fileno(stdin),_O_BINARY);_setmode(_fileno(stdout),_O_BINARY);
@@ -97,7 +97,7 @@ int main(int argc,char** argv) {
                 double value = x;
                 write_values(&value, 1);
             }
-        } else if (command=="profiles") {
+        } else if (command=="profiles" || command=="profiles_ordered") {
             auto columns=count(1000000);
             if(!columns || n%columns)throw std::runtime_error("invalid profile shape");
             double ae=number(),re=number();
@@ -122,7 +122,7 @@ int main(int argc,char** argv) {
                 if(first<last) {
                     // 仅剥离外部缺测首尾；内部空洞仍传播未知，不跨洞拼接。
                     std::vector<sar::ProfilePoint> supported(row.begin()+first,row.begin()+last);
-                    auto value=sar::visibility_bounded(supported,bounds[j][0],bounds[j][1],bounds[j][2],ae,re);
+                    auto value=sar::visibility_bounded(supported,bounds[j][0],bounds[j][1],bounds[j][2],ae,re,command=="profiles_ordered");
                     std::copy(value.begin(),value.end(),output[j].begin()+first);
                 }
             }

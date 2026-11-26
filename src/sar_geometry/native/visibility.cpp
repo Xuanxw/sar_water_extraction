@@ -1,12 +1,39 @@
 #include "visibility.h"
+#include "gc_map2_v57.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numbers>
 #include <stdexcept>
 #include <utility>
 namespace sar {
-std::vector<Visibility> visibility_bounded(const std::vector<ProfilePoint>& p,double upper,double near_max,double far_min,double ae,double re) {
-    auto out=visibility(p,true,ae,re);
+std::vector<Visibility> visibility_bounded(const std::vector<ProfilePoint>& p,double upper,double near_max,double far_min,double ae,double re,bool ordered_scan) {
+    std::vector<Visibility> out;
+    if (ordered_scan) {
+        out.assign(p.size(), {255,255});
+        std::vector<float> angle, range;
+        angle.reserve(p.size());
+        range.reserve(p.size());
+        for (const auto& point : p) {
+            if (point[3] != 1 || !std::isfinite(point[1]) || !std::isfinite(point[2]) || point[1] <= 0) {
+                break;
+            }
+            // 每条剖面均从近到远。有向仰角从星下点的 -π/2 起算，平移后以 +1 扫描。
+            // angle 使用弧度，range 使用米。内部空洞可能隐藏折返，整行叠掩保留未知。
+            angle.push_back(static_cast<float>(point[2] + std::numbers::pi / 2));
+            range.push_back(static_cast<float>(point[1]));
+        }
+        if (range.size() == p.size()) {
+            const auto flags = scan_gc_map2_v57_shadow_layover(angle, range, 1);
+            for (std::size_t i = 0; i < p.size(); ++i) {
+                if (flags[i] != 0) {
+                    out[i][1] = (flags[i] & 4) ? 1 : 0;
+                }
+            }
+        }
+    } else {
+        out=visibility(p,true,ae,re);
+    }
     double horizon=-std::numeric_limits<double>::infinity();bool gap=false;
     for(std::size_t i=0;i<p.size();++i) {
         bool valid=p[i][3]==1 && std::isfinite(p[i][1]) && std::isfinite(p[i][2]) && p[i][1]>0;
