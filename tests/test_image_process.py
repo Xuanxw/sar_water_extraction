@@ -202,6 +202,7 @@ class ImageProcessTests(unittest.TestCase):
                     with rasterio.open(target / 'images/val/val.tif') as val:
                         self.assertEqual(val.tags(1)['p02'], val.tags(1)['p98'])
                         self.assertTrue(np.all(val.read(1, masked=True).compressed() == 0))
+                    source_stamp = path.stat().st_mtime_ns
                     overview = raw_path.parent / 'quicklooks_relative_db_p02_p98' / 'train.quick_overview.png'
                     without_dem = tools.export_scene(raw_path)
                     self.assertCountEqual(without_dem['available_stages'], ['relative_db', 'normalized'])
@@ -218,8 +219,18 @@ class ImageProcessTests(unittest.TestCase):
                     self.assertEqual(with_dem['status'], 'written')
                     self.assertEqual(with_dem['available_stages'], ['relative_db', 'normalized', 'dem'])
                     metadata = json.loads(overview.with_suffix('.json').read_text(encoding='utf-8'))
-                    np.testing.assert_allclose(metadata['display_ranges']['relative_db'], [lo, hi])
-                    self.assertEqual(metadata['display_ranges']['normalized'], [0, 1])
+                    with rasterio.open(path) as vv:
+                        values, counts, _ = tools.read_overview(vv)
+                    expected_range = np.percentile(values[(counts > 0) & (values > 0)], (5, 95))
+                    self.assertGreater(expected_range[0], 0)
+                    np.testing.assert_allclose(metadata['normalization_db_limits'], [lo, hi])
+                    np.testing.assert_allclose(metadata['display_ranges']['normalized'], expected_range)
+                    np.testing.assert_allclose(metadata['display_ranges']['relative_db'],
+                                               lo + expected_range * (hi - lo))
+                    self.assertEqual(path.stat().st_mtime_ns, source_stamp)
+                    metadata['configuration']['version'] = 1
+                    tools.save_record(overview.with_suffix('.json'), metadata)
+                    self.assertEqual(tools.export_scene(raw_path)['status'], 'written')
                     x, y, w, h = metadata['panels']['dem']
                     with Image.open(overview) as png:
                         self.assertEqual(png.mode, 'RGB')

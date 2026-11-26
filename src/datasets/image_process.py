@@ -1265,6 +1265,15 @@ def _process_stage(stage):
         raise
 
 
+def sar_quicklook_limits(values, valid, floor, fallback):
+    """从高于显示下限的有效概览像元估计灰阶 P05/P95，单位与输入相同。"""
+    samples = values[valid & (values > floor)]
+    if not samples.size:
+        return fallback
+    low, high = map(float, np.percentile(samples, (5, 95)))
+    return (low, high) if high > low else fallback
+
+
 def export_relative_db_scene(path, figure, metadata):
     """在同一整景网格生成相对 dB、[0,1] VV、米制高程的三联概览。"""
     from matplotlib import colormaps
@@ -1284,7 +1293,7 @@ def export_relative_db_scene(path, figure, metadata):
                 and not (root/'.preprocessing_incomplete').exists()):
             available[key] = candidate
 
-    signature = dict(version=1, layout='relative_db_vv_dem', band=BAND, looks=QUICKLOOK_LOOKS,
+    signature = dict(version=2, layout='relative_db_vv_dem', band=BAND, looks=QUICKLOOK_LOOKS,
                      max_side=QUICKLOOK_MAX_SIDE, dem_colormap='viridis',
                      sources={key: file_stamp(candidate) for key, candidate in available.items()})
     if figure.is_file() and metadata.is_file():
@@ -1292,8 +1301,9 @@ def export_relative_db_scene(path, figure, metadata):
         if saved.get('configuration') == json.loads(json.dumps(signature)):
             return dict(name=path.name, status='reused', **saved['statistics'])
 
-    # 相对 dB 面板使用滤波后的线性功率。合成概览后取对数，沿用归一化的 P02/P98 色阶。
-    panels, grid, db_limits = {}, None, None
+    # 训练值保留原来的 P02/P98。显示色阶从概览单独估计，两个 VV 面板使用对应的数值范围。
+    panels, grid = {}, None
+    normalization_db_limits = normalized_display = None
     for key, candidate in available.items():
         with rasterio.open(candidate) as src:
             current = src.shape, src.crs, src.transform
@@ -1303,16 +1313,23 @@ def export_relative_db_scene(path, figure, metadata):
             values, counts, _ = read_overview(src, 1 if key == 'dem' else BAND)
             if key == 'normalized':
                 tags = src.tags(BAND)
-                db_limits = float(tags['p02']), float(tags['p98'])
+                normalization_db_limits = float(tags['p02']), float(tags['p98'])
         valid = counts > 0
-        limits = (0., 1.)
+        if not valid.any():
+            continue
+        if key == 'normalized':
+            normalized_display = limits = sar_quicklook_limits(values, valid, 0., (0., 1.))
         if key == 'relative_db':
             values[valid] = relative_log10_power(values[valid])
-            limits = db_limits
-        if limits is None or key == 'dem':
-            limits = tuple(map(float, np.percentile(values[valid], (2, 98)))) if valid.any() else None
-        if valid.any():
-            panels[key] = display_bytes(values, valid, *limits), limits
+            if normalized_display is not None and normalization_db_limits[1] > normalization_db_limits[0]:
+                low, high = normalization_db_limits
+                limits = tuple(low + fraction*(high-low) for fraction in normalized_display)
+            else:
+                floor = float(relative_log10_power(0.))
+                limits = sar_quicklook_limits(values, valid, floor, (floor, float(values[valid].max())))
+        if key == 'dem':
+            limits = tuple(map(float, np.percentile(values[valid], (2, 98))))
+        panels[key] = display_bytes(values, valid, *limits), limits
 
     if grid is None:
         with rasterio.open(path) as src:
@@ -1331,8 +1348,8 @@ def export_relative_db_scene(path, figure, metadata):
     gray = np.repeat(ramp[:, None], 3, axis=1)
     missing_color = np.array([[30, 34, 40]], dtype='uint8')
     headings = (
-        ('relative_db', 'Filtered VV | relative dB', '10 log10(mean power / 1)', 'dB'),
-        ('normalized', 'Normalized VV | [0, 1]', 'Scene dB P02 / P98', ''),
+        ('relative_db', 'Filtered VV | relative dB', '10 log10(mean power / 1); display stretch', 'dB'),
+        ('normalized', 'Normalized VV | [0, 1]', 'Display stretch from non-zero overview pixels', ''),
         ('dem', 'Copernicus GLO-30 | elevation', 'EGM2008 heights', 'm'),
     )
     rectangles, display_ranges = {}, {}
@@ -1365,7 +1382,8 @@ def export_relative_db_scene(path, figure, metadata):
     statistics = dict(width=width, height=height, figure_width=canvas.width, figure_height=canvas.height,
                       overview_width=cols, overview_height=rows, available_stages=list(rectangles))
     save_record(metadata, dict(configuration=signature, statistics=statistics,
-                               panels=rectangles, display_ranges=display_ranges))
+                               panels=rectangles, display_ranges=display_ranges,
+                               normalization_db_limits=normalization_db_limits))
     return dict(name=path.name, status='written', **statistics)
 
 
