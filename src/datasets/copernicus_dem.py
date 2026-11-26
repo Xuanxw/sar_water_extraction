@@ -34,7 +34,10 @@ class DemTileCatalog:
             raise ValueError(f"目标影像缺少地理网格：{scene.name}")
         extent = box(*transform_bounds(scene.crs, "EPSG:4326", *scene.bounds))
         matches = sorted(self.index.query(extent, predicate="intersects"))
-        if not matches or not unary_union(self.index.geometries.take(matches)).covers(extent):
+        coverage = unary_union(self.index.geometries.take(matches))
+        # GLO-30 瓦片边界经浮点运算可能差数个 ULP。1e-9 度不足 0.12 毫米，
+        # 只容纳坐标舍入缝隙，远小于一个 DEM 像元；对齐和有效掩膜仍使用原瓦片。
+        if not coverage.covers(extent) and not coverage.buffer(1e-9).covers(extent):
             raise ValueError(f"本地 DEM 瓦片未覆盖影像范围：{Path(scene.name).name}；经纬范围 {extent.bounds}")
         return [self.paths[i] for i in matches]
 

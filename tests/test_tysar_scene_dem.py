@@ -9,13 +9,14 @@ from unittest.mock import patch
 
 import numpy as np
 import rasterio
-from rasterio.transform import from_origin
+from rasterio.transform import from_bounds, from_origin
 import torch
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 from datasets import image_process
+from datasets.copernicus_dem import DemTileCatalog
 from datasets.manifest_paths import source_path
 from datasets.scene_dem import prepare_scene_dems
 from supervised import train
@@ -30,6 +31,25 @@ def raster(path, data, grid, nodata):
 
 
 class SceneDEMTests(unittest.TestCase):
+    def test_cop30_floating_point_seam_does_not_hide_missing_tile(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tiles = root / "tiles"
+            data = np.ones((10, 10), dtype="float32")
+            for lat, north in ((30, 31.000138888888888), (31, 32.00013888888889)):
+                for lon in (119, 120):
+                    tile = tiles / f"Copernicus_DSM_COG_10_N{lat}_00_E{lon}_00_DEM.tif"
+                    raster(tile, data, from_origin(lon - .5 / 3600, north, .1, .1), np.nan)
+
+            extent = (119.98540458716252, 30.8697359404922, 120.32070479754056, 31.1810369558365)
+            source = root / "scene.tif"
+            raster(source, data, from_bounds(*extent, 10, 10), np.nan)
+            with rasterio.open(source) as scene:
+                self.assertEqual(len(DemTileCatalog(tiles).covering(scene)), 4)
+                (tiles / "Copernicus_DSM_COG_10_N31_00_E120_00_DEM.tif").unlink()
+                with self.assertRaisesRegex(ValueError, "未覆盖影像范围"):
+                    DemTileCatalog(tiles).covering(scene)
+
     def make_inputs(self, base):
         vv_root = base / "normalized_p02_p98"
         grids = [from_origin(116 + i, 41, .01, .01) for i in range(2)]

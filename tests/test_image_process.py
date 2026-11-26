@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch, MagicMock
 import numpy as np
+from PIL import Image
 import rasterio
 import torch
 from datasets import image_process as tools, snap_preprocess
@@ -201,8 +202,30 @@ class ImageProcessTests(unittest.TestCase):
                     with rasterio.open(target / 'images/val/val.tif') as val:
                         self.assertEqual(val.tags(1)['p02'], val.tags(1)['p98'])
                         self.assertTrue(np.all(val.read(1, masked=True).compressed() == 0))
-                    tools.export_scene(raw_path)
-                    self.assertTrue((raw_path.parent / 'quicklooks_relative_db_p02_p98').is_dir())
+                    overview = raw_path.parent / 'quicklooks_relative_db_p02_p98' / 'train.quick_overview.png'
+                    without_dem = tools.export_scene(raw_path)
+                    self.assertCountEqual(without_dem['available_stages'], ['relative_db', 'normalized'])
+                    self.assertEqual(tools.export_scene(raw_path)['status'], 'reused')
+
+                    terrain = target.with_name(target.name + '_vv_dem')
+                    dem = terrain/'dem/train/train.tif'
+                    dem.parent.mkdir(parents=True)
+                    with rasterio.open(path) as vv:
+                        with rasterio.open(dem, 'w', **vv.profile) as dst:
+                            dst.write(raw + 100, 1)
+                    tools.save_record(terrain/'preprocessing.json', dict(stage='vv_dem', complete=True))
+                    with_dem = tools.export_scene(raw_path)
+                    self.assertEqual(with_dem['status'], 'written')
+                    self.assertEqual(with_dem['available_stages'], ['relative_db', 'normalized', 'dem'])
+                    metadata = json.loads(overview.with_suffix('.json').read_text(encoding='utf-8'))
+                    np.testing.assert_allclose(metadata['display_ranges']['relative_db'], [lo, hi])
+                    self.assertEqual(metadata['display_ranges']['normalized'], [0, 1])
+                    x, y, w, h = metadata['panels']['dem']
+                    with Image.open(overview) as png:
+                        self.assertEqual(png.mode, 'RGB')
+                        colors = np.asarray(png.crop((x, y, x+w, y+h)))
+                    self.assertTrue(np.any(colors[:, :, 0] != colors[:, :, 1]))
+                    self.assertEqual(tools.export_scene(raw_path)['status'], 'reused')
                     stamp = path.stat().st_mtime_ns
                     tools.main()
                     self.assertEqual(path.stat().st_mtime_ns, stamp)

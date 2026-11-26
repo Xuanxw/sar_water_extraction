@@ -821,8 +821,9 @@ def display_bytes(values, valid, low, high):
     return np.where(valid,1+254*np.nan_to_num(scaled,nan=0,posinf=1,neginf=0),0).astype('uint8')
 
 
-def read_overview(src):
-    """分块平均线性功率生成概览；忽略无效/非有限值，合法0参与平均，边缘保留。"""
+def read_overview(src, band=None):
+    """分块平均指定波段，保留源值单位、有效零与边缘块，跳过无效和非有限值。"""
+    band = BAND if band is None else band
     looks = max(QUICKLOOK_LOOKS, (max(src.width, src.height) + QUICKLOOK_MAX_SIDE - 1) // QUICKLOOK_MAX_SIDE)
     height = (src.height + looks - 1) // looks
     width = (src.width + looks - 1) // looks
@@ -834,7 +835,7 @@ def read_overview(src):
     for top in range(0, height, step):
         rows = min(step, height - top)
         start = top * looks
-        raw = src.read(BAND, window=Window(0, start, src.width, min(rows * looks, src.height - start)),
+        raw = src.read(band, window=Window(0, start, src.width, min(rows * looks, src.height - start)),
                        masked=True, out_dtype='float32')
         valid = ~np.ma.getmaskarray(raw) & np.isfinite(raw.data)
         values = np.where(valid, raw.data, 0).astype('float64')
@@ -1264,12 +1265,118 @@ def _process_stage(stage):
         raise
 
 
+def export_relative_db_scene(path, figure, metadata):
+    """在同一整景网格生成相对 dB、[0,1] VV、米制高程的三联概览。"""
+    from matplotlib import colormaps
+
+    split = path.parent.name
+    filtered, normalized = stage_root('filtered'), stage_root('normalized')
+    terrain = normalized.with_name(normalized.name + '_vv_dem')
+    sources = {
+        'normalized': (normalized, normalized/'images'/split/path.name, 'normalized'),
+        'relative_db': (filtered, filtered/'images'/split/path.name, 'filtered'),
+        'dem': (terrain, terrain/'dem'/split/(path.stem + '.tif'), 'vv_dem'),
+    }
+    available = {}
+    for key, (root, candidate, stage) in sources.items():
+        record = stage_record(root)
+        if (record.get('stage') == stage and record.get('complete') is True and candidate.is_file()
+                and not (root/'.preprocessing_incomplete').exists()):
+            available[key] = candidate
+
+    signature = dict(version=1, layout='relative_db_vv_dem', band=BAND, looks=QUICKLOOK_LOOKS,
+                     max_side=QUICKLOOK_MAX_SIDE, dem_colormap='viridis',
+                     sources={key: file_stamp(candidate) for key, candidate in available.items()})
+    if figure.is_file() and metadata.is_file():
+        saved = json.loads(metadata.read_text(encoding='utf-8'))
+        if saved.get('configuration') == json.loads(json.dumps(signature)):
+            return dict(name=path.name, status='reused', **saved['statistics'])
+
+    # 相对 dB 面板使用滤波后的线性功率。合成概览后取对数，沿用归一化的 P02/P98 色阶。
+    panels, grid, db_limits = {}, None, None
+    for key, candidate in available.items():
+        with rasterio.open(candidate) as src:
+            current = src.shape, src.crs, src.transform
+            if grid is not None and grid != current:
+                raise ValueError(f'快视图输入网格与其他面板不一致：{candidate}')
+            grid = current
+            values, counts, _ = read_overview(src, 1 if key == 'dem' else BAND)
+            if key == 'normalized':
+                tags = src.tags(BAND)
+                db_limits = float(tags['p02']), float(tags['p98'])
+        valid = counts > 0
+        limits = (0., 1.)
+        if key == 'relative_db':
+            values[valid] = relative_log10_power(values[valid])
+            limits = db_limits
+        if limits is None or key == 'dem':
+            limits = tuple(map(float, np.percentile(values[valid], (2, 98)))) if valid.any() else None
+        if valid.any():
+            panels[key] = display_bytes(values, valid, *limits), limits
+
+    if grid is None:
+        with rasterio.open(path) as src:
+            grid = src.shape, src.crs, src.transform
+    height, width = grid[0]
+    looks = max(QUICKLOOK_LOOKS, (max(height, width) + QUICKLOOK_MAX_SIDE - 1) // QUICKLOOK_MAX_SIDE)
+    rows, cols = (height + looks - 1) // looks, (width + looks - 1) // looks
+    pitch = max(cols + 20, 355)
+    canvas = Image.new('RGB', (3*pitch + 12, rows+143), 'white')
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default(size=15)
+    draw.text((12, 8), path.stem, fill='black', font=font)
+
+    palette = colormaps['viridis'](np.linspace(0, 1, 255), bytes=True)[:, :3]
+    ramp = np.arange(1, 256, dtype='uint8')
+    gray = np.repeat(ramp[:, None], 3, axis=1)
+    missing_color = np.array([[30, 34, 40]], dtype='uint8')
+    headings = (
+        ('relative_db', 'Filtered VV | relative dB', '10 log10(mean power / 1)', 'dB'),
+        ('normalized', 'Normalized VV | [0, 1]', 'Scene dB P02 / P98', ''),
+        ('dem', 'Copernicus GLO-30 | elevation', 'EGM2008 heights', 'm'),
+    )
+    rectangles, display_ranges = {}, {}
+    for index, (key, title, caption, unit) in enumerate(headings):
+        x, y = 12 + index*pitch, 92
+        draw.text((x, 39), title, fill='black', font=font)
+        if key not in panels:
+            status = 'No valid pixels' if key in available else 'Not generated / stage incomplete'
+            draw.text((x, 64), status, fill='black', font=font)
+            continue
+        values, limits = panels[key]
+        draw.text((x, 64), caption, fill='black', font=font)
+        colors = np.concatenate((missing_color, palette if key == 'dem' else gray))
+        canvas.paste(Image.fromarray(colors[values]), (x, y))
+        rectangles[key] = [x, y, cols, rows]
+        display_ranges[key] = list(limits)
+        bar_width = max(170, min(cols, pitch - 20))
+        bar_y = y + rows + 9
+        low, high = limits
+        indices = np.linspace(1, 255, bar_width).astype('uint8') if high > low else np.ones(bar_width, dtype='uint8')
+        strip = np.repeat(colors[indices][None], 9, axis=0)
+        canvas.paste(Image.fromarray(strip), (x, bar_y))
+        draw.text((x, bar_y+12), f'{low:.4g} {unit}'.rstrip(), fill='black', font=font)
+        if high > low:
+            draw.text((x+bar_width, bar_y+12), f'{high:.4g} {unit}'.rstrip(), fill='black', font=font, anchor='ra')
+
+    pending = figure.with_suffix('.png.partial')
+    canvas.save(pending, format='PNG', compress_level=PNG_COMPRESSION)
+    pending.replace(figure)
+    statistics = dict(width=width, height=height, figure_width=canvas.width, figure_height=canvas.height,
+                      overview_width=cols, overview_height=rows, available_stages=list(rectangles))
+    save_record(metadata, dict(configuration=signature, statistics=statistics,
+                               panels=rectangles, display_ranges=display_ranges))
+    return dict(name=path.name, status='written', **statistics)
+
+
 def export_scene(path):
-    """按已有成果输出原图/校正/滤波/归一化概览；缺失阶段明确标注。"""
+    """按归一化方法生成快视图，缺失阶段明确标注。"""
     output = path.parent / ('quicklooks' + SCENE_NORMALIZATION_SUFFIX.get(NORMALIZATION_METHOD, ''))
     output.mkdir(exist_ok=True)
     figure = output / (path.stem + '.quick_overview.png')
     metadata = figure.with_suffix('.json')
+    if NORMALIZATION_METHOD == 'scene_relative_db_p02_p98':
+        return export_relative_db_scene(path, figure, metadata)
     sources = [('org',path,{}), *[(stage, stage_root(stage)/'images'/path.parent.name/path.name, stage_record(stage_root(stage)))
                                 for stage in ('calibrated','filtered','normalized')]]
     available = []
@@ -1298,8 +1405,6 @@ def export_scene(path):
             limits = (0, 1) if relative else Z_DISPLAY_RANGE
             gray = display_bytes(values, valid, *limits)
             display = 'scene P02-P98 [0,1]' if relative else f'fixed z range {limits}'
-            if record.get('output_domain') == 'scene_relative_db_p02_p98':
-                display = 'relative power dB; scene P02-P98 [0,1]'
         elif record.get('quantity') in ('sigma0','beta0','gamma0'):
             positive = valid & (values > 0)
             db = 10 * np.log10(np.maximum(values,1e-30))
@@ -1338,7 +1443,7 @@ def export_scene(path):
 
 
 def export_quicklooks():
-    """生成四阶段概览，不启动校正、滤波或归一化计算。"""
+    """从既有阶段成果生成快视图，相对 dB 模式另读已对齐的高程。"""
     if QUICKLOOK_LOOKS < 1 or QUICKLOOK_MAX_SIDE < 1:
         raise ValueError('概览平均倍数和最长边需为正整数')
     files = [p for split in SPLITS for p in sorted((QUICKLOOK_IMAGE_ROOT/split).iterdir())
