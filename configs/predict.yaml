@@ -18,8 +18,8 @@ input:
   DESCRIPTION: 与训练一致的BC离线滤波及标准化数据 # 仅记录，不会根据文字转换数值。
 inference:
   THRESHOLD: 0.5         # 固定水体概率阈值；不在无标签影像上自动选阈值。
-  WINDOW_SIZE: null      # null沿用检查点；历史切片模型默认512，须为32的倍数。
-  HALO: null             # null沿用检查点；历史切片模型默认64，上下文不参与核心区写入。
+  WINDOW_SIZE: null      # 优先沿用检查点的验证窗口，其次是训练窗口；历史切片模型默认512。
+  HALO: null             # 优先沿用检查点的验证上下文，其次是训练上下文；历史切片模型默认64。
   STRIDE: null           # null沿用验证协议或半个核心；不得大于WINDOW_SIZE-2*HALO。
   BLEND: null            # null沿用验证协议或gaussian；支持hann / gaussian / constant。
   BATCH_SIZE: 1          # 显存不足时保持1。

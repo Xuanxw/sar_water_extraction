@@ -1,4 +1,5 @@
 """整景推理窗口：沿用训练的上下文和补零规则，不依赖标签决定是否预测。"""
+from numbers import Integral
 from pathlib import Path
 import numpy as np
 import rasterio
@@ -8,16 +9,25 @@ from torch.utils.data import Dataset
 from datasets.speckle import SpeckleFilter, read_filtered_window
 
 
+def inference_window_geometry(options, default_size, default_halo):
+    """解析推理窗口边长及单边上下文宽度，单位为原生像元。省略时使用传入的默认网格。"""
+    size = options.get('window_size', default_size)
+    halo = options.get('halo', default_halo)
+    if (not isinstance(size, Integral) or not isinstance(halo, Integral)
+            or halo < 0 or size % 32 or size <= 2 * halo):
+        raise ValueError('推理 window_size 须为32的倍数，halo 须为非负整数且核心区大于0')
+    return int(size), int(halo)
+
+
 class SceneWindows(Dataset):
     """遍历单景全部核心区；默认不重叠，可显式缩小 stride；标签可为空。"""
     def __init__(self, image_path, label_path=None, bands=(1,), window_size=1024, halo=128, speckle=None, stride=None, read_labels=True):
         self.image_path = Path(image_path)
         self.label_path = Path(label_path) if label_path else None
         self.read_labels = read_labels  # 融合预测只读SAR，标签留到最终输出时计分。
-        self.bands, self.size, self.halo = tuple(bands), window_size, halo
-        self.core = window_size - 2 * halo
-        if self.core <= 0 or halo < 0 or window_size % 32:
-            raise ValueError('窗口应为32的倍数且核心区大于0')
+        self.bands = tuple(bands)
+        self.size, self.halo = inference_window_geometry({}, window_size, halo)
+        self.core = self.size - 2 * self.halo
         # 默认仍是旧的中心区不重叠；整景融合时显式指定更小的步长。
         self.stride = self.core if stride is None else int(stride)
         if not 0 < self.stride <= self.core:

@@ -21,7 +21,7 @@ from rasterio.windows import Window
 import torch
 from torch.utils.data import DataLoader
 
-from supervised.load.scene_windows import SceneWindows
+from supervised.load.scene_windows import SceneWindows, inference_window_geometry
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.boundary_eval import boundary_regions, confusion_counts, BoundaryPointReservoir
 from supervised.evaluation.metrics import metrics_from_counts
@@ -237,10 +237,13 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
         raise ValueError('概率阈值必须在0和1之间')
     radii = tuple(boundary_radii)
     halo, size = c['window_halo'], c['window_size']
+    saved_options = c.get('validation_inference') or {}
+    saved_size, saved_halo = inference_window_geometry(saved_options, size, halo)
     # 新检查点复用验证时的融合协议；传入空字典可显式做旧中心区直拼对照。
-    inference_options = dict(c.get('validation_inference') or {}) if inference_options is None else dict(inference_options)
+    inference_options = saved_options if inference_options is None else inference_options
     use_blending = bool(inference_options)
     if use_blending:
+        size, halo = inference_window_geometry(inference_options, saved_size, saved_halo)
         inference_options = dict(stride=int(inference_options.get('stride') or (size-2*halo)//2),
                                  blend=inference_options.get('blend', 'gaussian'))
     if any(r<=0 or r>halo for r in radii) or min(opening_radius,closing_radius)<0 or 2*(opening_radius+closing_radius)>halo:
@@ -277,11 +280,11 @@ def run_scene_quality(checkpoint_path, image_dir=None, label_dir=None, output_di
     batch_size=config['batch_size']
     # 只有推理协议一致时，0.5复评才应与原轮次一致。
     expected=c.get('phase_metrics',{}).get('val',{})
-    checkpoint_options = c.get('validation_inference') or {}
-    if checkpoint_options:
-        checkpoint_options = dict(stride=int(checkpoint_options.get('stride') or (size-2*halo)//2),
-                                  blend=checkpoint_options.get('blend', 'gaussian'))
-    same_inference_protocol = checkpoint_options == inference_options
+    checkpoint_options = {}
+    if saved_options:
+        checkpoint_options = dict(stride=int(saved_options.get('stride') or (saved_size-2*saved_halo)//2),
+                                  blend=saved_options.get('blend', 'gaussian'))
+    same_inference_protocol = (size, halo, inference_options) == (saved_size, saved_halo, checkpoint_options)
     for number,r in enumerate(scenes,1):
         name=r['scene_id']; marker=output/'counts'/(name+'.npz')
         if marker.exists():

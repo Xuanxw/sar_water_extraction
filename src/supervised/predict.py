@@ -27,6 +27,7 @@ from datasets.relative_normalization import (
 )
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.sliding_inference import iter_scene_predictions
+from supervised.load.scene_windows import inference_window_geometry
 from supervised.evaluation.mask_postprocess import postprocess_water_raster
 from thres_segmentation.run_log import RunLog
 from utils.files import sha256, signature, write_json
@@ -53,12 +54,14 @@ def prediction_settings(checkpoint, config):
     if (len(mean) != channel_count or len(std) != channel_count
             or not np.isfinite([mean, std]).all() or min(std) <= 0):
         raise ValueError('检查点缺少匹配通道的有限均值和正标准差')
-    size = inference.get('WINDOW_SIZE') or checkpoint.get('window_size', 512)
+    saved = checkpoint.get('validation_inference') or {}
+    saved_size, saved_halo = inference_window_geometry(
+        saved, checkpoint.get('window_size', 512), checkpoint.get('window_halo', 64))
+    size = inference.get('WINDOW_SIZE') or saved_size
     halo = inference.get('HALO')
-    halo = checkpoint.get('window_halo', 64) if halo is None else halo
+    halo = saved_halo if halo is None else halo
     if terrain_mode is not None and halo < DFC_SLOPE_RADIUS:
         raise ValueError(f'DFC 地形推理的 HALO 至少需要 {DFC_SLOPE_RADIUS} 像元以覆盖坡度差分邻域')
-    saved = checkpoint.get('validation_inference') or {}
     stride = inference.get('STRIDE') or saved.get('stride') or (size-2*halo)//2
     blend = inference.get('BLEND') or saved.get('blend', 'gaussian')
     representation = checkpoint.get('patch_representation', 'stored')

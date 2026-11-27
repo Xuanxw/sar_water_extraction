@@ -22,6 +22,7 @@ from datasets.dfc_terrain import dfc_terrain_from_checkpoint
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.evaluation.sliding_inference import iter_scene_predictions
+from supervised.load.scene_windows import inference_window_geometry
 
 RUN_DIR = ROOT / "outputs/pvt_deeplabv3plus_vv_sqrt_weight_bce_offline_normalized_bc_scenes_overlap/20261110_221430_589086"
 CHECKPOINT_PATH = RUN_DIR / "best_f1.pth"
@@ -201,6 +202,8 @@ def prepare_scan(checkpoints, expected_epochs=None, image_dir=None, label_dir=No
         config = checkpoint.get('validation_inference', {})
         if checkpoint.get('data_layout') != 'full_scene' or not config.get('blend'):
             raise ValueError("本次扫描要求保存了重叠融合协议的整景检查点")
+        size, halo = inference_window_geometry(config, checkpoint['window_size'], checkpoint['window_halo'])
+        fusion = {key: value for key, value in config.items() if key not in ('window_size', 'halo')}
         images = Path(checkpoint['image_dir'] if image_dir is None else image_dir)
         labels = Path(checkpoint['label_dir'] if label_dir is None else label_dir)
         check_preprocessed_input(images, checkpoint)
@@ -227,8 +230,8 @@ def prepare_scan(checkpoints, expected_epochs=None, image_dir=None, label_dir=No
         protocol = dict(image_dir=str(images.resolve()), label_dir=str(labels.resolve()),
             split_manifest_sha256=checkpoint['split_manifest_sha256'], label_revision_sha256=revision,
             val_files=sorted(checkpoint['val_files']), val_scene_files=sorted(wanted),
-            bands=list(checkpoint['bands']), window_size=checkpoint['window_size'],
-            halo=checkpoint['window_halo'], validation_inference=config,
+            bands=list(checkpoint['bands']), window_size=size,
+            halo=halo, validation_inference=fusion,
             mean=torch.as_tensor(checkpoint['mean']).flatten().tolist(),
             std=torch.as_tensor(checkpoint['std']).flatten().tolist(),
             inputs_normalized=checkpoint.get('inputs_normalized', False),
@@ -243,9 +246,11 @@ def prepare_scan(checkpoints, expected_epochs=None, image_dir=None, label_dir=No
                 stamps.append((str(source.resolve()), stat.st_size, stat.st_mtime_ns))
         protocol['source_stamps'] = stamps
         protocol = json.loads(json.dumps(protocol, default=str))
-        if reference is not None and protocol != reference:
+        # 整景融合由验证景及推理网格决定；训练网格上的 val_files 只保留于记录。
+        if reference is not None and any(value != reference[key] for key, value in protocol.items() if key != 'val_files'):
             raise ValueError(f'{name}的验证数据或推理协议与其他模型不同')
-        reference = protocol
+        if reference is None:
+            reference = protocol
         models[name] = dict(path=str(Path(path).resolve()), sha256=sha256(path), epoch=checkpoint['epoch'])
         print(f"核查通过：{name}，epoch={checkpoint['epoch']}，val={len(scenes)}景", flush=True)
         del checkpoint
@@ -328,6 +333,10 @@ LEGACY_SCAN_HASHES = (
 )
 OPTIMIZED_INFERENCE_HASH = "9cd25d3459f2bb4da6168f887655ddad2f37089a092365c11800ac07d84e00b7"
 PATH_UPGRADE_PREVIOUS_HASH = "afe72a4e0dd84832c44bb4fbadc167f8b32b299f1bcc00882955edc8d17d1924"
+PRE_DECOUPLED_WINDOW_HASHES = (
+    "98ddd59e479c1f20ceee28c73663f9e7cbd595d9f9f158ffb06422573909d989",
+    "04bd7c3c3d9efe98eb0459578aaa7bb30143187975b9109ee9eb7e0dabe79f71",
+)
 
 
 def same_scan_protocol(saved, current):
@@ -335,9 +344,10 @@ def same_scan_protocol(saved, current):
     if saved == current:
         return True
     previous = (saved.get('code_hash'), saved.get('inference_code_hash'))
-    # 本次仅兼容清单路径转换指纹；不改变推理、阈值或统计口径。
-    compatible = (LEGACY_SCAN_HASHES, (PATH_UPGRADE_PREVIOUS_HASH, OPTIMIZED_INFERENCE_HASH))
-    if previous not in compatible or current.get('inference_code_hash') != OPTIMIZED_INFERENCE_HASH:
+    compatible = (LEGACY_SCAN_HASHES, (PATH_UPGRADE_PREVIOUS_HASH, OPTIMIZED_INFERENCE_HASH),
+                  PRE_DECOUPLED_WINDOW_HASHES)
+    if previous not in compatible or current.get('inference_code_hash') not in (
+            OPTIMIZED_INFERENCE_HASH, PRE_DECOUPLED_WINDOW_HASHES[1]):
         return False
     return ({k: v for k, v in saved.items() if k not in ('code_hash', 'inference_code_hash')} ==
             {k: v for k, v in current.items() if k not in ('code_hash', 'inference_code_hash')})

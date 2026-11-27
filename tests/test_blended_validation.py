@@ -9,6 +9,7 @@ import random
 import numpy as np
 import torch
 from supervised import train
+from supervised.evaluation import sliding_inference
 import test_sar_scene_dataset as fixtures
 import test_resume_training
 
@@ -21,6 +22,30 @@ class BlendedValidationTests(unittest.TestCase):
         torch.set_num_threads(2)
         self.helper=test_resume_training.ResumeTests()
         self.options=dict(stride=8,blend='hann',num_workers=0)
+
+    def test_validation_window_is_independent_and_saved_for_resume(self):
+        # stride 大于训练核心区、但小于验证核心区，能检测是否混用了两个窗口。
+        options = dict(self.options, window_size=64, halo=16, stride=24)
+        with patch.object(train, 'cprint'):
+            root = Path(self.enterContext(TemporaryDirectory()))
+            data = fixtures.SceneDatasetTests().prepare(root)
+            trainer = self.helper.make_trainer(root, validation_inference=options, epochs=2)
+            self.addCleanup(trainer.dataset.close)
+            self.assertEqual(trainer.dataset[trainer.dataset.train_ids[0]]['image'].shape[-2:], (32, 32))
+            with patch.object(sliding_inference, 'iter_scene_predictions',
+                              wraps=sliding_inference.iter_scene_predictions) as predict:
+                self.helper.interrupt(trainer, 2, 'train')
+            self.assertEqual(tuple(predict.call_args.kwargs[key] for key in ('window_size', 'halo', 'stride')),
+                             (64, 16, 24))
+            saved = self.helper.load(trainer.run_dir/'last.pth')
+            self.assertEqual((saved['window_size'], saved['window_halo']), (32, 8))
+            self.assertEqual(saved['validation_inference'], options)
+            vv, gt = data['val']
+            self.assertEqual(saved['phase_metrics']['val']['valid_pixels'], np.count_nonzero(np.isfinite(vv) & (gt != 255)))
+            resumed = self.helper.make_trainer(root, trainer.run_dir/'last.pth', validation_inference=options, epochs=2)
+            self.addCleanup(resumed.dataset.close)
+            self.assertEqual(resumed.run_dir, trainer.run_dir)
+            self.assertEqual((resumed.val_window_size, resumed.val_halo, resumed.val_stride), (64, 16, 24))
 
     def test_protocol_migration_preserves_state_and_original_run(self):
         with TemporaryDirectory() as tmp, patch.object(train,'cprint'):

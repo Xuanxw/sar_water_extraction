@@ -139,8 +139,11 @@ quality:
 
 # 仅改变验证/推理，不改训练窗口、损失或优化器。旧检查点迁移到独立新目录。
 # 新目录中断后，将RESUME_CHECKPOINT指向新目录的train_end.pth或last.pth。
+# 验证窗口可单独指定；省略 window_size/halo 时沿用训练窗口。
 # 1024输入、halo128、core768；stride384使core重叠50%，logits按Hann权重融合后只计分一次。
 validation_inference:
+  # window_size: 1024
+  # halo: 128
   stride: 384
   blend: hann
   num_workers: 0

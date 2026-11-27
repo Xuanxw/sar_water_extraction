@@ -60,6 +60,16 @@ class PredictionTests(unittest.TestCase):
         self.settings, _ = predict.prediction_settings(self.checkpoint, self.config)
         self.info = dict(name='synthetic_pixel_model', epoch=0, sha256='test')
 
+    def test_prediction_inherits_validation_window_with_yaml_override(self):
+        checkpoint = dict(self.checkpoint, validation_inference=dict(window_size=64, halo=16, stride=24, blend='hann'))
+        settings = self.config['inference']
+        settings.update(WINDOW_SIZE=None, HALO=None, STRIDE=None, BLEND=None)
+        params, _ = predict.prediction_settings(checkpoint, self.config)
+        self.assertEqual(tuple(params[key] for key in ('window_size', 'halo', 'stride', 'blend')), (64, 16, 24, 'hann'))
+        settings.update(WINDOW_SIZE=96, HALO=0)
+        params, _ = predict.prediction_settings(checkpoint, self.config)
+        self.assertEqual((params['window_size'], params['halo'], params['stride']), (96, 0, 24))
+
     def run_pixel_prediction(self):
         return predict.predict_scene(PixelModel(), self.source, self.root / 'scene_output', self.settings,
             self.config, checkpoint_info=self.info, log=lambda _: None)

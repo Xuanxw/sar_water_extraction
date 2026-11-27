@@ -19,6 +19,7 @@ from datasets.dfc_terrain import dfc_terrain_from_checkpoint
 from datasets.manifest_paths import manifest_fingerprint
 from supervised.models.checkpoint import load_model
 from supervised.evaluation.sliding_inference import iter_scene_predictions
+from supervised.load.scene_windows import inference_window_geometry
 from supervised.evaluation.metrics import metrics_from_counts
 from supervised.load.sar_scene_dataset import SARSceneDataset, check_preprocessed_input
 import numpy as np
@@ -136,6 +137,7 @@ class BNCalibrator:
         """沿用源检查点的融合协议；每个有效像素只计一次，并输出逐景指标。"""
         self.model.eval()
         config = self.validation_inference
+        size, halo = inference_window_geometry(config, self.checkpoint['window_size'], self.checkpoint['window_halo'])
         names = set(self.checkpoint['val_scene_files'])
         scenes = [row for row in self.dataset.scenes if row['split']=='val' and row['name'] in names]
         selected = EVALUATION_SCENES if scene_ids is None else scene_ids
@@ -154,8 +156,8 @@ class BNCalibrator:
             for block in iter_scene_predictions(self.model,
                     self.dataset.root/'images'/row['split']/row['name'],
                     self.dataset.root/'labels'/row['split']/row['label_name'],
-                    bands=self.checkpoint['bands'],window_size=self.checkpoint['window_size'],
-                    halo=self.checkpoint['window_halo'],stride=config.get('stride'),blend=config['blend'],
+                    bands=self.checkpoint['bands'],window_size=size,
+                    halo=halo,stride=config.get('stride'),blend=config['blend'],
                     mean=self.mean.cpu().flatten().numpy(),std=self.std.cpu().flatten().numpy(),
                     inputs_normalized=self.checkpoint.get('inputs_normalized',False),device=self.device,
                     use_amp=self.device.type=='cuda' and self.checkpoint.get('amp_enabled',False),

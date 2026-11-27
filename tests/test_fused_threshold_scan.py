@@ -59,9 +59,12 @@ class ScanTests(unittest.TestCase):
                 batch_size=2, epoch=6, validation_inference=dict(stride=8, blend='hann', num_workers=0))
             checkpoints = {}
             for name, epoch in (('six',6), ('seven',7), ('bn',7)):
-                ckpt['epoch'] = epoch
+                current = dict(ckpt, epoch=epoch)
+                if name == 'bn':
+                    current.update(window_size=64, window_halo=16, val_files=['other_grid'],
+                                   validation_inference=dict(ckpt['validation_inference'], window_size=32, halo=8))
                 checkpoints[name] = root / (name+'.pth')
-                torch.save(ckpt, checkpoints[name])
+                torch.save(current, checkpoints[name])
             out = root / 'scan'
             options = dict(checkpoints=checkpoints, thresholds=[.2,.5,.8], output_dir=out, expected_epochs={})
             def load(checkpoint):
@@ -81,6 +84,8 @@ class ScanTests(unittest.TestCase):
             with patch.object(scan, 'load_model', side_effect=load), patch.object(scan, 'iter_scene_predictions', wraps=real_inference) as infer:
                 scan.run_threshold_scan(**options)
                 self.assertEqual(infer.call_count, 5)
+                for call in infer.call_args_list:
+                    self.assertEqual((call.kwargs['window_size'], call.kwargs['halo']), (32, 8))
             with (out/'threshold_metrics.csv').open(encoding='utf-8-sig', newline='') as f:
                 metrics = list(csv.DictReader(f))
             self.assertEqual(len(metrics), 18)

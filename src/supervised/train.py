@@ -27,6 +27,7 @@ from termcolor import cprint
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from supervised.load.sar_scene_dataset import IGNORE_INDEX, SARSceneDataset, merge_scene_manifests
+from supervised.load.scene_windows import inference_window_geometry
 from datasets.dfc_terrain import DFC_TERRAIN_CHANNELS, dfc_terrain_from_checkpoint, dfc_terrain_protocol
 from datasets.speckle import SpeckleFilter
 from datasets.relative_normalization import LOG_REPRESENTATION, RELATIVE_REPRESENTATIONS
@@ -328,10 +329,16 @@ class WaterSegmentationTrainer:
         if self.validation_inference:
             if self.scene_options is None or loss_name not in ('bce', 'ce') or max_samples is not None:
                 raise ValueError('融合验证需要完整整景划分和BCE/CE；不改变Dice的按样本平均口径')
-            core = self.scene_options.get('window_size', 1024)-2*self.scene_options.get('halo',128)
-            stride = self.validation_inference.get('stride', core//2)
-            if not 0 < stride <= core or self.validation_inference.get('blend') not in ('gaussian','hann','constant'):
+            self.val_window_size, self.val_halo = inference_window_geometry(
+                self.validation_inference, self.scene_options.get('window_size', 1024),
+                self.scene_options.get('halo', 128))
+            core = self.val_window_size - 2 * self.val_halo
+            self.val_stride = self.validation_inference.get('stride', core // 2)
+            if (not 0 < self.val_stride <= core
+                    or self.validation_inference.get('blend') not in ('gaussian', 'hann', 'constant')):
                 raise ValueError('融合验证stride需在(0,core]内，blend为gaussian/hann/constant')
+            cprint(f'验证滑窗：window_size={self.val_window_size}，halo={self.val_halo}，'
+                   f'stride={self.val_stride}，blend={self.validation_inference["blend"]}', 'cyan', flush=True)
         self.loader_options = dict(num_workers=0)
         if self.scene_options is not None:
             if self.label_dir.resolve() != (self.image_dir.parent/'labels').resolve():
@@ -927,8 +934,8 @@ class WaterSegmentationTrainer:
             pieces = iter_scene_predictions(self.model,
                 self.dataset.root/'images'/row['split']/row['name'],
                 self.dataset.root/'labels'/row['split']/row['label_name'],
-                bands=self.bands,window_size=self.dataset.window_size,halo=self.dataset.halo,
-                stride=self.validation_inference.get('stride',(self.dataset.window_size-2*self.dataset.halo)//2),
+                bands=self.bands,window_size=self.val_window_size,halo=self.val_halo,
+                stride=self.val_stride,
                 blend=self.validation_inference['blend'],
                 mean=self.mean,std=self.std,inputs_normalized=self.inputs_normalized,
                 device=self.device,use_amp=self.use_amp,batch_size=self.batch_size,
