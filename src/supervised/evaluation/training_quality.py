@@ -10,22 +10,28 @@ import torch
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from supervised.evaluation.metrics import metrics_from_counts
+from utils.raster import sar_quicklook_limits
 from utils.water_presentation import save_water_presentation
 
 
-def save_prediction_figure(image, label, probability, prediction, counts, path, title):
+def save_prediction_figure(image, label, probability, prediction, counts, path, title, *, relative_db_vv=False):
     """每景结束及时回收Figure/Canvas循环引用，避免图件内存跨景累积。"""
     try:
-        _render_prediction_figure(image, label, probability, prediction, counts, path, title)
+        # 归一化地板 0 仍是有效输入，只排除出灰阶估计。
+        display_limits = None
+        if relative_db_vv:
+            display_limits = sar_quicklook_limits(image, np.isfinite(image), 0., (0., 1.))
+        _render_prediction_figure(image, label, probability, prediction, counts, path, title,
+                                  vv_display_limits=display_limits)
         # 保留五联诊断图，另存三联展示图；共用预测，不重新推理。
         path = Path(path)
         save_water_presentation(image, prediction, path.parent.parent / "presentation" / path.name,
-                                title, "Model input band 1")
+                                title, "Model input band 1", vv_display_limits=display_limits)
     finally:
         gc.collect()
 
 
-def _render_prediction_figure(image, label, probability, prediction, counts, path, title):
+def _render_prediction_figure(image, label, probability, prediction, counts, path, title, *, vv_display_limits=None):
     """图像是概览，标题指标来自原生有效像素；未知/未验证位置不冒充背景。"""
     valid = label >= 0
     error = np.zeros((*label.shape, 3), dtype=np.uint8)
@@ -35,14 +41,19 @@ def _render_prediction_figure(image, label, probability, prediction, counts, pat
     error[valid & (label == 1) & (prediction == 0)] = (255, 220, 40)
     fig = Figure(figsize=(21, 5)); FigureCanvasAgg(fig)
     axes = fig.subplots(1, 5)
-    finite = image[np.isfinite(image)]
-    lo, hi = np.percentile(finite, [2, 98]) if finite.size else (0., 1.)
+    if vv_display_limits is None:
+        finite = image[np.isfinite(image)]
+        lo, hi = np.percentile(finite, (2, 98)) if finite.size else (0., 1.)
+        input_caption = "Model input (display P2-P98)"
+    else:
+        lo, hi = vv_display_limits
+        input_caption = "Model input (relative dB VV display)"
     axes[0].imshow(image, interpolation="nearest", interpolation_stage="data", cmap="gray", vmin=lo, vmax=max(hi, lo+1e-6))
     axes[1].imshow(np.ma.masked_where(~valid, label), interpolation="nearest", interpolation_stage="data", cmap="gray_r", vmin=0, vmax=1)
     axes[2].imshow(probability, interpolation="nearest", interpolation_stage="data", cmap="Blues", vmin=0, vmax=1)
     axes[3].imshow(np.ma.masked_where(prediction < 0, prediction), interpolation="nearest", interpolation_stage="data", cmap="gray_r", vmin=0, vmax=1)
     axes[4].imshow(error)
-    for ax, caption in zip(axes, ("Model input (display P2-P98)", "GT: water=1 black", "Water probability", "Raw prediction (threshold=0.5)", "Blue TP / Red FP / Yellow FN")):
+    for ax, caption in zip(axes, (input_caption, "GT: water=1 black", "Water probability", "Raw prediction (threshold=0.5)", "Blue TP / Red FP / Yellow FN")):
         ax.set_title(caption); ax.axis("off")
     m = metrics_from_counts(counts)
     fig.suptitle(f"{title} | native evaluated pixels={m['valid_pixels']:,} | F1={m['f1']:.3f} "
@@ -57,6 +68,8 @@ class ValidationQualityWriter:
     def __init__(self, dataset, indices, folder, epoch, max_side=1200, max_scenes=None):
         self.dataset, self.folder, self.epoch = dataset, Path(folder), epoch
         self.max_side, self.max_scenes = max(1, int(max_side)), max_scenes
+        preprocessing = getattr(dataset, "input_preprocessing", {})
+        self.relative_db_vv = preprocessing.get("output_domain") == "scene_relative_db_p02_p98"
         self.lookup = {dataset.names[int(i)]: int(i) for i in indices} if hasattr(dataset, "windows") else None
         self.current, self.rows, self.counts = None, [], np.zeros(4, dtype=np.int64)
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -156,7 +169,8 @@ class ValidationQualityWriter:
         name = str(self.current).replace("/", "__").replace(chr(92), "__")
         path = self.folder/'figures'/(name+'.png')
         save_prediction_figure(self.image,self.label,self.probability,self.prediction,self.counts,
-                               path,f"Epoch {self.epoch:03d} val | {self.current}")
+                               path,f"Epoch {self.epoch:03d} val | {self.current}",
+                               relative_db_vv=self.relative_db_vv)
         self.rows.append(dict(scene_id=self.current, **metrics_from_counts(self.counts)))
         self.current = None
         # 保存结束即释放上一景概览，不等到下一景数组分配后再替换。

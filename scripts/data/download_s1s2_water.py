@@ -66,7 +66,7 @@ def mirror_index(curl):
     return {entry["rfilename"]: entry for entry in index["siblings"]}
 
 
-def s1_files(index, selected, dem=False):
+def s1_files(index, selected, dem=False, *, dem_only=False):
     """按真实景号配齐 SAR、标签、有效区和元数据，可附加高程。"""
     scenes = {name.split("/")[0] for name in index if "/" in name and name.split("/")[0].isdigit()}
     if not scenes:
@@ -78,8 +78,11 @@ def s1_files(index, selected, dem=False):
     for scene in sorted(set(selected) or scenes, key=int):
         names = [f"sentinel12_s1_{scene}_{layer}.tif" for layer in ("img", "msk", "valid")]
         names.append(f"sentinel12_{scene}_meta.json")
-        if dem:
-            names.append(f"sentinel12_copdem30_{scene}_elevation.tif")
+        elevation = f"sentinel12_copdem30_{scene}_elevation.tif"
+        if dem_only:
+            names = [elevation]
+        elif dem:
+            names.append(elevation)
         for filename in names:
             name = f"{scene}/{filename}"
             if name not in index:
@@ -191,19 +194,23 @@ def main(args):
     parser.add_argument("parts", nargs="*", help="Zenodo 分卷 part1 至 part6，或 catalog；默认全部")
     parser.add_argument("--s1", nargs="*", metavar="景号", help="从镜像按景下载 Sentinel-1；省略景号选取全部")
     parser.add_argument("--dem", action="store_true", help="按景下载时附加 Copernicus 高程")
+    parser.add_argument("--dem-only", action="store_true", help="只校验和续传高程，不扫描本地 SAR、标签及元数据")
     parser.add_argument("--list", action="store_true", help="仅列出所选文件、大小和校验值")
     options = parser.parse_args(args)
     if options.directory is None and not options.list:
         parser.error("请先指定输出目录")
-    if options.s1 is not None and options.parts:
+    by_scene = options.s1 is not None or options.dem_only
+    if by_scene and options.parts:
         parser.error("Zenodo 分卷与 --s1 需分开下载")
     if options.dem and options.s1 is None:
         parser.error("--dem 需要 --s1")
+    if options.dem and options.dem_only:
+        parser.error("--dem 与 --dem-only 请选其一")
     curl = shutil.which("curl.exe" if os.name == "nt" else "curl")
-    if not curl and (options.s1 is not None or not options.list):
+    if not curl and (by_scene or not options.list):
         raise RuntimeError("未找到 curl，请先安装 curl 并加入 PATH。")
-    files = (zenodo_files(options.parts) if options.s1 is None
-             else s1_files(mirror_index(curl), options.s1, options.dem))
+    files = (s1_files(mirror_index(curl), options.s1 or [], options.dem, dem_only=options.dem_only)
+             if by_scene else zenodo_files(options.parts))
     total = sum(item.size for item in files)
     if options.list:
         for item in files:
@@ -212,7 +219,7 @@ def main(args):
         return
     directory = options.directory.expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    source = "Zenodo" if options.s1 is None else f"Hugging Face {HF_REVISION[:8]}"
+    source = f"Hugging Face {HF_REVISION[:8]}" if by_scene else "Zenodo"
     print(f"S1S2-Water v1.0.1  {source}  {directory}\n共 {len(files)} 个文件，{total/1e9:.2f} GB", flush=True)
     with download_lock(directory):
         for i, item in enumerate(files, 1):

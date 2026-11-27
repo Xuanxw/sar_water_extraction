@@ -23,6 +23,14 @@ from utils.files import write_json
 PROFILE_METHOD_VERSION='radar_profile_zero_doppler_v3'
 
 
+def profile_method_version(options):
+    """返回本景地形记录的算法标识，供掩膜生成和断点续跑共同使用。"""
+    method = options.get('layover_method', PROFILE_METHOD_VERSION)
+    if method not in (PROFILE_METHOD_VERSION, 'bc_azimuth_050'):
+        raise ValueError(f'未知的剖面叠掩算法：{method}')
+    return method
+
+
 def visibility_transition_band(shadow, layover, radius=1):
     """在计算网格标记类别转折带，含0/1/255交界；稳定核心不扩张、不填洞。
 
@@ -236,6 +244,9 @@ def generate_profile_terrain(reference, config, folder):
     """
     terrain_started = perf_counter()
     folder=Path(folder);paths=config['paths'];options=config['org']['profile_geometry']
+    if profile_method_version(options) == 'bc_azimuth_050':
+        from thres_segmentation.bc_layover import generate_bc_layover_terrain
+        return generate_bc_layover_terrain(reference, config, folder)
     metadata=json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
     # XML已由本景输入解析流程保存在成果目录，避免依赖原ZIP是否仍在原位置。
     identifier=Path(metadata['source_image']).stem

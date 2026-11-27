@@ -9,12 +9,14 @@ from matplotlib.patches import Rectangle
 from scipy.ndimage import binary_erosion
 
 
-def save_water_presentation(image, prediction, path, title, input_caption="SAR input band 1"):
+def save_water_presentation(image, prediction, path, title, input_caption="SAR input band 1",
+                            *, vv_display_limits=None):
     """输出灰度底图、蓝色水体叠加、黄色框局部图。
 
     image/prediction为同网格H×W数组；水体=1，非水体=0，其余预测值未知。
     输入可以是训练概览，不能据此恢复原始细节。最长边限制1200像素，
     放大框只根据预测边缘选择，不使用真值挑选好案例。无地理信息时不画指北针或米制比例尺。
+    vv_display_limits 为相对 dB 归一化 VV 的可选灰阶上下限，单位为模型输入值。
     """
     step = max(1, int(np.ceil(max(image.shape) / 1200)))
     sar = np.asarray(image[::step, ::step], dtype=np.float32)
@@ -22,8 +24,13 @@ def save_water_presentation(image, prediction, path, title, input_caption="SAR i
     valid = np.isfinite(sar)
     known = valid & np.isin(pred, (0, 1))
     water = known & (pred == 1)
-    values = sar[valid]
-    low, high = np.percentile(values, (2, 98)) if values.size else (0., 1.)
+    if vv_display_limits is None:
+        values = sar[valid]
+        low, high = np.percentile(values, (2, 98)) if values.size else (0., 1.)
+        stretch = "P2-P98 display only"
+    else:
+        low, high = vv_display_limits
+        stretch = "Relative dB VV display only"
     gray = np.zeros(sar.shape, dtype=np.float32)
     gray[valid] = np.clip((sar[valid] - low) / max(float(high-low), 1e-6), 0, 1)
     background = np.repeat((gray * 255).astype(np.uint8)[..., None], 3, axis=2)
@@ -61,7 +68,7 @@ def save_water_presentation(image, prediction, path, title, input_caption="SAR i
         figure.suptitle(title, fontsize=11, y=.97)
         note = " | No predicted water" if not water.any() else ""
         figure.text(.5, .055,
-                    "P2-P98 display only | Overview crop; not native-resolution detail | "
+                    f"{stretch} | Overview crop; not native-resolution detail | "
                     "Black: no SAR data; unknown prediction left uncolored" + note,
                     ha="center", fontsize=9)
         figure.subplots_adjust(left=.015, right=.985, bottom=.11, top=.90, wspace=.025)

@@ -483,11 +483,11 @@ def _run_org_scenes(config,log):
                     if method!=TERRAIN_METHOD_VERSION:
                         for stage in ('mask','vector','quality','preview','complete'):progress.state['stages'].pop(stage,None)
                 elif options['postprocess'].get('terrain_method')=='radar_profiles':
-                    from thres_segmentation.profile_terrain import PROFILE_METHOD_VERSION
+                    from thres_segmentation.profile_terrain import profile_method_version
                     terrain_record=folder/'terrain_geometry.json'
                     method=json.loads(terrain_record.read_text(encoding='utf-8')).get('method') if terrain_record.exists() else None
                     # 显式同参数对照可沿用冻结旧几何；不要在每次续跑重复清空它的下游。
-                    if method!=PROFILE_METHOD_VERSION and not progress.completed('reference_terrain'):
+                    if method!=profile_method_version(options.get('profile_geometry', {})) and not progress.completed('reference_terrain'):
                         for stage in ('mask','vector','quality','preview','complete'):progress.state['stages'].pop(stage,None)
                 if progress.completed('complete'):
                     scene_stage['status']='reused'

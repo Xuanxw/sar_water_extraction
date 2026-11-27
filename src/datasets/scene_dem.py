@@ -24,16 +24,23 @@ def _file_state(path):
     return [path.name, stat.st_size, stat.st_mtime_ns]
 
 
-def _write_input_vrt(pending, destination, vv, elevation, grid):
-    """VRT 引用原 VV 和米制 DEM；不复制像元，两个通道均以 NaN 表示无效。"""
+def _write_input_vrt(pending, destination, vv, auxiliary, grid, *,
+                     aux_description="Copernicus GLO-30 elevation (m)", aux_transform=None):
+    """引用原 VV 与地形栅格；可在读取第二波段时应用线性缩放，NaN 保持无效。"""
     xml = ET.Element("VRTDataset", rasterXSize=str(grid.width), rasterYSize=str(grid.height))
     ET.SubElement(xml, "SRS").text = grid.crs.to_wkt()
     ET.SubElement(xml, "GeoTransform").text = ",".join(map(str, grid.transform.to_gdal()))
-    for band, path, description in ((1, vv, "VV"), (2, elevation, "Copernicus GLO-30 elevation (m)")):
+    for band, path, description in ((1, vv, "VV"), (2, auxiliary, aux_description)):
         channel = ET.SubElement(xml, "VRTRasterBand", dataType="Float32", band=str(band))
         ET.SubElement(channel, "Description").text = description
         ET.SubElement(channel, "NoDataValue").text = "nan"
-        src = ET.SubElement(channel, "SimpleSource")
+        linear = aux_transform if band == 2 else None
+        src = ET.SubElement(channel, "ComplexSource" if linear is not None else "SimpleSource")
+        if linear is not None:
+            ratio, offset = linear
+            ET.SubElement(src, "NODATA").text = "nan"
+            ET.SubElement(src, "ScaleRatio").text = str(ratio)
+            ET.SubElement(src, "ScaleOffset").text = str(offset)
         name = relative_source(path, destination)
         ET.SubElement(src, "SourceFilename", relativeToVRT="0" if Path(name).is_absolute() else "1").text = name
         ET.SubElement(src, "SourceBand").text = "1"

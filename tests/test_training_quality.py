@@ -6,6 +6,7 @@ import numpy as np
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import torch
@@ -19,6 +20,29 @@ post_process.configure(Path(__file__).resolve().parents[1] / 'configs/post_proce
 
 
 class TrainingQualityTests(unittest.TestCase):
+    def test_relative_db_vv_uses_shared_display_stretch_only(self):
+        vv = torch.tensor([[0., 0., 0., .75], [.81, .88, .95, .01]])
+        valid = torch.ones_like(vv, dtype=torch.bool)
+        valid[-1, -1] = False
+        label = torch.zeros_like(vv, dtype=torch.long)
+        label[~valid] = -1
+        expected = np.percentile([.75, .81, .88, .95], (5, 95))
+        with TemporaryDirectory() as temp, patch.object(quality, '_render_prediction_figure') as figure, \
+                patch.object(quality, 'save_water_presentation') as presentation:
+            for domain in ('scene_relative_db_p02_p98', 'scene_p02_p98'):
+                dataset = SimpleNamespace(input_preprocessing={'output_domain': domain})
+                writer = quality.ValidationQualityWriter(dataset, [], Path(temp)/domain, 1)
+                writer.add('scene', vv, label, vv, label, valid)
+                writer.finish()
+                limits = figure.call_args.kwargs['vv_display_limits']
+                self.assertEqual(limits, presentation.call_args.kwargs['vv_display_limits'])
+                if domain == 'scene_relative_db_p02_p98':
+                    np.testing.assert_allclose(limits, expected, atol=1e-7)
+                else:
+                    self.assertIsNone(limits)
+                np.testing.assert_array_equal(figure.call_args.args[0], np.where(valid, vv, np.nan))
+                np.testing.assert_array_equal(figure.call_args.args[4], [7, 0, 0, 0])
+
     def test_shared_counts_and_sampled_copy_match_full_copy(self):
         # 不整除的尾块、未知像素和不落在概览采样点上的小块，都必须与旧输出相同。
         with TemporaryDirectory() as temp:

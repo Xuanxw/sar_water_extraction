@@ -28,7 +28,11 @@ def dfc_terrain_from_checkpoint(checkpoint):
     """读取新输入协议；旧权重继续使用原有通道和 VV 变换。"""
     protocol = checkpoint.get("dfc_terrain")
     if protocol is None:
-        if "SLOPE" in (checkpoint.get("input_channels") or ()):
+        receipt = checkpoint.get("input_preprocessing") or {}
+        channels = tuple(checkpoint.get("input_channels") or ())
+        if channels == ("VV", "SLOPE") and receipt.get("stage") == "normalized" and receipt.get("slope"):
+            return None  # TYSAR 整景坡度已离线准备；DFC 的三通道按窗变换不适用。
+        if "SLOPE" in channels:
             raise ValueError("坡度通道检查点缺少 DFC 地形输入协议")
         return None
     if not isinstance(protocol, dict):
@@ -58,9 +62,8 @@ def validate_dfc_terrain_grid(dataset):
         raise ValueError("DFC 坡度需要相互正交的 10 m 像元")
 
 
-def _neighbours(valid, axis):
+def _neighbours(valid, axis, radius=DFC_SLOPE_RADIUS):
     """返回负、正方向从当前像元到差分端点之间的连续有效域。"""
-    radius = DFC_SLOPE_RADIUS
     mask = np.moveaxis(valid, axis, -1)
     negative = mask.copy()
     positive = mask.copy()
@@ -72,21 +75,30 @@ def _neighbours(valid, axis):
     return np.moveaxis(negative, -1, axis), np.moveaxis(positive, -1, axis)
 
 
-def _gradient(height, axis, negative, positive):
-    """双侧均有效时跨 60 m，单侧有效时从中心跨 30 m。"""
-    radius = DFC_SLOPE_RADIUS
+def _gradient(height, axis, negative, positive, radius=DFC_SLOPE_RADIUS, spacing=DFC_GRID_SPACING_M):
+    """双侧有效做中心差分，单侧有效做单侧差分；spacing 为米/像元。"""
     z = np.moveaxis(height, axis, -1)
     padded = np.pad(z, ((0, 0), (radius, radius)))
     before = np.moveaxis(padded[:, :z.shape[1]], -1, axis)
     after = np.moveaxis(padded[:, 2 * radius:], -1, axis)
     rise = np.where(positive, after, height) - np.where(negative, before, height)
-    run = (negative.astype(np.float32) + positive) * (radius * DFC_GRID_SPACING_M)
+    run = (negative.astype(np.float32) + positive) * (radius * spacing)
     return np.divide(rise, run, out=np.zeros_like(height), where=run > 0)
 
 
 def _support(valid, neighbours):
     rows, cols = neighbours
     return valid & (rows[0] | rows[1]) & (cols[0] | cols[1])
+
+
+def slope_degrees(height, spacings, radii):
+    """米制高程转坡度角（度），行列均需连续邻域支撑，无支撑为 NaN。"""
+    valid = np.isfinite(height)
+    neighbours = tuple(_neighbours(valid, axis, radius) for axis, radius in enumerate(radii))
+    common = _support(valid, neighbours)
+    data = np.where(valid, height, 0.)
+    dy, dx = (_gradient(data, axis, *neighbours[axis], radii[axis], spacings[axis]) for axis in (0, 1))
+    return np.where(common, np.degrees(np.arctan(np.hypot(dx, dy))), np.nan)
 
 
 def dfc_terrain_valid_mask(valid):

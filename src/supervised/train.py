@@ -343,12 +343,30 @@ class WaterSegmentationTrainer:
             if workers:
                 self.loader_options.update(persistent_workers=True, prefetch_factor=2)
             manifests = options.pop('manifest_paths', None)
-            if require_bc_power:
+            dataset_source = options.pop('dataset_source', 'bc')
+            if dataset_source not in ('bc', 's1s2_water'):
+                raise ValueError(f'未知的整景输入来源：{dataset_source}')
+            if dataset_source == 's1s2_water':
+                from datasets.s1s2_water import VV_DEM_PROTOCOL
+
+                if self.model_info.get('input_channels') != ('VV', 'DEM'):
+                    raise ValueError('S1S2-Water 整景训练需要 VV＋DEM 两个通道')
+                for manifest in manifests or [self.image_dir.parent/'split_manifest.csv']:
+                    receipt = Path(manifest).parent/'preprocessing.json'
+                    record = json.loads(receipt.read_text(encoding='utf-8')) if receipt.is_file() else {}
+                    if record.get('complete') is not True or any(record.get(k) != v for k, v in VV_DEM_PROTOCOL.items()):
+                        raise ValueError(f'请先运行 scripts/data/prepare_s1s2_water.py 准备数据：{receipt}')
+            elif require_bc_power:
                 # 在建立窗口索引前核查每个清单，避免用旧幅度统计启动功率实验。
                 for manifest in manifests or [self.image_dir.parent/'split_manifest.csv']:
                     receipt = Path(manifest).parent/'preprocessing.json'
                     record = json.loads(receipt.read_text(encoding='utf-8')) if receipt.is_file() else {}
                     expected_stage = 'vv_dem' if self.model_info.get('input_channels') == ('VV', 'DEM') else 'normalized'
+                    slope_input = self.model_info.get('input_channels') == ('VV', 'SLOPE')
+                    if slope_input and (record.get('input_channels') != ['VV', 'SLOPE'] or not record.get('slope')):
+                        raise ValueError(f'VV＋坡度训练需要 MODE=slope 的成果：{receipt}')
+                    if record.get('slope') and not slope_input:
+                        raise ValueError(f'该清单需要 VV＋坡度输入：{receipt}')
                     if ((record.get('bc_org_domain'), record.get('input_domain'), record.get('stage'),
                          record.get('complete')) != ('intensity','intensity',expected_stage,True)
                             or record.get('output_domain') not in ('standardized', 'scene_p02_p98', 'scene_relative_db_p02_p98')):
@@ -362,9 +380,14 @@ class WaterSegmentationTrainer:
             self.inputs_normalized = self.dataset.inputs_normalized
             self.input_preprocessing = self.dataset.input_preprocessing
             if self.inputs_normalized:
-                self.model_info['input_representation'] = 'offline_normalized_GeoTIFF; no_train_preprocessing'
+                self.model_info['input_representation'] = (
+                    'offline_normalized_VV + train_only_slope_zscore' if self.input_preprocessing.get('slope')
+                    else 'offline_normalized_GeoTIFF; no_train_preprocessing')
             if self.dataset.scene_dem:
-                self.model_info['input_representation'] = 'offline_normalized_VV + Copernicus_GLO30_m; train_only_DEM_zscore'
+                if dataset_source == 's1s2_water':
+                    self.model_info['input_representation'] = 'S1_dB_fixed_range_VV + Copernicus_GLO30_m; train_only_DEM_zscore'
+                else:
+                    self.model_info['input_representation'] = 'offline_normalized_VV + Copernicus_GLO30_m; train_only_DEM_zscore'
             if require_normalized and not (self.inputs_normalized or self.dataset.scene_dem):
                 raise ValueError('正式训练需使用离线归一化影像；先运行image_process.py的preprocess或normalize模式')
             split_path = self.dataset.manifest_path
@@ -382,8 +405,10 @@ class WaterSegmentationTrainer:
                                    validation_protocol=(f"overlap_{self.validation_inference['blend']}_logits; unique_final_pixels; isolated_validation_rng" if self.validation_inference else 'nonoverlap_core_all_labeled_pixels; halo_context; no resize'),
                                    window_cache_key=self.dataset.cache_key,
                                    loader_workers=workers, loader_prefetch=2 if workers else 0,
-                                   normalization_protocol=('all_valid_training_scene_DEM_pixels' if self.dataset.scene_dem
-                                                           else 'fixed_training_windows_estimate'),
+                                   normalization_protocol=(
+                                       'all_valid_training_scene_slope_pixels' if self.input_preprocessing.get('slope')
+                                       else 'all_valid_training_scene_DEM_pixels' if self.dataset.scene_dem
+                                       else 'fixed_training_windows_estimate'),
                                    normalization_windows_per_scene=self.dataset.normalization_windows,
                                    train_windows_per_epoch=self.windows_per_epoch,
                                    evaluation_scope='smoke_window_subset' if max_samples is not None else 'all_active_labeled_scene_cores')
@@ -1294,7 +1319,15 @@ def create_trainer(method=None):
     bands = tuple(POLARIZATION_BANDS[name] for name in POLARIZATIONS)
     input_channels = POLARIZATIONS
     terrain_input = CONFIG["data"].get("DFC_TERRAIN_INPUT")
-    if PATCH_REPRESENTATION in ("vv_rank_dem_m", *RELATIVE_REPRESENTATIONS):
+    slope_band = CONFIG["data"].get("SLOPE_BAND")
+    if slope_band is not None:
+        if DATA_LAYOUT != "full_scene" or POLARIZATIONS != ("VV",) or bands != (1,) or DEM_BAND is not None:
+            raise ValueError("整景坡度训练仅接受 VV=1、SLOPE_BAND=2")
+        if type(slope_band) is not int or slope_band != 2 or (MANIFEST_PATHS and len(MANIFEST_PATHS) != 1):
+            raise ValueError("整景坡度训练需要第 2 波段坡度和一份完整坡度清单")
+        bands += (slope_band,)
+        input_channels += ("SLOPE",)
+    elif PATCH_REPRESENTATION in ("vv_rank_dem_m", *RELATIVE_REPRESENTATIONS):
         if DATA_LAYOUT != "patch" or POLARIZATIONS != ("VV",):
             raise ValueError(f"{PATCH_REPRESENTATION} 需要 patch 布局并选择 VV 极化")
         if type(DEM_BAND) is not int or DEM_BAND < 1 or DEM_BAND in bands:
@@ -1303,7 +1336,7 @@ def create_trainer(method=None):
         input_channels += ("DEM",)
     elif DEM_BAND is not None and DATA_LAYOUT == "full_scene":
         if POLARIZATIONS != ("VV",) or bands != (1,) or type(DEM_BAND) is not int or DEM_BAND != 2:
-            raise ValueError("天仪整景 DEM 模式使用 VV=1、DEM_BAND=2 的 MODE=dem 成果")
+            raise ValueError("整景 VV＋DEM 模式需要 VV=1 和 DEM_BAND=2")
         bands += (DEM_BAND,)
         input_channels += ("DEM",)
     elif DEM_BAND is not None:
@@ -1489,7 +1522,9 @@ def create_trainer(method=None):
         hard_sample_ratio=HARD_SAMPLE_RATIO, hard_pool_ratio=HARD_POOL_RATIO,
         low_water_pool_ratio=LOW_WATER_POOL_RATIO,
         head_loss_weights=head_loss_weights,
-        scene_options=dict(SCENE_OPTIONS, manifest_paths=MANIFEST_PATHS) if DATA_LAYOUT == "full_scene" else None,
+        scene_options=(dict(SCENE_OPTIONS, manifest_paths=MANIFEST_PATHS,
+                            dataset_source=CONFIG["data"].get("SCENE_SOURCE", "bc"))
+                       if DATA_LAYOUT == "full_scene" else None),
         class_weight_mode=CLASS_WEIGHT_MODE,
         resume_checkpoint=RESUME_CHECKPOINT,
         training_extension=CONFIG['training'].get('EXTENSION'),

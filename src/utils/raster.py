@@ -4,6 +4,15 @@ import numpy as np
 from rasterio.windows import Window
 
 
+def sar_quicklook_limits(values, valid, floor, fallback):
+    """用高于显示下限的有效概览像元估计灰阶 P05/P95，单位与输入相同。"""
+    samples = values[valid & (values > floor)]
+    if not samples.size:
+        return fallback
+    low, high = map(float, np.percentile(samples, (5, 95)))
+    return (low, high) if high > low else fallback
+
+
 def file_percentiles(path, count, percentiles, *, transform=None):
     """对临时文件中的有效 float32 值就地求分位数，返回 float64。
 

@@ -78,6 +78,8 @@ class S1S2DownloadTests(unittest.TestCase):
         files = download.s1_files(index, ["59", "59"])
         self.assertEqual(len(files), 4)
         self.assertEqual(len(download.s1_files(index, [], dem=True)), 5)
+        elevations = download.s1_files(index, [], dem_only=True)
+        self.assertEqual([item.name for item in elevations], ["59/sentinel12_copdem30_59_elevation.tif"])
         with self.assertRaises(ValueError):
             download.s1_files(index, ["2"])
         with TemporaryDirectory() as temp:

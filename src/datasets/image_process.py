@@ -45,7 +45,7 @@ from datasets.relative_normalization import LOG_POWER_FLOOR, relative_log10_powe
 from datasets.speckle import SpeckleFilter
 from datasets.manifest_paths import source_path, relative_source, manifest_fingerprint, write_relative_manifest
 from supervised.load.sar_scene_dataset import SARSceneDataset
-from utils.raster import file_percentiles, windows
+from utils.raster import file_percentiles, sar_quicklook_limits, windows
 
 # 参数统一在YAML维护；以下只将配置绑定到现有函数使用的变量。
 from configuration import load_yaml, config_argument
@@ -84,7 +84,7 @@ def configure(config_path):
         raise ValueError("NORMALIZATION_METHOD 可选 zscore、scene_p02_p98 或 scene_relative_db_p02_p98")
     if MODE in ('dem', 'all') and CONFIG["paths"].get("DEM_TILE_DIR") is None:
         raise ValueError(f"MODE={MODE} 需要在 paths.DEM_TILE_DIR 指定本地 Copernicus GLO-30 瓦片目录")
-    if MODE == 'dem':
+    if MODE in ('dem', 'slope'):
         return
     SPLIT_CSV = CONFIG["paths"]["SPLIT_CSV"]
     PREPARE_BATCH = CONFIG["run"]["PREPARE_BATCH"]
@@ -1265,15 +1265,6 @@ def _process_stage(stage):
         raise
 
 
-def sar_quicklook_limits(values, valid, floor, fallback):
-    """从高于显示下限的有效概览像元估计灰阶 P05/P95，单位与输入相同。"""
-    samples = values[valid & (values > floor)]
-    if not samples.size:
-        return fallback
-    low, high = map(float, np.percentile(samples, (5, 95)))
-    return (low, high) if high > low else fallback
-
-
 def export_relative_db_scene(path, figure, metadata):
     """在同一整景网格生成相对 dB、[0,1] VV、米制高程的三联概览。"""
     from matplotlib import colormaps
@@ -1505,6 +1496,13 @@ def main(config_path=None):
     print(f"影像处理配置：{CONFIG_PATH}；模式：{MODE}", flush=True)
     if MODE == 'dem':
         prepare_dem_stage()
+    elif MODE == 'slope':
+        from datasets.scene_slope import prepare_scene_slopes
+
+        vv = stage_root("normalized")
+        processing = CONFIG["processing"]
+        prepare_scene_slopes(vv.with_name(vv.name + "_vv_dem"), vv.with_name(vv.name + "_vv_slope"),
+                             CONFIG["paths"]["WINDOW_CACHE_DIR"], processing["WINDOW_SIZE"], processing["HALO"])
     elif MODE == 'labels':
         prepare_labels(OUTPUT_DIR, READ_WINDOW_SIZE)
     elif MODE in ('prepare','split','inspect'):
@@ -1539,7 +1537,7 @@ def main(config_path=None):
     elif MODE == 'quicklook':
         export_quicklooks()
     else:
-        raise ValueError('MODE选dem/all/prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook')
+        raise ValueError('MODE选dem/slope/all/prepare/labels/split/inspect/radiometry/calibrate/filter/normalize/preprocess/quicklook')
 
 
 if __name__ == '__main__':
