@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 import rasterio
+from filelock import FileLock
 from rasterio.windows import Window
 import torch
 from torch.utils.data import Dataset
@@ -109,48 +110,55 @@ class SARSceneDataset(Dataset):
         self.cache_key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()[:20]
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         cache = self.cache_dir/f'windows_{self.cache_key}.npz'
-        if _prepared_windows is not None and not cache.exists():
-            # 合并已准备好的窗口索引，只调整景编号，不重新扫描整幅标签。
-            pending = cache.with_suffix('.partial')
-            with pending.open('wb') as stream:
-                np.savez_compressed(stream, windows=_prepared_windows)
-            pending.replace(cache)
-        if cache.exists():
-            with np.load(cache) as data:
-                self.windows = data['windows']
-            print(f'复用窗口索引：{len(self.windows)}个窗口', flush=True)
-        else:
-            if require_prepared:
+        if not cache.exists():
+            if require_prepared and _prepared_windows is None and not (self.inputs_normalized or self.scene_dem):
                 raise FileNotFoundError('缺少窗口索引，请先运行 python src/datasets/image_process.py <配置.yaml>')
-            records = []
-            for sid, r in enumerate(self.scenes):
-                with rasterio.open(self.root/'labels'/r['split']/r['label_name']) as src:
-                    count = 0
-                    # 顺序条带读取，减少逐小窗GDAL调用和同一压缩块的重复解码。
-                    for top in range(0, src.height, self.core_size):
-                        h = min(self.core_size, src.height-top)
-                        stripe = src.read(1, window=Window(0, top, src.width, h))
-                        for left in range(0, src.width, self.core_size):
-                            w = min(self.core_size, src.width-left)
-                            y = stripe[:, left:left+w]
-                            water, background = int((y == 1).sum()), int((y == 0).sum())
-                            if water + background:
-                                records.append((sid, top, left, h, w, water, background))
-                                count += water + background
-                    if count != int(r['water_pixels']) + int(r['background_pixels']):
-                        raise ValueError(f"标签计数与准备清单不一致：{r['name']}")
-                if (sid+1) % 25 == 0 or sid+1 == len(self.scenes):
-                    print(f'标签窗口索引：{sid+1}/{len(self.scenes)}景；{len(records)}个窗口', flush=True)
-            self.windows = np.asarray(records, dtype=np.int64).reshape(-1, 7)
-            pending = cache.with_suffix('.partial')
-            with pending.open('wb') as stream:
-                np.savez_compressed(stream, windows=self.windows)
-            pending.replace(cache)
+            # 已完整发布的数据可按新训练窗口重建索引。锁只覆盖同一缓存文件的生成。
+            print(f'检查训练窗口索引：窗口 {self.window_size}，halo {self.halo}，缓存 {cache}', flush=True)
+            with FileLock(cache.with_suffix('.lock')):
+                if not cache.exists():
+                    if _prepared_windows is None:
+                        index = self._build_window_index()
+                    else:
+                        # 合并已准备好的窗口，不重复扫描标签。
+                        index = _prepared_windows
+                    pending = cache.with_suffix('.partial')
+                    with pending.open('wb') as stream:
+                        np.savez_compressed(stream, windows=index)
+                    pending.replace(cache)
+                    print(f'已保存新窗口索引：{cache}', flush=True)
+        with np.load(cache) as data:
+            self.windows = data['windows']
+        print(f'读取窗口索引：{len(self.windows)}个窗口', flush=True)
         self.names = [f"{self.scenes[int(sid)]['scene_id']}_r{top}_c{left}" for sid, top, left, *_ in self.windows]
         self.train_ids = [i for i, r in enumerate(self.windows) if self.scenes[int(r[0])]['split'] == 'train']
         self.val_ids = [i for i, r in enumerate(self.windows) if self.scenes[int(r[0])]['split'] == 'val']
         if not self.train_ids or not self.val_ids:
             raise ValueError('train/val均需有已标注窗口')
+
+    def _build_window_index(self):
+        """只读取标签并索引核心区。位置和尺寸以像元为单位，忽略不含 0/1 标签的窗口。"""
+        records = []
+        for sid, row in enumerate(self.scenes):
+            with rasterio.open(self.root/'labels'/row['split']/row['label_name']) as src:
+                count = 0
+                # 顺序读取标签条带，减少同一压缩块的重复解码。
+                for top in range(0, src.height, self.core_size):
+                    height = min(self.core_size, src.height - top)
+                    stripe = src.read(1, window=Window(0, top, src.width, height))
+                    for left in range(0, src.width, self.core_size):
+                        width = min(self.core_size, src.width - left)
+                        values = stripe[:, left:left+width]
+                        water, background = int((values == 1).sum()), int((values == 0).sum())
+                        if water + background:
+                            records.append((sid, top, left, height, width, water, background))
+                            count += water + background
+                if count != int(row['water_pixels']) + int(row['background_pixels']):
+                    raise ValueError(f"标签计数与准备清单不一致：{row['name']}")
+            completed = sid + 1
+            if completed % 25 == 0 or completed == len(self.scenes):
+                print(f'标签窗口索引：{completed}/{len(self.scenes)}景；{len(records)}个窗口', flush=True)
+        return np.asarray(records, dtype=np.int64).reshape(-1, 7)
 
     def __len__(self):
         return len(self.windows)

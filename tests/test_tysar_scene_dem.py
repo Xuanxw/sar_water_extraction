@@ -87,13 +87,13 @@ class SceneDEMTests(unittest.TestCase):
             cache = base/"cache"
             cfg = dict(paths=dict(DATA_ROOT=str(base), NORMALIZED_ROOT="normalized", DEM_TILE_DIR="tiles",
                                   WINDOW_CACHE_DIR="cache"), run=dict(MODE="dem"),
-                       processing=dict(NORMALIZATION_METHOD="scene_p02_p98", WINDOW_SIZE=64, HALO=8))
+                       processing=dict(NORMALIZATION_METHOD="scene_p02_p98", WINDOW_SIZE=96, HALO=8))
             config = base/"dem.yaml"
             config.write_text(yaml.safe_dump(cfg), encoding="utf-8")
             image_process.main(config)
             derived = vv_root.with_name(vv_root.name + "_vv_dem")
             good = np.isfinite(vv) & (heights != -9999)
-            ds = SARSceneDataset(derived, cache, bands=(1, 2), window_size=64, halo=8, require_prepared=True)
+            ds = SARSceneDataset(derived, cache, bands=(1, 2), window_size=96, halo=8, require_prepared=True)
             mean, std, _ = ds.normalization(ds.train_ids)
             np.testing.assert_allclose(mean, [0, heights[good].mean()], rtol=1e-6)
             np.testing.assert_allclose(std, [1, heights[good].std()], rtol=1e-6)
@@ -118,10 +118,13 @@ class SceneDEMTests(unittest.TestCase):
                                 MANIFEST_PATHS=[str(ds.manifest_path)], OUTPUT_DIR=str(base/"run"),
                                 OUTPUT_ROOT=str(base/"runs"), WINDOW_CACHE_DIR=str(cache))
             cfg["model"]["PRETRAINED"] = False
+            # 只缩小训练网格，旧预处理成果只有 96/8 的索引。
             cfg["data"]["SCENE_OPTIONS"].update(num_workers=0, window_size=64, halo=8)
-            cfg["validation_inference"].update(stride=24, num_workers=0)
+            cfg["validation_inference"].update(window_size=96, halo=8, stride=24, num_workers=0)
             cfg["training"].update(EPOCHS=1, CPU_THREADS=1)
             cfg["quality"].update(SAVE_VALIDATION_FIGURES=False, SAVE_FEATURE_MAPS=False)
+            previous_cache = set(cache.glob('windows_*.npz'))
+            product_stamps = {p: p.stat().st_mtime_ns for p in derived.rglob('*') if p.is_file()}
             config = base/"train.yaml"
             config.write_text(yaml.safe_dump(cfg), encoding="utf-8")
             previous = train.CONFIG_PATH or REPO/"configs/train.yaml"
@@ -130,6 +133,10 @@ class SceneDEMTests(unittest.TestCase):
                 train.configure(config)
                 trainer = train.create_trainer()
                 try:
+                    current_cache = set(cache.glob('windows_*.npz'))
+                    self.assertLess(previous_cache, current_cache)
+                    self.assertEqual(current_cache - previous_cache, {cache/f'windows_{trainer.dataset.cache_key}.npz'})
+                    self.assertEqual(product_stamps, {p: p.stat().st_mtime_ns for p in derived.rglob('*') if p.is_file()})
                     trainer.train()
                     self.assertEqual(trainer.phase_metrics["val"]["valid_pixels"], int(good.sum()))
                     ckpt = torch.load(trainer.run_dir/"last.pth", weights_only=True, map_location="cpu")
@@ -142,6 +149,9 @@ class SceneDEMTests(unittest.TestCase):
                     self.assertEqual(source_path(saved["dem_path"], backup), result)
                 finally:
                     trainer.dataset.close()
+            with patch('supervised.load.sar_scene_dataset.rasterio.open', side_effect=AssertionError('应复用新索引')):
+                cached = SARSceneDataset(derived, cache, bands=(1, 2), window_size=64, halo=8, require_prepared=True)
+                cached.close()
 
     def test_dem_entry_downloads_only_missing_tiles_then_reuses_scene(self):
         with TemporaryDirectory() as tmp, patch.dict(vars(image_process)):
